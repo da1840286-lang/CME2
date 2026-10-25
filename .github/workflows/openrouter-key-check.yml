@@ -1,0 +1,82 @@
+
+name: OpenRouter key check
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check-key:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check GitHub secret with OpenRouter
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import sys
+          import urllib.error
+          import urllib.request
+
+          key = os.environ.get("OPENROUTER_API_KEY", "").strip()
+          if not key:
+              print("SECRET_STATUS=MISSING")
+              sys.exit(1)
+
+          req = urllib.request.Request(
+              "https://openrouter.ai/api/v1/key",
+              headers={"Authorization": f"Bearer {key}"},
+              method="GET",
+          )
+
+          try:
+              with urllib.request.urlopen(req, timeout=20) as response:
+                  status = response.status
+                  headers = response.headers
+                  raw = response.read()
+          except urllib.error.HTTPError as e:
+              status = e.code
+              headers = e.headers
+              raw = e.read()
+          except Exception as e:
+              print("REQUEST_ERROR=" + type(e).__name__)
+              sys.exit(2)
+
+          print("HTTP_STATUS=" + str(status))
+          for name in (
+              "X-RateLimit-Limit",
+              "X-RateLimit-Remaining",
+              "X-RateLimit-Reset",
+              "Retry-After",
+          ):
+              if headers.get(name):
+                  print(name + "=" + headers.get(name))
+
+          try:
+              payload = json.loads(raw)
+          except Exception:
+              payload = {}
+
+          if status == 200:
+              data = payload.get("data") or {}
+              print("AUTHENTICATION=OK")
+              print("KEY_LABEL_PRESENT=" + str(bool(data.get("label"))))
+              print("LIMIT_REMAINING=" + str(data.get("limit_remaining")))
+              print("USAGE_DAILY=" + str(data.get("usage_daily")))
+              free = data.get("free_model_daily_requests") or {}
+              print("FREE_REQUESTS_USED=" + str(free.get("used")))
+              print("FREE_REQUESTS_LIMIT=" + str(free.get("limit")))
+              print("FREE_REQUESTS_REMAINING=" + str(free.get("remaining")))
+              sys.exit(0)
+
+          print("AUTHENTICATION=NOT_CONFIRMED")
+          err = payload.get("error") or {}
+          if isinstance(err, dict):
+              print("ERROR_CODE=" + str(err.get("code")))
+              print("ERROR_MESSAGE=" + str(err.get("message", "")))
+          sys.exit(1)
+          PY
