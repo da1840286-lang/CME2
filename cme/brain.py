@@ -672,13 +672,16 @@ def _trace_excerpt(value, limit: int = 3500) -> str:
     return text if len(text) <= limit else text[:limit] + f"...[+{len(text) - limit} chars]"
 
 
-def request_transfer_fit(offer, brief: str, source_transfer: dict, call, trace_out=None) -> dict:
-    """Run the pre-generation fit gate. A bad/uncertain response blocks atom generation.
+def request_transfer_fit(offer, brief: str, source_transfer: dict, call, trace_out=None, max_rounds: int = 2) -> dict:
+    """Run the pre-generation fit gate, allowing one correction for invalid model output.
 
-    trace_out: optional list; every gate round (response excerpt, validation errors, final verdict) is appended,
-    including rounds that end in an exception, so a failed run still shows why.
+    Only malformed/invalid responses are retried. A valid transferable=false verdict is final,
+    and provider exceptions are left to the registry's infrastructure retry policy.
     """
-    request = {
+    if type(max_rounds) is not int or max_rounds < 1:
+        raise ValueError("max_rounds must be a positive integer")
+
+    base_request = {
         "task": "target_fit_gate",
         "schema": TRANSFER_FIT_SCHEMA,
         "offer": offer.to_dict(),
@@ -709,37 +712,57 @@ def request_transfer_fit(offer, brief: str, source_transfer: dict, call, trace_o
             "Return transfer_decision with transferable, abstract_mechanism, target_native_mapping, target_evidence, reason, demo_form_source, demo_form_target, source_elements_preserved and source_elements_dropped. Explain the source-specific causal mechanism and how the target can or cannot demonstrate it.",
         ],
     }
-    record = {"phase": "target_fit_gate", "round": 1}
-    if trace_out is not None:
-        trace_out.append(record)
-    try:
-        response = call(request)
-    except Exception as exc:
-        record["error"] = f"{type(exc).__name__}: {str(exc)[:400]}"
-        raise
-    record["response_excerpt"] = _trace_excerpt(response)
-    if not isinstance(response, dict) or response.get("_error"):
-        detail = response.get("_error") if isinstance(response, dict) else "response is not a JSON object"
-        record["error"] = f"invalid output: {detail or 'missing response'}"
-        raise BrainError({"#transfer_fit": [f"target-fit gate returned invalid output: {detail or 'missing response'}"]})
-    if response.get("atoms") != []:
-        record["error"] = "atoms must be an empty list"
-        raise BrainError({"#transfer_fit": ["target-fit gate must return atoms=[]; production atoms are forbidden at this stage"]})
-    decision = response.get("transfer_decision")
-    errors = validate_transfer_fit_decision(offer, decision, source_transfer)
-    if errors:
-        record["validation_errors"] = errors
-        raise BrainError({"#transfer_fit": errors})
-    result = {key: decision[key] for key in GATE_DECISION_KEYS}
-    if result["transferable"] is True:
-        override = core_preservation_verdict(result)
-        if override:
-            # The model approved the transfer, but its own account shows the source was replaced. Code rejects.
-            result = {**result, "transferable": False, "model_transferable": True,
-                      "reason": override[:240], "rejected_by_code": True}
-    record["verdict"] = {"transferable": result["transferable"], "reason": result["reason"],
-                         "rejected_by_code": bool(result.get("rejected_by_code"))}
-    return result
+
+    previous_errors = []
+    last_errors = []
+    for round_number in range(1, max_rounds + 1):
+        request = dict(base_request)
+        request["rules"] = list(base_request["rules"])
+        if previous_errors:
+            request["previous_errors"] = list(previous_errors)
+            request["rules"].append(
+                "Your previous Target-Fit response failed validation. Correct EVERY issue listed in previous_errors, "
+                "return the complete response, and do not weaken any transferability or target-evidence requirement."
+            )
+
+        record = {"phase": "target_fit_gate", "round": round_number}
+        if trace_out is not None:
+            trace_out.append(record)
+        try:
+            response = call(request)
+        except Exception as exc:
+            record["error"] = f"{type(exc).__name__}: {str(exc)[:400]}"
+            raise
+
+        record["response_excerpt"] = _trace_excerpt(response)
+        decision = None
+        if not isinstance(response, dict) or response.get("_error"):
+            detail = response.get("_error") if isinstance(response, dict) else "response is not a JSON object"
+            errors = [f"target-fit gate returned invalid output: {detail or 'missing response'}"]
+        elif response.get("atoms") != []:
+            errors = ["target-fit gate must return atoms=[]; production atoms are forbidden at this stage"]
+        else:
+            decision = response.get("transfer_decision")
+            errors = validate_transfer_fit_decision(offer, decision, source_transfer)
+
+        if errors:
+            record["validation_errors"] = errors
+            previous_errors = list(errors)
+            last_errors = errors
+            continue
+
+        result = {key: decision[key] for key in GATE_DECISION_KEYS}
+        if result["transferable"] is True:
+            override = core_preservation_verdict(result)
+            if override:
+                # The model approved the transfer, but its own account shows the source was replaced. Code rejects.
+                result = {**result, "transferable": False, "model_transferable": True,
+                          "reason": override[:240], "rejected_by_code": True}
+        record["verdict"] = {"transferable": result["transferable"], "reason": result["reason"],
+                             "rejected_by_code": bool(result.get("rejected_by_code"))}
+        return result
+
+    raise BrainError({"#transfer_fit": last_errors or ["target-fit gate failed without a validated response"]})
 
 
 def validate_transfer_decision(decision, atoms) -> list:

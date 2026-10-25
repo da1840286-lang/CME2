@@ -118,6 +118,50 @@ class TargetFitGateTests(unittest.TestCase):
         self.assertTrue(any("not present in authoritative OfferCard" in x
                             for x in validate_transfer_fit_decision(offer, invalid)))
 
+    def test_invalid_target_fit_response_gets_one_correction_attempt(self):
+        calls = []
+        trace = []
+        responses = [
+            {"atoms": [], "transfer_decision": {"transferable": True}},
+            {"atoms": [], "transfer_decision": decision(False)},
+        ]
+
+        def call(request):
+            calls.append(request)
+            return responses[len(calls) - 1]
+
+        result = request_transfer_fit(
+            target_offer(), "Create an original ad", source_context(), call, trace_out=trace,
+        )
+
+        self.assertFalse(result["transferable"], "a corrected valid negative verdict must remain final")
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(calls[1]["previous_errors"])
+        self.assertIn("previous_errors", calls[1])
+        self.assertIn("failed validation", " ".join(calls[1]["rules"]))
+        self.assertEqual([row["round"] for row in trace], [1, 2])
+        self.assertTrue(trace[0]["validation_errors"])
+        self.assertFalse(trace[1].get("validation_errors"))
+        self.assertFalse(trace[1]["verdict"]["transferable"])
+
+    def test_invalid_target_fit_response_stops_after_one_retry(self):
+        calls = []
+        trace = []
+
+        def call(request):
+            calls.append(request)
+            return {"atoms": [], "transfer_decision": {"transferable": True}}
+
+        with self.assertRaises(BrainError):
+            request_transfer_fit(
+                target_offer(), "Create an original ad", source_context(), call, trace_out=trace,
+            )
+
+        self.assertEqual(len(calls), 2, "Target-Fit must not loop indefinitely on malformed output")
+        self.assertEqual(len(trace), 2)
+        self.assertTrue(trace[1]["previous_errors"])
+        self.assertTrue(trace[1]["validation_errors"])
+
     def test_gate_fails_closed_on_invalid_or_uncertain_output(self):
         with self.assertRaises(BrainError):
             request_transfer_fit(target_offer(), "brief", source_context(), lambda _request: {"atoms": [], "transfer_decision": {"transferable": True}})
