@@ -726,6 +726,8 @@ def request_transfer_fit(offer, brief: str, source_transfer: dict, call, trace_o
             )
 
         record = {"phase": "target_fit_gate", "round": round_number}
+        if previous_errors:
+            record["previous_errors"] = list(previous_errors)
         if trace_out is not None:
             trace_out.append(record)
         try:
