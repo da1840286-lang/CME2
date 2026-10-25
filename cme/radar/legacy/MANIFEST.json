@@ -26,7 +26,7 @@
   }
  },
  "files": {
-  "legacy/discover.py": "cd64956264153bc5a7ab71ceb812d9b91cd754ac9a3eb13ffe7dc68b0ef86a5b",
+  "legacy/discover.py": "74e7c2ced858f2cf9a8629ab252376be7346a71b09c9d9cd249c53efe409a450",
   "legacy/arbitrage.py": "51bbafc094c47662c1ebfa2f93a0651f9554ab5ab674946bb1cb56156af28957",
   "legacy/verticals.py": "20a2b48a4b4e554ac9914c628178a8e672fc9739785b4d797c989b788ed77277",
   "legacy/market_taxonomy.py": "0966d0fb52533bda275ed54d4860fc83f52b5136c8a9daa72ef165312c7fa6f0",

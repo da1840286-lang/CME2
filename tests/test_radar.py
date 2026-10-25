@@ -136,6 +136,7 @@ class VendoredCodeIsTheRealOne(Env):
         self.assertEqual(calls[0][0], T.SocialCrawlTikTokTopAds.SEARCH_URL)
         self.assertEqual(calls[1][0], T.SocialCrawlTikTokTopAds.BASE_URL)
         self.assertEqual(calls[1][1].get("order_by"), "ctr")
+        self.assertEqual(calls[1][1].get("keyword"), "car vacuum")
         self.assertEqual([params.get("query") for url, params in calls
                           if url == T.SocialCrawlTikTokTopAds.SEARCH_URL], ["car vacuum"])
         self.assertEqual(result["stats"]["money_ready_source_ads"], 0)
@@ -176,9 +177,11 @@ class VendoredCodeIsTheRealOne(Env):
         sources = [call.get("source") for call in result["stats"]["calls"]]
         self.assertEqual(sources.count("sponsored_search"), 7)
         self.assertEqual(sources.count("ads_top"), 3)
-        self.assertEqual([params.get("order_by") for url, params in calls
-                          if url == T.SocialCrawlTikTokTopAds.BASE_URL],
+        top_calls = [params for url, params in calls if url == T.SocialCrawlTikTokTopAds.BASE_URL]
+        self.assertEqual([params.get("order_by") for params in top_calls],
                          ["ctr", "cvr", "play_6s_rate"])
+        self.assertEqual([params.get("keyword") for params in top_calls],
+                         ["car vacuum", "cordless car vacuum", "handheld car vacuum"])
         self.assertEqual(result["stats"]["money_ready_source_ads"], 0)
         self.assertEqual(result["stats"]["mechanism_ready_source_ads"], 0)
         self.assertEqual(result["stats"]["discovery_strategy"]["supply_search_budget"], 7)

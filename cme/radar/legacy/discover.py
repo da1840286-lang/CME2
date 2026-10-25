@@ -801,10 +801,11 @@ def discover_and_rank(
             # Prioritize measurable performance boards in the independent discovery lane.
             # If a source becomes eligible early, remaining request capacity can help fill the queue.
             order_by = performance_order_list[top_index % len(performance_order_list)]
+            performance_keyword = supply_queries[top_index % len(supply_queries)] if supply_queries else None
             total_credits = _fetch_plan(
                 client=client, country=country, period=period, industry=industry, vertical=vertical,
                 ad_language=ad_language, limit_per_board=limit_per_board,
-                plan=[(order_by, None)], combined=combined, calls=calls,
+                plan=[(order_by, performance_keyword)], combined=combined, calls=calls,
                 total_credits=total_credits,
             )
             top_index += 1
