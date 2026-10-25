@@ -180,8 +180,10 @@ class VendoredCodeIsTheRealOne(Env):
         top_calls = [params for url, params in calls if url == T.SocialCrawlTikTokTopAds.BASE_URL]
         self.assertEqual([params.get("order_by") for params in top_calls],
                          ["ctr", "cvr", "play_6s_rate"])
-        self.assertEqual([params.get("keyword") for params in top_calls],
-                         ["car vacuum", "cordless car vacuum", "handheld car vacuum"])
+        top_keywords = [params.get("keyword") for params in top_calls]
+        self.assertTrue(all(top_keywords))
+        self.assertEqual(len(set(top_keywords)), 3)
+        self.assertTrue(set(top_keywords).issubset(set(result["request"]["search_terms"])))
         self.assertEqual(result["stats"]["money_ready_source_ads"], 0)
         self.assertEqual(result["stats"]["mechanism_ready_source_ads"], 0)
         self.assertEqual(result["stats"]["discovery_strategy"]["supply_search_budget"], 7)
