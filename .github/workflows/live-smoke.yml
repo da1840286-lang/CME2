@@ -514,7 +514,16 @@ jobs:
                   else:
                       s.write("SocialCrawl returned no raw ad rows for the planned source queries.\n\n")
                   s.write(f"Diagnosis: `{diag.get('outcome', 'UNKNOWN')}` — {diag.get('explanation', 'No additional FIND diagnostics available')}\n\n")
-                  s.write(f"Requests: {diag.get('requests_executed', 0)}; unique ads: {diag.get('unique_ads', 0)}; DIRECT: {diag.get('direct_relevant_ads', 0)}; EXPANDED: {diag.get('expanded_relevant_ads', 0)}; UNVERIFIED: {diag.get('unverified_ads', 0)}; hard-excluded: {diag.get('hard_excluded_ads', 0)}.\n\n")
+                  s.write(f"Requests: {diag.get('requests_executed', 0)}; unique ads: {diag.get('unique_ads', 0)}; DIRECT: {diag.get('direct_relevant_ads', 0)}; EXPANDED: {diag.get('expanded_relevant_ads', 0)}; UNVERIFIED: {diag.get('unverified_ads', 0)}; money-ready: {diag.get('money_ready_source_ads', 0)}; mechanism-ready: {diag.get('mechanism_ready_source_ads', 0)}; hard-excluded: {diag.get('hard_excluded_ads', 0)}.\n\n")
+                  selection_diag = diag.get("source_selection_diagnostics") or {}
+                  by_reason = selection_diag.get("by_reason") or {}
+                  if by_reason:
+                      s.write("Source-selection outcomes: " + "; ".join(f"{name}={count}" for name, count in sorted(by_reason.items())) + "\n\n")
+                      for item in (selection_diag.get("examples") or [])[:6]:
+                          title = str(item.get("title") or "(no title)").replace("\n", " ")[:120]
+                          url = item.get("source_url") if str(item.get("source_url") or "").startswith("https://") else ""
+                          s.write(f"- {item.get('ad_id')} — {item.get('reason')}; {title}; action={item.get('action')}; money_gate={item.get('money_gate_pass')}; [open ad]({url})\n")
+                      s.write("\n")
                   if queries:
                       s.write("Sponsored Search queries tried: " + ", ".join(queries) + "\n\n")
               for c in rows:

@@ -61,7 +61,7 @@ class VendoredCodeIsTheRealOne(Env):
     def test_run_find_calls_the_real_client_and_ranker(self):
         calls = []
         with self.fake_find([synthetic_post("1001")], calls):
-            res = F.run_find({"country": "us", "max_requests": 2, "keywords": ["car vacuum"],
+            res = F.run_find({"country": "us", "max_requests": 2, "keywords": ["car vacuum"], "discovery_mode": "strict",
                               "offer": {"name": "Fanttik V8 Mate Cordless Car Vacuum",
                                         "product_type": "cordless handheld car vacuum"}},
                              client=T.SocialCrawlTikTokTopAds(api_key="TESTKEY"))
@@ -188,18 +188,101 @@ class VendoredCodeIsTheRealOne(Env):
         self.assertEqual(result["stats"]["mechanism_ready_source_ads"], 0)
         self.assertEqual(result["stats"]["discovery_strategy"]["supply_search_budget"], 7)
         self.assertEqual(result["stats"]["discovery_strategy"]["performance_budget"], 3)
-        for candidate in result["candidates"]:
-            score = candidate.get("source_score") or {}
-            components = score.get("components") or {}
-            gate = components.get("money_signal_gate") or {}
-            self.assertFalse(gate.get("pass"))
+        self.assertEqual(result["candidates"], [])
+        self.assertEqual(result["stats"]["final_ranked_ads"], 0)
+        self.assertEqual(result["diagnostics"]["outcome"], "NO_QUALIFIED_SOURCE")
+        selection_diag = result["diagnostics"]["source_selection_diagnostics"]
+        self.assertGreater(selection_diag["not_selected_count"], 0)
+        self.assertTrue(
+            {"SCORER_REJECT", "MONEY_SIGNAL_HARD_BLOCK", "NO_MONEY_OR_MECHANISM_SIGNAL"}
+            & set(selection_diag["by_reason"])
+        )
+
+    def test_ads_top_money_ready_candidate_is_kept_without_weak_backfill(self):
+        calls = []
+
+        def fake_get(url, params=None, headers=None, timeout=None):
+            params = dict(params or {})
+            calls.append((url, params))
+            if url == T.SocialCrawlTikTokTopAds.SEARCH_URL:
+                item = synthetic_post(
+                    "weak-sponsored", brand="UNKNOWN",
+                    title="Shop now free shipping: cordless car vacuum removes crumbs",
+                    ctr=None, cvr=None, views=50000, duration=28,
+                )
+                item["post"]["author"]["username"] = "UNKNOWN"
+                item["post"]["author"]["display_name"] = ""
+                item["post"]["ext"]["ad"].update({
+                    "ctr": None, "cvr": None, "objective": "", "landing_page_url": "",
+                })
+            else:
+                item = synthetic_post(
+                    "strong-top", brand="Fanttik",
+                    title="Shop now: cordless car vacuum removes crumbs",
+                    ctr=2.4, cvr=1.1, views=3110000, duration=28,
+                )
+                item["post"]["ext"]["ad"].update({
+                    "ctr": 2.4, "cvr": 1.1, "rank": 1, "objective": "Conversions",
+                    "landing_page_url": "https://example.invalid/products/car-vacuum",
+                    "industry": "Home & Garden",
+                })
+            return FakeResp(synthetic_response([item]))
+
+        with mock.patch.object(T.requests, "get", fake_get):
+            result = F.run_find(
+                {"country": "US", "max_requests": 2, "max_ads": 10, "keywords": ["car vacuum"],
+                 "offer": {"name": "Fanttik V8 Mate Cordless Car Vacuum",
+                           "product_type": "cordless handheld car vacuum"}},
+                client=T.SocialCrawlTikTokTopAds(api_key="TESTKEY"),
+            )
+        self.assertEqual(len(calls), 2)
+        self.assertEqual([call.get("source") for call in result["stats"]["calls"]],
+                         ["sponsored_search", "ads_top"])
+        self.assertEqual(len(result["candidates"]), 1)
+        candidate = result["candidates"][0]
+        self.assertEqual(candidate["ad_id"], "strong-top")
+        self.assertTrue(candidate["source_score"]["components"]["money_signal_gate"]["pass"])
+        self.assertEqual(candidate["legacy_record"]["discovery_source"], "ads_top")
+        self.assertEqual(result["stats"]["final_ranked_ads"], 1)
+
+    def test_unknown_source_relevance_is_held_for_review_not_auto_selected(self):
+        calls = []
+
+        def fake_get(url, params=None, headers=None, timeout=None):
+            params = dict(params or {})
+            calls.append((url, params))
+            item = synthetic_post(
+                "unknown-" + str(len(calls)), brand="UNKNOWN",
+                title="A surprising video with a reveal",
+                ctr=2.4, cvr=1.1, views=3110000, duration=28,
+            )
+            item["post"]["author"]["username"] = "UNKNOWN"
+            item["post"]["author"]["display_name"] = ""
+            item["post"]["content"]["text"] = "A surprising video with a reveal"
+            item["post"]["ext"]["ad"].update({
+                "ctr": 2.4, "cvr": 1.1, "rank": 1, "objective": "Conversions",
+                "landing_page_url": "", "industry": "Entertainment",
+            })
+            return FakeResp(synthetic_response([item]))
+
+        with mock.patch.object(T.requests, "get", fake_get):
+            result = F.run_find(
+                {"country": "US", "max_requests": 2, "max_ads": 10, "keywords": ["car vacuum"],
+                 "offer": {"name": "Fanttik V8 Mate Cordless Car Vacuum",
+                           "product_type": "cordless handheld car vacuum"}},
+                client=T.SocialCrawlTikTokTopAds(api_key="TESTKEY"),
+            )
+        self.assertEqual(result["candidates"], [])
+        self.assertEqual(result["diagnostics"]["outcome"], "NO_TARGET_RELEVANCE")
+        by_reason = result["diagnostics"]["source_selection_diagnostics"]["by_reason"]
+        self.assertIn("SOURCE_RELEVANCE_UNVERIFIED_REQUIRES_REVIEW", by_reason)
 
 
 class CandidateRecord(Env):
     def run_candidates(self, *items):
         with self.fake_find(list(items)):
-            return F.run_find({"country": "US", "max_requests": 1}, client=T.SocialCrawlTikTokTopAds(api_key="K"),
-                              now="2026-10-21T00:00:00Z")["candidates"]
+            return F.run_find({"country": "US", "max_requests": 1, "discovery_mode": "strict"},
+                              client=T.SocialCrawlTikTokTopAds(api_key="K"), now="2026-10-21T00:00:00Z")["candidates"]
 
     def test_provenance_url_and_real_metrics_are_kept(self):
         c = self.run_candidates(synthetic_post("1001", views=120000, ctr=2.4))[0]
@@ -233,7 +316,7 @@ class CandidateRecord(Env):
 class DedupeAndFilters(Env):
     def cand(self, ad, **kw):
         with self.fake_find([synthetic_post(ad, **kw)]):
-            return F.run_find({"country": kw.pop("country", "US"), "max_requests": 1},
+            return F.run_find({"country": kw.pop("country", "US"), "max_requests": 1, "discovery_mode": "strict"},
                               client=T.SocialCrawlTikTokTopAds(api_key="K"), now="2026-10-21T00:00:00Z")["candidates"][0]
 
     def test_same_ad_twice_is_one_card_with_history_and_latest_metrics(self):
@@ -273,7 +356,7 @@ class OperatorDecisions(Env):
     def setUp(self):
         super().setUp()
         with self.fake_find([synthetic_post("4001"), synthetic_post("4002", brand="otherbrand")]):
-            self.cands = F.run_find({"country": "US", "max_requests": 1}, client=T.SocialCrawlTikTokTopAds(api_key="K"))["candidates"]
+            self.cands = F.run_find({"country": "US", "max_requests": 1, "discovery_mode": "strict"}, client=T.SocialCrawlTikTokTopAds(api_key="K"))["candidates"]
 
     def blob(self, s, cid):
         return s.db.execute("SELECT data FROM candidates WHERE id=?", (cid,)).fetchone()["data"]
@@ -317,7 +400,7 @@ class OperatorDecisions(Env):
 class ImportIsLabelled(Env):
     def test_import_marks_origin_and_rejects_other_formats(self):
         with self.fake_find([synthetic_post("5001")]):
-            found = F.run_find({"country": "US", "max_requests": 1}, client=T.SocialCrawlTikTokTopAds(api_key="K"))["candidates"][0]
+            found = F.run_find({"country": "US", "max_requests": 1, "discovery_mode": "strict"}, client=T.SocialCrawlTikTokTopAds(api_key="K"))["candidates"][0]
         saved = Path(self.tmp.name) / "tiktok_discovery.json"
         saved.write_text(json.dumps({"request": {"country": "US", "period": 30}, "stats": {},
                                      "results": [{"record": found["legacy_record"], "decision": found["source_score"]}]}))
@@ -348,7 +431,7 @@ class FindStates(Env):
         app = RadarApp(self.data, settings_path=ROOT / "settings.example.json", catalog_path=ROOT / "adapters.json",
                        offer_path=offer_path, find_client=T.SocialCrawlTikTokTopAds(api_key="K"))
         with self.fake_find([synthetic_post("8101")], calls):
-            result = app.do_find({"country": "US", "max_requests": 1, "max_ads": 3})
+            result = app.do_find({"country": "US", "max_requests": 1, "max_ads": 3, "discovery_mode": "strict"})
         self.addCleanup(app.store.close)
         self.assertEqual(result["status"], "OK")
         self.assertEqual(calls[0][1].get("query"), "Fanttik V8 Mate Cordless Car Vacuum")
@@ -473,7 +556,7 @@ class RadarAppFixture(Env):
         app = RadarApp(self.data, settings_path=sp, catalog_path=ROOT / "adapters.json", ctx=ctx, getter=lambda *a, **k: FakeVideo(),
                        runner=fake_runner(), tools={"state": "READY", "detail": "", "how_to_fix": ""})
         with self.fake_find([synthetic_post("6001")]):
-            res = F.run_find({"country": "US", "max_requests": 1}, client=T.SocialCrawlTikTokTopAds(api_key="K"))
+            res = F.run_find({"country": "US", "max_requests": 1, "discovery_mode": "strict"}, client=T.SocialCrawlTikTokTopAds(api_key="K"))
         app.store.ingest(res["candidates"], "run", "found")
         return app, res["candidates"][0]["id"]
 

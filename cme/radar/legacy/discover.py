@@ -568,41 +568,181 @@ def _fresh_first(ranked: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _money_ready_item(item: dict[str, Any]) -> bool:
-    """Whether a ranked source item is safe to enter the Selection queue."""
+    """Whether a ranked source item has an explicit source-side commercial pass."""
     decision = item.get("decision") or {}
     if isinstance(decision, dict):
         components = decision.get("components") or {}
-        action = str(decision.get("action") or "")
+        action = str(decision.get("action") or "").upper()
     else:
         components = getattr(decision, "components", {}) or {}
-        action = str(getattr(decision, "action", "") or "")
+        action = str(getattr(decision, "action", "") or "").upper()
     gate = components.get("money_signal_gate") or {}
-    return bool(gate.get("pass")) and action in {"DEEP", "SHALLOW"}
+    return gate.get("pass") is True and action in {"DEEP", "SHALLOW"}
 
 
-def _select_money_ready_queue(
+def _mechanism_ready_item(item: dict[str, Any]) -> bool:
+    """Independent mechanism-source path; this is not a substitute commercial pass."""
+    decision = item.get("decision") or {}
+    if isinstance(decision, dict):
+        components = decision.get("components") or {}
+        action = str(decision.get("action") or "").upper()
+        source_value_type = str(decision.get("source_value_type") or "").upper()
+        try:
+            mechanism_score = float(decision.get("mechanism_source_score") or 0.0)
+        except (TypeError, ValueError):
+            mechanism_score = 0.0
+        tags_raw = decision.get("tags") or []
+    else:
+        components = getattr(decision, "components", {}) or {}
+        action = str(getattr(decision, "action", "") or "").upper()
+        source_value_type = str(getattr(decision, "source_value_type", "") or "").upper()
+        try:
+            mechanism_score = float(getattr(decision, "mechanism_source_score", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            mechanism_score = 0.0
+        tags_raw = getattr(decision, "tags", []) or []
+    mechanism = components.get("mechanism_source") or {}
+    if not source_value_type:
+        source_value_type = str(mechanism.get("source_value_type") or "").upper()
+    if not mechanism_score:
+        try:
+            mechanism_score = float(mechanism.get("score") or 0.0)
+        except (TypeError, ValueError):
+            mechanism_score = 0.0
+    if isinstance(tags_raw, str):
+        tags = {tags_raw}
+    elif isinstance(tags_raw, (list, tuple, set)):
+        tags = {str(tag) for tag in tags_raw}
+    else:
+        tags = set()
+    mechanism_pass = (
+        source_value_type in {"MECHANISM_SOURCE", "BOTH"} and mechanism_score >= 70.0
+    ) or "long_source_allowed_for_mechanism" in tags
+    return action in {"DEEP", "SHALLOW"} and mechanism_pass
+
+
+def _source_ready_item(item: dict[str, Any]) -> bool:
+    """The two existing admission paths; the source must still be market-relevant."""
+    return _money_ready_item(item) or _mechanism_ready_item(item)
+
+
+def _select_source_ready_queue(
     pools: list[list[dict[str, Any]]],
     limit: int,
 ) -> list[dict[str, Any]]:
-    """Build an eligible queue across all discovery scopes without changing pool ranking."""
+    """Return only sources passing the money gate or explicit mechanism-source path."""
     if limit <= 0:
         return []
-    supply_queries: list[str] = []
     selected: list[dict[str, Any]] = []
     seen: set[str] = set()
-    # Scope priority is deterministic: STRICT -> EXPANDED -> UNVERIFIED -> MECHANISM.
-    # Within each pool, preserve the existing ranking.
     for pool in pools:
         for item in pool:
             record = item.get("record") or {}
-            cid = str(record.get("ad_id") or "")
-            if not cid or cid in seen or not _money_ready_item(item):
+            cid = str(record.get("ad_id") or record.get("video_id") or "")
+            if not cid or cid in seen or not _source_ready_item(item):
                 continue
             seen.add(cid)
             selected.append(item)
             if len(selected) >= limit:
                 return selected
     return selected
+
+
+def _selection_diagnostics(
+    pools: list[list[dict[str, Any]]],
+    selected: list[dict[str, Any]],
+    *,
+    mode: str,
+    max_examples: int = 25,
+) -> dict[str, Any]:
+    """Record why potential sources were held/rejected without passing them into Selection."""
+    if mode != "auto":
+        return {"not_selected_count": 0, "by_reason": {}, "examples": []}
+
+    def identity(record: dict[str, Any]) -> set[str]:
+        keys = canonical_source_identity_keys(record)
+        stable = {key for key in keys if key.startswith(("url:", "video:"))}
+        return stable or keys
+
+    selected_keys: set[str] = set()
+    for item in selected:
+        selected_keys.update(identity(item.get("record") or {}))
+    seen: set[tuple[str, ...]] = set()
+    rows: list[dict[str, Any]] = []
+    counts: dict[str, int] = {}
+    for pool in pools:
+        for item in pool:
+            record = item.get("record") or {}
+            keys = identity(record)
+            if not keys:
+                fallback_id = str(record.get("ad_id") or record.get("video_id") or "")
+                if not fallback_id:
+                    continue
+                keys = {f"id:{fallback_id}"}
+            identity_key = tuple(sorted(keys))
+            if identity_key in seen:
+                continue
+            seen.add(identity_key)
+            if keys & selected_keys:
+                continue
+            decision = item.get("decision") or {}
+            get = decision.get if isinstance(decision, dict) else (lambda key, default=None: getattr(decision, key, default))
+            components = get("components", {}) or {}
+            if not isinstance(components, dict):
+                components = {}
+            gate = components.get("money_signal_gate") or {}
+            if not isinstance(gate, dict):
+                gate = {}
+            rel = record.get("vertical_relevance") or {}
+            classification = str(rel.get("classification") or "UNVERIFIED").upper()
+            action = str(get("action", "") or "").upper()
+            source_value_type = str(get("source_value_type", "") or "").upper()
+            try:
+                final_score = float(get("final_score", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                final_score = 0.0
+            if classification == "HARD_EXCLUDE" or rel.get("excluded"):
+                reason = "HARD_EXCLUDED"
+            elif classification not in {"DIRECT", "EXPANDED"}:
+                reason = "SOURCE_RELEVANCE_UNVERIFIED_REQUIRES_REVIEW"
+            elif action == "REJECT":
+                reason = "SCORER_REJECT"
+            elif not _source_ready_item(item):
+                if action not in {"DEEP", "SHALLOW"}:
+                    reason = "SCORER_ACTION_NOT_READY"
+                elif gate.get("hard_block") is True:
+                    reason = "MONEY_SIGNAL_HARD_BLOCK"
+                else:
+                    reason = "NO_MONEY_OR_MECHANISM_SIGNAL"
+            else:
+                reason = "QUALIFIED_NOT_SELECTED_QUEUE_LIMIT"
+            try:
+                mechanism_score = float(get("mechanism_source_score", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                mechanism_score = 0.0
+            rows.append({
+                "ad_id": str(record.get("ad_id") or record.get("video_id") or ""),
+                "source": "ads_top" if str(record.get("discovery_source") or "") == "ads_top" else "sponsored_search",
+                "title": str(record.get("title") or "")[:180],
+                "source_url": str(record.get("source_url") or ""),
+                "classification": classification,
+                "relevance_reason": str(rel.get("reason") or "")[:240],
+                "action": action,
+                "final_score": round(final_score, 2),
+                "money_gate_pass": gate.get("pass") is True,
+                "money_gate_reason": str(gate.get("reason") or "")[:240],
+                "mechanism_source_score": round(mechanism_score, 2),
+                "source_value_type": source_value_type,
+                "reason": reason,
+            })
+            counts[reason] = counts.get(reason, 0) + 1
+    rows.sort(key=lambda row: (-row["final_score"], row["ad_id"]))
+    return {
+        "not_selected_count": len(rows),
+        "by_reason": dict(sorted(counts.items())),
+        "examples": rows[:max_examples],
+        "examples_truncated": max(0, len(rows) - max_examples),
+    }
 
 
 def discover_and_rank(
@@ -900,12 +1040,14 @@ def discover_and_rank(
     # but do not let them consume the source queue.
     strict_ranked = _fresh_first(_rank([r for r in strict_pool if _has_video_url(r)], target_offer=target_offer, prelander=prelander, landing_page=landing_page, vertical=vertical, population=records))
     expanded_ranked = _fresh_first(_rank([r for r in expanded_pool if _has_video_url(r)], target_offer=target_offer, prelander=prelander, landing_page=landing_page, vertical=vertical, population=records))
-    unverified_ranked = _fresh_first(_rank([
-        r for r in unverified_pool
-        if _has_video_url(r)
-        and r.get("discovery_source") == "tiktok_sponsored_search"
-        and str(r.get("discovery_query_confidence") or "") == "HIGH"
+    unverified_diagnostic_ranked = _fresh_first(_rank([
+        r for r in unverified_pool if _has_video_url(r)
     ], target_offer=target_offer, prelander=prelander, landing_page=landing_page, vertical=vertical, population=records))
+    unverified_ranked = [
+        item for item in unverified_diagnostic_ranked
+        if (item.get("record") or {}).get("discovery_source") == "tiktok_sponsored_search"
+        and str((item.get("record") or {}).get("discovery_query_confidence") or "") == "HIGH"
+    ]
     mechanism_ranked = _fresh_first(_rank([r for r in mechanism_pool if _has_video_url(r)], target_offer=target_offer, prelander=prelander, landing_page=landing_page, vertical=vertical, population=records))
 
     if mode == "strict":
@@ -918,30 +1060,33 @@ def discover_and_rank(
         selected = mechanism_ranked[:source_queue_limit]
         fallback_path = "MECHANISM_HUNT"
     else:
-        # Auto mode is target-specific: only target-relevant pools may enter the live
-        # source queue. Mechanism-hunt/raw fallbacks remain diagnostic data and cannot
-        # dilute a target queue with broad-market ads.
-        auto_pools = [strict_ranked, expanded_ranked, unverified_ranked]
+        # Automatic selection requires confirmed DIRECT/EXPANDED relevance plus one of the
+        # two existing readiness paths. Unknown-relevance Ads Top rows stay diagnostic-only
+        # until a separate source-verification step confirms them.
+        auto_pools = [strict_ranked, expanded_ranked]
         if mode == "auto":
-            selected = _select_money_ready_queue(auto_pools, source_queue_limit)
+            selected = _select_source_ready_queue(auto_pools, source_queue_limit)
         else:
-            selected = _select_money_ready_queue(
+            selected = _select_source_ready_queue(
                 [strict_ranked, expanded_ranked, unverified_ranked, mechanism_ranked],
                 source_queue_limit,
             )
-        selected_ids = {str(x["record"].get("ad_id") or "") for x in selected}
-        fill_pools = (strict_ranked, expanded_ranked, unverified_ranked) if mode == "auto" else (strict_ranked, expanded_ranked, unverified_ranked, mechanism_ranked)
-        for pool in fill_pools:
-            for x in pool:
-                cid = str(x["record"].get("ad_id") or "")
-                if not cid or cid in selected_ids:
-                    continue
-                selected.append(x)
-                selected_ids.add(cid)
+        selected_ids = {str(x["record"].get("ad_id") or x["record"].get("video_id") or "") for x in selected}
+        # Explicit research modes retain their existing fill/review behavior. Automatic
+        # mode never fills empty slots with rejected or unverified sources.
+        if mode != "auto":
+            fill_pools = (strict_ranked, expanded_ranked, unverified_ranked, mechanism_ranked)
+            for pool in fill_pools:
+                for x in pool:
+                    cid = str(x["record"].get("ad_id") or x["record"].get("video_id") or "")
+                    if not cid or cid in selected_ids:
+                        continue
+                    selected.append(x)
+                    selected_ids.add(cid)
+                    if len(selected) >= source_queue_limit:
+                        break
                 if len(selected) >= source_queue_limit:
                     break
-            if len(selected) >= source_queue_limit:
-                break
 
         # In target-specific live mode, a raw/unverified video is not allowed to fill
         # a target-market queue merely because a target source was found elsewhere.
@@ -968,7 +1113,9 @@ def discover_and_rank(
                 if len(selected) >= source_queue_limit:
                     break
 
-        if len(strict_ranked) >= max_ads:
+        if mode == "auto" and not selected:
+            fallback_path = "NO_QUALIFIED_SOURCE"
+        elif len(strict_ranked) >= max_ads:
             fallback_path = "STRICT"
         elif len(strict_ranked) + len(expanded_ranked) >= max_ads:
             fallback_path = "STRICT_TO_EXPANDED"
@@ -996,11 +1143,10 @@ def discover_and_rank(
         deduped_selected.append(item)
     selected = deduped_selected
 
-    # Target-specific live discovery must fail closed when no target supply was found.
-    # A high-performance broad ad is not a valid substitute for a target-market source.
-    if mode == "auto" and target_relevant_count() == 0 and not unverified_ranked:
-        selected = []
-        fallback_path = "NO_TARGET_RELEVANCE"
+    # Automatic mode never backfills the shortlist with rejected rows; the exact
+    # empty-result reason is finalized after confirmed target relevance is counted.
+    if mode == "auto" and not selected:
+        fallback_path = "NO_QUALIFIED_SOURCE"
 
     for item in selected:
         r = item["record"]
@@ -1033,6 +1179,8 @@ def discover_and_rank(
         1 for record in (strict_pool + expanded_pool)
         if _has_video_url(record) and not _is_hard_excluded(record)
     )
+    if mode == "auto" and not selected:
+        fallback_path = "NO_QUALIFIED_SOURCE" if target_relevant_ads else "NO_TARGET_RELEVANCE"
     money_ready_source_ads, mechanism_ready_source_ads = source_analysis_ready_counts()
     analysis_ready_source_ads = money_ready_source_ads + mechanism_ready_source_ads
     if analysis_ready_source_ads >= source_queue_limit:
@@ -1040,7 +1188,7 @@ def discover_and_rank(
     elif len(calls) >= max_requests and analysis_ready_source_ads == 0:
         discovery_stop_basis = "request_budget_exhausted_no_analysis_ready_source"
     elif analysis_ready_source_ads == 0 and target_relevant_ads > 0:
-        discovery_stop_basis = "target_relevance_waiting_for_money_or_mechanism_gate"
+        discovery_stop_basis = "target_relevance_no_qualified_source"
     elif len(calls) >= max_requests:
         discovery_stop_basis = "request_budget_exhausted"
     elif target_relevant_ads > 0 and _source_queue_candidate_count(fresh_records, vertical) >= source_queue_limit:
@@ -1048,6 +1196,11 @@ def discover_and_rank(
     else:
         discovery_stop_basis = "target_relevance_shortfall"
 
+    source_selection_diagnostics = _selection_diagnostics(
+        [strict_ranked, expanded_ranked, unverified_diagnostic_ranked, mechanism_ranked],
+        selected,
+        mode=mode,
+    )
     stats.update({
         "planned_requests": len(calls),
         "executed_requests": len(calls),
@@ -1066,6 +1219,7 @@ def discover_and_rank(
         "money_ready_source_ads": money_ready_source_ads,
         "mechanism_ready_source_ads": mechanism_ready_source_ads,
         "analysis_ready_source_ads": analysis_ready_source_ads,
+        "source_selection_diagnostics": source_selection_diagnostics,
         "target_relevant_ads": target_relevant_ads,
         "target_relevant_shortfall": max(0, source_queue_limit - target_relevant_ads),
         "discovery_stop_basis": discovery_stop_basis,

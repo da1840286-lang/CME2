@@ -147,25 +147,47 @@ def _offer_context(params: dict) -> dict[str, str]:
 
 
 def _find_diagnostics(stats: dict, candidate_count: int) -> dict:
-    """A truthful compact summary: distinguish no API rows from rows rejected by source gates."""
+    """Distinguish absent inventory, unverified relevance, and no qualified auto source."""
     calls = stats.get("calls") or []
     strategy = stats.get("discovery_strategy") or {}
     raw_returned = sum(int(call.get("returned") or 0) for call in calls if isinstance(call, dict))
     direct = int(stats.get("direct_relevant_ads") or 0)
     expanded = int(stats.get("expanded_relevant_ads") or 0)
+    target_relevant = int(stats.get("target_relevant_ads") or 0)
+    money_ready = int(stats.get("money_ready_source_ads") or 0)
+    mechanism_ready = int(stats.get("mechanism_ready_source_ads") or 0)
+    analysis_ready = int(stats.get("analysis_ready_source_ads") or 0)
     hard_excluded = int(stats.get("pre_visual_verification_hard_excluded_ads") or 0)
+    selection_details = stats.get("source_selection_diagnostics") or {}
     if candidate_count:
         outcome = "CANDIDATES_FOUND"
-        explanation = "FIND produced a ranked candidate list. Video availability and hard exclusions determine pattern-source eligibility; relevance and commercial signals remain scoring evidence."
+        explanation = (
+            "FIND returned sources admitted by the configured discovery mode. Automatic mode requires confirmed "
+            "DIRECT/EXPANDED relevance plus either the source-commercial gate or the independent mechanism-source path; "
+            "Target-Fit still gates transfer."
+        )
     elif raw_returned == 0:
         outcome = "NO_API_ROWS"
         explanation = "SocialCrawl returned no ad rows; check query coverage, credentials, provider response, and available credits."
-    elif direct + expanded == 0:
+    elif target_relevant == 0:
         outcome = "NO_TARGET_RELEVANCE"
-        explanation = "SocialCrawl returned rows, but none entered the target candidate list. Inspect query coverage, video availability and hard-exclusion diagnostics; commercial success is not required to extract a pattern."
+        explanation = (
+            "Rows were returned, but no playable source had confirmed target relevance. Unknown-relevance rows are held "
+            "for a separate source check, not admitted from the query keyword alone. "
+            "commercial success is not required to extract a pattern in the manual pattern-only path."
+        )
+    elif analysis_ready == 0:
+        outcome = "NO_QUALIFIED_SOURCE"
+        explanation = (
+            "Target-relevant ads were found, but none passed the source-commercial gate or the independent "
+            "mechanism-source path. Weak ads were not used to fill the candidate list."
+        )
     else:
         outcome = "NO_RANKED_CANDIDATE"
-        explanation = "Source-relevant rows were observed, but FIND returned no ranked candidate; inspect request, video-availability and source-relevance diagnostics."
+        explanation = (
+            "Readiness counters show qualified sources, but none survived final queue construction; inspect "
+            "deduplication and source-selection diagnostics."
+        )
     return {
         "outcome": outcome,
         "explanation": explanation,
@@ -175,8 +197,13 @@ def _find_diagnostics(stats: dict, candidate_count: int) -> dict:
         "unique_ads": int(stats.get("unique_ads") or 0),
         "direct_relevant_ads": direct,
         "expanded_relevant_ads": expanded,
+        "target_relevant_ads": target_relevant,
+        "money_ready_source_ads": money_ready,
+        "mechanism_ready_source_ads": mechanism_ready,
+        "analysis_ready_source_ads": analysis_ready,
         "unverified_ads": int(stats.get("unverified_ads") or 0),
         "hard_excluded_ads": hard_excluded,
+        "source_selection_diagnostics": selection_details,
         "search_queries_executed": list(strategy.get("supply_queries_executed") or []),
         "request_sources": [str(call.get("source") or "unknown") for call in calls if isinstance(call, dict)],
     }
