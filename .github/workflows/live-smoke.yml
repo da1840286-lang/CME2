@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       stage:
-        description: "Run FIND, extract a pattern from a selected video, run Brain/frame smoke, or create a full test creative. Source commercial scores rank candidates but do not gate pattern transfer."
+        description: "Run FIND, analyze a selected source, run Brain/frame checks, or create a test creative. Automatic transfer requires source-commercial/mechanism eligibility and the independent Target-Fit gate; manual candidate_id is an explicit override, not proof of commercial success."
         type: choice
         options:
           - find
@@ -30,7 +30,7 @@ on:
         required: true
         default: "30"
       find_requests:
-        description: "Hard cap on SocialCrawl requests. FIND searches sponsored product sources first; Ads Top is used only after target relevance appears."
+        description: "Hard cap on SocialCrawl requests. FIND reserves part of the budget for Ads Top performance queries even if Sponsored Search yields no source passing the preliminary money/mechanism gate. Final eligibility and Target-Fit gates stay strict."
         type: number
         required: true
         default: 4
@@ -50,7 +50,7 @@ on:
         required: false
         default: ""
       candidate_id:
-        description: "For analyze/all: exact candidate_id from FIND; video + no hard exclusion required. Commercial score is metadata, not a pattern-transfer gate."
+        description: "For analyze/all: exact candidate_id from FIND. An explicit choice overrides automatic commercial ranking; video/source checks and Target-Fit still apply. Use only when deliberately overriding automatic eligibility."
         type: string
         required: false
         default: ""
@@ -525,7 +525,7 @@ jobs:
               if mode == "find":
                   s.write("\nManual choice: run stage=all with this run ID and the selected candidate_id.\n")
               else:
-                  s.write("\nAutomatic selection: the following step chooses the first candidate in FIND order with a video URL and no hard-exclusion flag. Relevance and commercial scores are retained as ranking/evidence metadata, not hard gates for pattern transfer.\n")
+                  s.write("\nAutomatic stage=all applies the strict source-commercial/mechanism eligibility gate before analysis, then the independent Target-Fit gate before transfer. A manually supplied candidate_id is an explicit operator override, not evidence of commercial success.\n")
           print(f"FIND finished: {len(rows)} candidate(s).")
           PY
           elif [[ "$CME_STAGE" == "analyze" ]]; then

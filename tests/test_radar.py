@@ -101,7 +101,7 @@ class VendoredCodeIsTheRealOne(Env):
         self.assertEqual(res["diagnostics"]["raw_ads_returned"], 3)
         self.assertEqual(res["diagnostics"]["requests_executed"], 3)
 
-    def test_target_relevance_without_money_gate_uses_next_sponsored_query_not_ads_top(self):
+    def test_target_relevance_without_money_gate_still_uses_reserved_ads_top(self):
         calls = []
         def fake_get(url, params=None, headers=None, timeout=None):
             params = dict(params or {})
@@ -128,13 +128,61 @@ class VendoredCodeIsTheRealOne(Env):
                 client=T.SocialCrawlTikTokTopAds(api_key="TESTKEY"),
             )
         self.assertEqual(len(calls), 2)
-        self.assertTrue(all(url == T.SocialCrawlTikTokTopAds.SEARCH_URL for url, _ in calls))
-        self.assertEqual([params.get("query") for _, params in calls],
-                         ["car vacuum", "Fanttik V8 Mate Cordless Car Vacuum"])
+        self.assertEqual(calls[0][0], T.SocialCrawlTikTokTopAds.SEARCH_URL)
+        self.assertEqual(calls[1][0], T.SocialCrawlTikTokTopAds.BASE_URL)
+        self.assertEqual(calls[1][1].get("order_by"), "ctr")
+        self.assertEqual([params.get("query") for url, params in calls
+                          if url == T.SocialCrawlTikTokTopAds.SEARCH_URL], ["car vacuum"])
         self.assertEqual(result["stats"]["money_ready_source_ads"], 0)
         self.assertEqual(result["stats"]["mechanism_ready_source_ads"], 0)
         self.assertGreaterEqual(result["stats"]["target_relevant_ads"], 1)
-        self.assertNotIn("ads_top", [call.get("source") for call in result["stats"]["calls"]])
+        self.assertEqual([call.get("source") for call in result["stats"]["calls"]],
+                         ["sponsored_search", "ads_top"])
+        strategy = result["stats"]["discovery_strategy"]
+        self.assertEqual(strategy["supply_search_budget"], 1)
+        self.assertEqual(strategy["performance_budget"], 1)
+
+    def test_find_reserves_ads_top_requests_without_weakening_money_gate(self):
+        calls = []
+        def fake_get(url, params=None, headers=None, timeout=None):
+            params = dict(params or {})
+            calls.append((url, params))
+            item = synthetic_post(
+                str(9300 + len(calls)), brand="UNKNOWN",
+                title="Shop now free shipping: cordless car vacuum removes crumbs",
+                ctr=None, cvr=None, views=3110000, duration=28,
+            )
+            item["post"]["author"]["username"] = "UNKNOWN"
+            item["post"]["author"]["display_name"] = ""
+            ad = item["post"]["ext"]["ad"]
+            ad["ctr"] = None
+            ad["cvr"] = None
+            ad["objective"] = ""
+            ad["landing_page_url"] = ""
+            item["post"]["content"]["text"] = "Shop now free shipping: cordless car vacuum removes crumbs"
+            return FakeResp(synthetic_response([item]))
+        with mock.patch.object(T.requests, "get", fake_get):
+            result = F.run_find(
+                {"country": "US", "max_requests": 10, "max_ads": 10, "keywords": ["car vacuum"],
+                 "offer": {"name": "Fanttik V8 Mate Cordless Car Vacuum",
+                           "product_type": "cordless handheld car vacuum"}},
+                client=T.SocialCrawlTikTokTopAds(api_key="TESTKEY"),
+            )
+        sources = [call.get("source") for call in result["stats"]["calls"]]
+        self.assertEqual(sources.count("sponsored_search"), 7)
+        self.assertEqual(sources.count("ads_top"), 3)
+        self.assertEqual([params.get("order_by") for url, params in calls
+                          if url == T.SocialCrawlTikTokTopAds.BASE_URL],
+                         ["ctr", "cvr", "play_6s_rate"])
+        self.assertEqual(result["stats"]["money_ready_source_ads"], 0)
+        self.assertEqual(result["stats"]["mechanism_ready_source_ads"], 0)
+        self.assertEqual(result["stats"]["discovery_strategy"]["supply_search_budget"], 7)
+        self.assertEqual(result["stats"]["discovery_strategy"]["performance_budget"], 3)
+        for candidate in result["candidates"]:
+            score = candidate.get("source_score") or {}
+            components = score.get("components") or {}
+            gate = components.get("money_signal_gate") or {}
+            self.assertFalse(gate.get("pass"))
 
 
 class CandidateRecord(Env):

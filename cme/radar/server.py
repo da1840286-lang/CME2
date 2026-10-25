@@ -411,7 +411,7 @@ table{border-collapse:collapse;width:100%}td,th{border-bottom:1px solid var(--bd
 <main><div id="list"></div><div id="detail"><p class="unk">Лента пуста. Нажмите «Найти (FIND)» или импортируйте сохранённый файл discovery.</p></div></main>
 <div id="msg"></div>
 <dialog id="dlgFind"><form method="dialog"><h3>FIND: поиск товарных рекламных источников</h3>
-<p class="unk">Каждый запуск делает до N платных запросов к SocialCrawl: сначала поиск спонсируемых товарных роликов по ключам и текущему OfferCard, затем Ads Top только после обнаружения релевантного источника. Автоматический анализ здесь не запускается.</p>
+<p class="unk">Каждый запуск делает до N платных запросов к SocialCrawl: часть бюджета идёт на Sponsored Search товарных роликов, часть — на Ads Top по CTR/CVR и другим показателям даже без предварительного прохождения money-gate. Это расширяет поиск, но не ослабляет коммерческий отбор и Target-Fit при переносе. Автоматический анализ здесь не запускается.</p>
 <p>Страна <input id="fCountry" value="US" size="4"> Период <select id="fPeriod"><option>7</option><option selected>30</option><option>180</option></select></p>
 <p>Запросов (макс.) <input id="fReq" type="number" min="1" max="10" value="3" style="width:60px"> Объявлений <input id="fAds" type="number" min="1" max="50" value="20" style="width:60px"></p>
 <p>Ключевые слова (через запятую, необязательно)<br><input id="fKw" size="40"></p>

@@ -229,9 +229,12 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
     stats = getattr(client, "last_discovery_stats", {}) or {}
     strategy = stats.setdefault("discovery_strategy", {})
     executed_calls = stats.get("calls") or []
-    strategy["request_policy"] = "Sponsored Search for explicit/product terms first; Ads Top only after DIRECT/EXPANDED target supply appears."
+    strategy["request_policy"] = (
+        "Bounded Sponsored Search plus reserved Ads Top performance queries, even when no prior source passes "
+        "the money/mechanism gate; final automatic eligibility and Target-Fit transfer gates remain strict."
+    )
     strategy["supply_search_enabled"] = True
-    strategy["supply_lane"] = "tiktok_sponsored_search_then_ads_top_on_target"
+    strategy["supply_lane"] = "tiktok_sponsored_search_plus_ads_top_performance"
     strategy["supply_search_calls_used"] = sum(1 for call in executed_calls if call.get("source") == "sponsored_search")
     strategy["performance_calls_used"] = sum(1 for call in executed_calls if call.get("source") == "ads_top")
     diagnostics = _find_diagnostics(stats, len(candidates))

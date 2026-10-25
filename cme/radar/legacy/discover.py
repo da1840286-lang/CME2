@@ -631,6 +631,7 @@ def discover_and_rank(
     mode = (discovery_mode or "auto").lower().strip()
     if mode not in {"auto", "strict", "expanded", "mechanism-hunt"}:
         raise ValueError("discovery_mode must be auto, strict, expanded or mechanism-hunt")
+    use_adaptive_supply_search = bool(supply_search and mode != "mechanism-hunt")
 
     exclude_ad_ids = {str(x) for x in (exclude_ad_ids or set()) if x}
     vertical = canonical_vertical(vertical, target_offer=target_offer, prelander=prelander)
@@ -743,18 +744,29 @@ def discover_and_rank(
                 mechanism_count += 1
 
         return money_count, mechanism_count
-    if supply_search and mode != "mechanism-hunt":
-        # Live adaptive policy:
-        # 1) keep searching target/product queries while no source passes a supported readiness gate,
-        # 2) permit Ads Top only after a commercial money-gate pass or an independent mechanism-source score >= 70,
-        # 3) if bounded target search produces no qualified source, stop without buying broad Ads Top inventory.
-        supply_search_budget = min(max(0, int(keyword_boards)), max_requests)
+    if use_adaptive_supply_search:
+        # Reserve a bounded performance-discovery lane alongside product Sponsored Search.
+        # Ads Top can provide CTR/CVR/objective/landing-page evidence that Sponsored Search
+        # often omits. Discovering those rows is not commercial approval: Selection and
+        # the downstream Target-Fit gate remain unchanged and strict.
+        requested_supply_budget = min(max(0, int(keyword_boards)), max_requests)
+        reserved_performance_budget = (
+            min(max_requests - 1, max(1, (3 * max_requests + 9) // 10))
+            if max_requests > 1 else 0
+        )
+        supply_search_budget = min(requested_supply_budget, max_requests - reserved_performance_budget)
         supply_queries = _ordered_supply_queries(
             vertical, explicit, max_count=supply_search_budget, search_tags_dir=search_tags_dir,
         )
+        supply_search_budget = len(supply_queries)
+        performance_budget = max_requests - supply_search_budget
         query_index = 0
         search_calls = 0
         top_index = 0
+        performance_order_list = [
+            x for x in ("ctr", "cvr", "play_6s_rate", "play_2s_rate", "impression", "for_you", "like")
+            if x in client.ORDER_BY
+        ] or order_list
         while len(calls) < max_requests:
             money_count, mechanism_count = source_analysis_ready_counts()
             analysis_ready_count = money_count + mechanism_count
@@ -777,15 +789,18 @@ def discover_and_rank(
                 )
                 continue
 
-            # Target relevance without commercial/mechanism readiness is not enough to
-            # justify the expensive Ads Top query. Keep the rejected source in diagnostics.
             if analysis_ready_count == 0:
+                # Sponsored Search alone did not establish eligibility. Spend the reserved
+                # Ads Top budget anyway to look for performance-backed source evidence;
+                # do not relax any gate or admit a candidate merely because it was found.
+                if len(calls) >= max_requests or top_index >= performance_budget:
+                    break
+            elif len(calls) >= max_requests:
                 break
 
-            # A qualified source exists. Only now may Ads Top be used to fill an incomplete queue.
-            if len(calls) >= max_requests:
-                break
-            order_by = order_list[top_index % len(order_list)]
+            # Prioritize measurable performance boards in the independent discovery lane.
+            # If a source becomes eligible early, remaining request capacity can help fill the queue.
+            order_by = performance_order_list[top_index % len(performance_order_list)]
             total_credits = _fetch_plan(
                 client=client, country=country, period=period, industry=industry, vertical=vertical,
                 ad_language=ad_language, limit_per_board=limit_per_board,
@@ -806,6 +821,7 @@ def discover_and_rank(
         if max_requests > 1 and initial_broad_budget == 0:
             initial_broad_budget = 1
             target_budget = min(target_budget, max_requests - initial_broad_budget)
+        performance_budget = max(0, max_requests - target_budget)
 
         for idx in range(initial_broad_budget):
             order_by = order_list[idx % len(order_list)]
@@ -1052,7 +1068,7 @@ def discover_and_rank(
         "target_relevant_ads": target_relevant_ads,
         "target_relevant_shortfall": max(0, source_queue_limit - target_relevant_ads),
         "discovery_stop_basis": discovery_stop_basis,
-        "performance_lane_reserved": bool(supply_search and max_requests > min(max(0, int(keyword_boards)), max_requests)),
+        "performance_lane_reserved": bool(use_adaptive_supply_search and performance_budget > 0),
         "qualified_source_shortfall": max(0, max_ads - _discovery_ready_count(fresh_records, vertical)),
         "strict_relevant_ads": len(strict_pool),
         "expanded_relevant_ads": len(expanded_pool),
@@ -1080,17 +1096,22 @@ def discover_and_rank(
         "fallback_path": fallback_path,
         "discovery_strategy": {
             "supply_search_enabled": bool(supply_search),
-            "supply_search_budget": min(max(0, int(keyword_boards)), max_requests) if supply_search else 0,
-            "performance_budget": max(0, max_requests - (min(max(0, int(keyword_boards)), max_requests) if supply_search else 0)) if supply_search else initial_broad_budget,
-            "initial_broad_budget": (max(0, max_requests - min(max(0, int(keyword_boards)), max_requests) - (1 if min(max(0, int(keyword_boards)), max_requests) and max_requests - min(max(0, int(keyword_boards)), max_requests) > 0 else 0)) if supply_search else initial_broad_budget),
-            "target_keyword_budget": (min(max(0, int(keyword_boards)), max_requests) if supply_search else target_budget),
-            "fallback_broad_budget": (0 if supply_search else fallback_reserve),
+            "supply_search_budget": supply_search_budget if use_adaptive_supply_search else 0,
+            "performance_budget": performance_budget,
+            "reserved_performance_budget": performance_budget if use_adaptive_supply_search else 0,
+            "initial_broad_budget": 0 if use_adaptive_supply_search else initial_broad_budget,
+            "target_keyword_budget": supply_search_budget if use_adaptive_supply_search else target_budget,
+            "fallback_broad_budget": performance_budget if use_adaptive_supply_search else fallback_reserve,
             "keyword_boards": max(0, int(keyword_boards)),
             "source_queue_size": source_queue_limit,
-            "supply_lane": "tiktok_search_sponsored" if supply_search else "ads_top",
-            "supply_queries_planned": supply_queries if supply_search and mode != "mechanism-hunt" else [],
+            "supply_lane": "tiktok_sponsored_search_then_reserved_ads_top" if use_adaptive_supply_search else "ads_top_legacy_hybrid",
+            "supply_queries_planned": supply_queries if use_adaptive_supply_search else [],
             "supply_queries_executed": [c.get("keyword", "") for c in calls if c.get("source") == "sponsored_search"],
-            "query_failover_policy": "target_seeds_until_money_or_mechanism_ready -> Ads Top only after source gate",
+            "performance_calls_used": sum(1 for c in calls if c.get("source") == "ads_top"),
+            "query_failover_policy": (
+                "bounded_target_queries_then_ads_top_even_without_source_gate; downstream money/mechanism and target-fit gates remain strict"
+                if use_adaptive_supply_search else "legacy_ads_top_hybrid"
+            ),
         },
         "search_tags_file": str(search_tags_path(vertical, search_tags_dir)),
         "search_tags_available": load_search_tags(vertical, search_tags_dir),
