@@ -93,9 +93,14 @@ class VendoredCodeIsTheRealOne(Env):
                                         "product_type": "cordless handheld car vacuum"}},
                              client=T.SocialCrawlTikTokTopAds(api_key="TESTKEY"))
         queries = [p["query"] for url, p in calls if url == T.SocialCrawlTikTokTopAds.SEARCH_URL]
-        self.assertEqual(queries, ["car vacuum", "Fanttik V8 Mate Cordless Car Vacuum", "cordless handheld car vacuum"])
+        self.assertEqual(queries, ["car vacuum", "Fanttik V8 Mate Cordless Car Vacuum"])
         self.assertEqual(len(calls), 3)
-        self.assertTrue(all(url == T.SocialCrawlTikTokTopAds.SEARCH_URL for url, _ in calls))
+        self.assertEqual([url for url, _ in calls], [
+            T.SocialCrawlTikTokTopAds.SEARCH_URL,
+            T.SocialCrawlTikTokTopAds.SEARCH_URL,
+            T.SocialCrawlTikTokTopAds.BASE_URL,
+        ])
+        self.assertEqual(calls[2][1].get("order_by"), "ctr")
         self.assertEqual(res["candidates"], [])  # no weakening of the target-relevance gate
         self.assertEqual(res["diagnostics"]["outcome"], "NO_TARGET_RELEVANCE")
         self.assertEqual(res["diagnostics"]["raw_ads_returned"], 3)

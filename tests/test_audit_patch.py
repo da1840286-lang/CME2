@@ -324,7 +324,8 @@ class PatternTransferWorkflowWiringTests(unittest.TestCase):
         self.assertIn("PATTERN_EXTRACTION_NOT_COMMERCIAL_APPROVAL", workflow)
         self.assertIn("Pattern extraction is not commercial approval", workflow)
         self.assertNotIn("Analysis-only source contract is not commercial approval and cannot be used by stage=all", workflow)
-        self.assertIn("Relevance and commercial scores are retained as ranking/evidence metadata", workflow)
+        self.assertIn("Automatic stage=all applies the strict source-commercial/mechanism eligibility gate before analysis", workflow)
+        self.assertIn("independent Target-Fit gate before transfer", workflow)
 
     def test_all_can_reuse_prior_find_artifact_from_same_branch(self):
         workflow = (ROOT / ".github" / "workflows" / "live-smoke.yml").read_text(encoding="utf-8")
