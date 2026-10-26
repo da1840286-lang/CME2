@@ -302,6 +302,7 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
     if not 1 <= max_requests <= 10 or not 1 <= max_ads <= 50:
         raise ValueError("max_requests must be 1..10 and max_ads 1..50")
     order_bys = [str(x) for x in (params.get("order_bys") or ["for_you"])]
+    performance_order_bys = _clean_terms(params.get("performance_order_bys"))
     user_keywords = _clean_terms(params.get("keywords"))
     offer = _offer_context(params)
     conflict = _query_offer_conflict(user_keywords, offer)
@@ -309,7 +310,8 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
     # The adaptive ranker can fall back to product-category seeds from product_search_tags;
     # CTA-only tags are intentionally not used as the first discovery lane.
     search_terms = _clean_terms(user_keywords + [offer["target_offer"], offer["product_type"], offer["product_category"]])
-    request = {"country": country, "period": period, "order_bys": order_bys, "keywords": user_keywords,
+    request = {"country": country, "period": period, "order_bys": order_bys,
+               "performance_order_bys": performance_order_bys, "keywords": user_keywords,
                "search_terms": search_terms, "target_offer": offer["target_offer"],
                "product_type": offer["product_type"], "product_category": offer["product_category"],
                "max_ads": max_ads, "max_requests": max_requests, "vertical": VERTICAL}
@@ -344,7 +346,8 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
             product_type=offer["product_type"] or offer["product_category"],
             prelander=offer["prelander"], landing_page=offer["landing_page"],
             discovery_mode=str(params.get("discovery_mode") or "auto"),
-            search_tags_dir=PRODUCT_SEARCH_TAGS_DIR, supply_search=True)
+            search_tags_dir=PRODUCT_SEARCH_TAGS_DIR, supply_search=True,
+            performance_order_bys=performance_order_bys)
     except SocialCrawlError as e:
         raise FindUnavailable("UNAVAILABLE", str(e)) from e
     except OSError as e:  # network errors from requests derive from OSError

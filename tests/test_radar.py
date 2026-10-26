@@ -66,6 +66,27 @@ class VendoredCodeIsTheRealOne(Env):
         self.assertEqual(record["play_2s_rate"], 0)
         self.assertEqual(record["play_6s_rate"], "0.42")
 
+    def test_merge_item_preserves_playback_metrics_when_duplicate_arrives_from_ads_top(self):
+        combined = {
+            "same-ad": {
+                "ad_id": "same-ad",
+                "play_2s_rate": None,
+                "play_6s_rate": None,
+                "discovery_boards": ["sponsored_search"],
+                "discovery_keywords": ["car vacuum"],
+                "discovery_hits": 1,
+            }
+        }
+        incoming = {"ad_id": "same-ad", "play_2s_rate": 0, "play_6s_rate": "0.42"}
+
+        merged = legacy_discover._merge_item(combined, incoming, "play_6s_rate", "car vacuum")
+
+        self.assertFalse(merged)  # duplicate updated in-place, not added as a new ad
+        self.assertEqual(combined["same-ad"]["play_2s_rate"], 0)  # measured zero is data
+        self.assertEqual(combined["same-ad"]["play_6s_rate"], "0.42")
+        self.assertIn("play_6s_rate", combined["same-ad"]["discovery_boards"])
+
+    def test_query_offer_conflict_stops_before_provider_call(self):
     def test_query_offer_conflict_stops_before_provider_call(self):
         params = {"country": "US", "max_requests": 2, "keywords": ["portable tire inflator"],
                   "offer": {"name": "Fanttik V8 Mate Cordless Car Vacuum",
@@ -128,6 +149,33 @@ class VendoredCodeIsTheRealOne(Env):
         self.assertIn("play_6s_rate", candidate["commercial_evidence"]["available_metrics"])
         self.assertEqual(candidate["commercial_evidence"]["level"], "COMMERCIAL_PROXY")
 
+    def test_find_can_target_playback_boards_and_report_provider_metric_presence(self):
+        calls = []
+        item = synthetic_post("playback-board-probe", ctr=None, cvr=None, views=1000)
+        item["post"]["ext"]["ad"]["play_2s_rate"] = 0.67
+        item["computed"]["play_6s_rate"] = "0.32"
+        offer = {"name": "Fanttik V8 Mate Cordless Car Vacuum",
+                 "product_type": "cordless handheld car vacuum"}
+
+        with self.fake_find([item], calls):
+            result = F.run_find(
+                {"country": "US", "max_requests": 4, "max_ads": 20, "keywords": ["car vacuum"],
+                 "performance_order_bys": ["play_6s_rate", "play_2s_rate"], "offer": offer},
+                client=T.SocialCrawlTikTokTopAds(api_key="TESTKEY"),
+            )
+
+        top_calls = [params for url, params in calls if url == T.SocialCrawlTikTokTopAds.BASE_URL]
+        self.assertEqual([params.get("order_by") for params in top_calls],
+                         ["play_6s_rate", "play_2s_rate"])
+        self.assertEqual(result["request"]["performance_order_bys"], ["play_6s_rate", "play_2s_rate"])
+        top_stats = [call for call in result["stats"]["calls"] if call["source"] == "ads_top"]
+        self.assertEqual([call["order_by"] for call in top_stats], ["play_6s_rate", "play_2s_rate"])
+        for call in top_stats:
+            self.assertEqual(call["playback_metrics_returned"],
+                             {"play_2s_rate": 1, "play_6s_rate": 1})
+            self.assertTrue(call["playback_metric_examples"])
+
+    def test_find_uses_product_terms_and_reports_raw_rows_rejected_by_source_gate(self):
     def test_find_uses_product_terms_and_reports_raw_rows_rejected_by_source_gate(self):
         calls = []
         def fake_get(url, params=None, headers=None, timeout=None):

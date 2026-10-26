@@ -44,6 +44,16 @@ on:
         type: string
         required: false
         default: "car vacuum"
+      find_performance_order:
+        description: "Targeted live validation for FIND. Choose playback_both and set find_requests=4 to use the two Ads Top calls for play_6s_rate and play_2s_rate. Default preserves normal order; selection gates are unchanged."
+        type: choice
+        options:
+          - default
+          - play_6s_rate
+          - play_2s_rate
+          - playback_both
+        required: true
+        default: default
       find_run_id:
         description: "For analyze/all: numeric run ID of a completed FIND run"
         type: string
@@ -142,6 +152,7 @@ jobs:
       FIND_REQUESTS: ${{ inputs.find_requests }}
       FIND_MAX_ADS: ${{ inputs.find_max_ads }}
       FIND_KEYWORDS: ${{ inputs.keywords }}
+      FIND_PERFORMANCE_ORDER: ${{ inputs.find_performance_order }}
       SHOTS: ${{ inputs.shots }}
       CME_SHOT: ${{ inputs.shot }}
       BRAIN_RUN_ID: ${{ inputs.brain_run_id }}
@@ -484,11 +495,22 @@ jobs:
           offer_data = json.loads(raw_offer) if raw_offer else {}
           if not isinstance(offer_data, dict):
               raise SystemExit("offer_json must be a JSON object")
+          order_mode = os.environ.get("FIND_PERFORMANCE_ORDER", "default")
+          performance_order_options = {
+              "default": [],
+              "play_6s_rate": ["play_6s_rate"],
+              "play_2s_rate": ["play_2s_rate"],
+              "playback_both": ["play_6s_rate", "play_2s_rate"],
+          }
+          if order_mode not in performance_order_options:
+              raise SystemExit(f"Unknown FIND_PERFORMANCE_ORDER={order_mode!r}")
+          performance_order_bys = performance_order_options[order_mode]
           params = {"country": os.environ["FIND_COUNTRY"].upper(),
                     "period": int(os.environ["FIND_PERIOD"]),
                     "max_requests": int(os.environ["FIND_REQUESTS"]),
                     "max_ads": int(os.environ["FIND_MAX_ADS"]),
-                    "keywords": keywords, "offer": offer_data, "discovery_mode": "auto"}
+                    "keywords": keywords, "offer": offer_data, "discovery_mode": "auto",
+                    "performance_order_bys": performance_order_bys}
           result = run_find(params)
           out = Path("out")
           (out / "candidates.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")

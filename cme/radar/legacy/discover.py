@@ -377,7 +377,7 @@ def _merge_item(combined: dict[str, dict[str, Any]], item: dict[str, Any], order
     if keyword and keyword not in existing.setdefault("discovery_keywords", []):
         existing["discovery_keywords"].append(keyword)
     for field in (
-        "ctr", "cvr", "rank", "cost_score", "like_tier", "views", "likes",
+        "ctr", "cvr", "play_2s_rate", "play_6s_rate", "rank", "cost_score", "like_tier", "views", "likes",
         "comments", "shares", "estimated_reach", "duration_seconds", "video_url",
         "video_url_540p", "video_url_360p", "source_url", "industry", "objective",
     ):
@@ -466,6 +466,25 @@ def _fetch_plan(
         credits = result.get("credits_used")
         if isinstance(credits, (int, float)):
             total_credits += int(credits)
+        playback_fields = ("play_2s_rate", "play_6s_rate")
+        playback_metrics_returned = {
+            field: sum(
+                1 for item in result["items"]
+                if isinstance(item, dict) and item.get(field) not in (None, "")
+            )
+            for field in playback_fields
+        }
+        playback_metric_examples = [
+            {
+                "ad_id": str(item.get("ad_id") or item.get("video_id") or ""),
+                "title": str(item.get("title") or "")[:120],
+                "play_2s_rate": item.get("play_2s_rate"),
+                "play_6s_rate": item.get("play_6s_rate"),
+            }
+            for item in result["items"]
+            if isinstance(item, dict)
+            and any(item.get(field) not in (None, "") for field in playback_fields)
+        ][:3]
         before = len(combined)
         new_items = 0
         for item in result["items"]:
@@ -487,6 +506,8 @@ def _fetch_plan(
             "unique_after": len(combined),
             "credits_used": credits,
             "request_id": result.get("request_id"),
+            "playback_metrics_returned": playback_metrics_returned,
+            "playback_metric_examples": playback_metric_examples,
         })
     return total_credits
 
@@ -1139,6 +1160,7 @@ def discover_and_rank(
     search_tags_dir: str | Path = _SEARCH_TAGS_DEFAULT_DIR,
     supply_search: bool = False,
     source_queue_size: int | None = None,
+    performance_order_bys: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     mode = (discovery_mode or "auto").lower().strip()
     if mode not in {"auto", "strict", "expanded", "mechanism-hunt"}:
@@ -1281,10 +1303,15 @@ def discover_and_rank(
         query_index = 0
         search_calls = 0
         top_index = 0
-        performance_order_list = [
-            x for x in ("ctr", "cvr", "play_6s_rate", "play_2s_rate", "impression", "for_you", "like")
-            if x in client.ORDER_BY
-        ] or order_list
+        default_performance_order = ("ctr", "cvr", "play_6s_rate", "play_2s_rate", "impression", "for_you", "like")
+        requested_performance_order = [
+            str(x) for x in (performance_order_bys or [])
+            if str(x) in client.ORDER_BY
+        ]
+        performance_order_list = list(dict.fromkeys(
+            requested_performance_order
+            + [x for x in default_performance_order if x in client.ORDER_BY]
+        )) or order_list
         while len(calls) < max_requests:
             money_count, mechanism_count = source_analysis_ready_counts()
             analysis_ready_count = money_count + mechanism_count
