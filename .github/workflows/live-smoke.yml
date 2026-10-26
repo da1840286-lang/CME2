@@ -579,6 +579,7 @@ jobs:
           from pathlib import Path
           from cme.radar.server import ROOT, RadarApp
           from cme.radar.select import pattern_source_reason
+          from cme.radar.source_loop import analyze_with_invalid_output_retry
 
           out = Path("out").resolve()
           run_id = os.environ.get("FIND_RUN_ID", "").strip()
@@ -616,9 +617,30 @@ jobs:
                          production_shots=1)
           try:
               app.store.ingest([candidate], "github-find-" + run_id, "found")
-              status = app.do_analyze(cid)
+              app.store.decide(cid, "shortlist", "Selected manually from GitHub Actions FIND")
+              statuses = analyze_with_invalid_output_retry(lambda: app.do_analyze(cid), max_retries=1)
+              attempt_rows = []
+              status = statuses[-1] if statuses else {"status": "UNKNOWN", "detail": "no analysis attempt returned"}
               saved_rows = app.store.analyses(cid)
               saved = saved_rows[0] if saved_rows else {}
+              for index, item in enumerate(statuses, start=1):
+                  attempt_rows.append({
+                      "candidate_id": cid,
+                      "attempt": index,
+                      "analysis_id": item.get("analysis_id"),
+                      "status": str(item.get("status") or "UNKNOWN").upper(),
+                      "detail": str(item.get("detail") or "")[:500],
+                      "same_candidate_retry": index > 1,
+                  })
+              attempt_artifact = {"selection_mode": "manual_from_prior_find", "candidate_id": cid,
+                                  "max_attempts": 2, "attempts": attempt_rows,
+                                  "selected_candidate_id": cid if status.get("status") == "OK" else None}
+              (out / "source_analysis_attempts.json").write_text(
+                  json.dumps(attempt_artifact, ensure_ascii=False, indent=2), encoding="utf-8")
+              calls_path = work / "calls.jsonl"
+              if calls_path.is_file():
+                  shutil.copy2(calls_path, out / "radar-analysis-calls.jsonl")
+
               source_check = candidate.get("source_check") or {}
               analysis = {"candidate_id": cid, "analysis_id": status.get("analysis_id"), "status": status.get("status"),
                           "selection_mode": "manual_from_prior_find", "decision": "PATTERN_EXTRACTION_ONLY",
@@ -627,8 +649,16 @@ jobs:
                           "source_relevance": source_check.get("classification", "UNKNOWN"),
                           "source_score": score.get("final_score"),
                           "source_evidence_scope": "six sampled video frames only; mechanism and transferability remain hypotheses",
-                          "result": saved.get("result"), "warnings": status.get("warnings", []), "detail": status.get("detail", "")}
+                          "result": saved.get("result"), "warnings": status.get("warnings", []),
+                          "detail": status.get("detail", ""), "analysis_attempts": attempt_rows}
               (out / "source_analysis.json").write_text(json.dumps(analysis, ensure_ascii=False, indent=2), encoding="utf-8")
+              with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+                  summary.write("## Source-only video analysis\n\n")
+                  summary.write(f"- Candidate: `{cid}`\n- Brand/title: {out_selected['brand'] or 'unknown'} — {out_selected['title'] or '(no title)'}\n")
+                  summary.write(f"- Analysis status: `{status.get('status')}`\n- Analysis attempts: {len(attempt_rows)}\n")
+                  summary.write("- Production/commercial approval: **not granted by this stage**\n")
+                  summary.write("- Outputs: `source_analysis.json`, `source_analysis_attempts.json` and provider call diagnostics; no image generation was called.\n\n")
+              print(json.dumps(analysis, ensure_ascii=False, indent=2))
               if status.get("status") != "OK":
                   raise SystemExit(5 if status.get("status") in {"API_ERROR", "INVALID_OUTPUT"} else 4)
               source_contract = {"status": "OK", "candidate_id": cid, "analysis_id": status.get("analysis_id"),
@@ -637,12 +667,6 @@ jobs:
                                  "review_status": "PATTERN_EXTRACTED_COMMERCIAL_PERFORMANCE_UNVERIFIED",
                                  "source_scope": "sampled frames only; mechanism and transferability remain hypotheses"}
               (out / "source_contract.json").write_text(json.dumps(source_contract, ensure_ascii=False, indent=2), encoding="utf-8")
-              with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
-                  summary.write("## Source-only video analysis\n\n")
-                  summary.write(f"- Candidate: `{cid}`\n- Brand/title: {out_selected['brand'] or 'unknown'} — {out_selected['title'] or '(no title)'}\n")
-                  summary.write(f"- Analysis status: `{status.get('status')}`\n- Production/commercial approval: **not granted by this stage**\n")
-                  summary.write("- Outputs: `source_analysis.json` and sanitized `source_contract.json`; no image generation was called.\n")
-              print(json.dumps(analysis, ensure_ascii=False, indent=2))
           finally:
               app.store.close()
               shutil.rmtree(work, ignore_errors=True)
