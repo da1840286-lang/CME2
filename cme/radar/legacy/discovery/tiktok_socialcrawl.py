@@ -54,6 +54,76 @@ class SocialCrawlTikTokTopAds:
         return self._request_json(self.BASE_URL, params)
 
     @staticmethod
+    def _raw_playback_field_diagnostics(raw_items: list[dict[str, Any]]) -> dict[str, Any]:
+        """Describe playback-related fields before normalization, without storing whole provider rows."""
+        field_pattern = re.compile(
+            r"(?:play|watch|retention|view.?through).*(?:2s|6s|rate|percent|ratio)"
+            r"|(?:2s|6s).*(?:play|watch|retention|rate|percent|ratio)",
+            re.IGNORECASE,
+        )
+        path_counts: dict[str, int] = {}
+        examples: list[dict[str, Any]] = []
+        key_shapes: list[dict[str, Any]] = []
+
+        def scan(value: Any, path: str = "$", depth: int = 0) -> list[dict[str, Any]]:
+            found: list[dict[str, Any]] = []
+            if depth > 9:
+                return found
+            if isinstance(value, dict):
+                for key, child in value.items():
+                    child_path = f"{path}.{key}"
+                    if field_pattern.search(str(key)):
+                        path_counts[child_path] = path_counts.get(child_path, 0) + 1
+                        if child is None or isinstance(child, (str, int, float, bool)):
+                            sample_value = child
+                        else:
+                            sample_value = f"<{type(child).__name__}>"
+                        found.append({
+                            "path": child_path,
+                            "value_type": type(child).__name__,
+                            "value": sample_value,
+                        })
+                    found.extend(scan(child, child_path, depth + 1))
+            elif isinstance(value, list):
+                for index, child in enumerate(value[:50]):
+                    found.extend(scan(child, f"{path}[{index}]", depth + 1))
+            return found
+
+        for raw in raw_items if isinstance(raw_items, list) else []:
+            if not isinstance(raw, dict):
+                continue
+            post = raw.get("post", raw)
+            post = post if isinstance(post, dict) else {}
+            ext = post.get("ext") if isinstance(post.get("ext"), dict) else {}
+            ad = ext.get("ad") if isinstance(ext.get("ad"), dict) else {}
+            computed = raw.get("computed") if isinstance(raw.get("computed"), dict) else {}
+            item_matches = scan(raw)
+            content = post.get("content") if isinstance(post.get("content"), dict) else {}
+            key_shapes.append({
+                "ad_id": str(post.get("id") or ad.get("id") or raw.get("id") or ""),
+                "title": str(content.get("text") or ad.get("title") or "")[:100],
+                "root_keys": sorted(str(key) for key in raw.keys())[:40],
+                "post_keys": sorted(str(key) for key in post.keys())[:40],
+                "ext_keys": sorted(str(key) for key in ext.keys())[:40],
+                "ad_keys": sorted(str(key) for key in ad.keys())[:60],
+                "computed_keys": sorted(str(key) for key in computed.keys())[:40],
+            })
+            if item_matches and len(examples) < 5:
+                examples.append({
+                    "ad_id": str(post.get("id") or ad.get("id") or raw.get("id") or ""),
+                    "title": str(content.get("text") or ad.get("title") or "")[:100],
+                    "matched_fields": item_matches[:12],
+                })
+
+        return {
+            "raw_item_count": len(raw_items) if isinstance(raw_items, list) else 0,
+            "matched_field_paths": dict(sorted(path_counts.items())),
+            "matched_field_occurrences": sum(path_counts.values()),
+            "examples": examples,
+            "key_shapes": key_shapes[:3],
+        }
+
+    @staticmethod
     def _unwrap_item(item: dict[str, Any]) -> dict[str, Any]:
         post = item.get("post", item)
         ext = post.get("ext", {}) or {}
@@ -260,6 +330,7 @@ class SocialCrawlTikTokTopAds:
         payload = self._get(params)
         data = payload.get("data") or {}
         raw_items = data.get("items") or data.get("commercial_contents") or []
+        raw_playback_field_diagnostics = self._raw_playback_field_diagnostics(raw_items)
         items = [self._unwrap_item(x) for x in raw_items if isinstance(x, dict)]
         for item in items:
             item["discovery_query"] = keyword or ""
@@ -272,6 +343,7 @@ class SocialCrawlTikTokTopAds:
             "credits_remaining": payload.get("credits_remaining"),
             "request_id": payload.get("request_id"),
             "params": params,
+            "raw_playback_field_diagnostics": raw_playback_field_diagnostics,
         }
 
     def discover(
