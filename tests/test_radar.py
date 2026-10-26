@@ -87,7 +87,6 @@ class VendoredCodeIsTheRealOne(Env):
         self.assertIn("play_6s_rate", combined["same-ad"]["discovery_boards"])
 
     def test_query_offer_conflict_stops_before_provider_call(self):
-    def test_query_offer_conflict_stops_before_provider_call(self):
         params = {"country": "US", "max_requests": 2, "keywords": ["portable tire inflator"],
                   "offer": {"name": "Fanttik V8 Mate Cordless Car Vacuum",
                             "product_type": "cordless handheld car vacuum"}}
@@ -175,7 +174,6 @@ class VendoredCodeIsTheRealOne(Env):
                              {"play_2s_rate": 1, "play_6s_rate": 1})
             self.assertTrue(call["playback_metric_examples"])
 
-    def test_find_uses_product_terms_and_reports_raw_rows_rejected_by_source_gate(self):
     def test_find_uses_product_terms_and_reports_raw_rows_rejected_by_source_gate(self):
         calls = []
         def fake_get(url, params=None, headers=None, timeout=None):
