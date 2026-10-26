@@ -44,6 +44,16 @@ on:
         type: string
         required: false
         default: "car vacuum"
+      find_performance_order:
+        description: "Targeted live validation for FIND. Choose playback_both and set find_requests=4 to use the two Ads Top calls for play_6s_rate and play_2s_rate. Default preserves normal order; selection gates are unchanged."
+        type: choice
+        options:
+          - default
+          - play_6s_rate
+          - play_2s_rate
+          - playback_both
+        required: true
+        default: default
       find_run_id:
         description: "For analyze/all: numeric run ID of a completed FIND run"
         type: string
@@ -142,6 +152,7 @@ jobs:
       FIND_REQUESTS: ${{ inputs.find_requests }}
       FIND_MAX_ADS: ${{ inputs.find_max_ads }}
       FIND_KEYWORDS: ${{ inputs.keywords }}
+      FIND_PERFORMANCE_ORDER: ${{ inputs.find_performance_order }}
       SHOTS: ${{ inputs.shots }}
       CME_SHOT: ${{ inputs.shot }}
       BRAIN_RUN_ID: ${{ inputs.brain_run_id }}
@@ -484,11 +495,22 @@ jobs:
           offer_data = json.loads(raw_offer) if raw_offer else {}
           if not isinstance(offer_data, dict):
               raise SystemExit("offer_json must be a JSON object")
+          order_mode = os.environ.get("FIND_PERFORMANCE_ORDER", "default")
+          performance_order_options = {
+              "default": [],
+              "play_6s_rate": ["play_6s_rate"],
+              "play_2s_rate": ["play_2s_rate"],
+              "playback_both": ["play_6s_rate", "play_2s_rate"],
+          }
+          if order_mode not in performance_order_options:
+              raise SystemExit(f"Unknown FIND_PERFORMANCE_ORDER={order_mode!r}")
+          performance_order_bys = performance_order_options[order_mode]
           params = {"country": os.environ["FIND_COUNTRY"].upper(),
                     "period": int(os.environ["FIND_PERIOD"]),
                     "max_requests": int(os.environ["FIND_REQUESTS"]),
                     "max_ads": int(os.environ["FIND_MAX_ADS"]),
-                    "keywords": keywords, "offer": offer_data, "discovery_mode": "auto"}
+                    "keywords": keywords, "offer": offer_data, "discovery_mode": "auto",
+                    "performance_order_bys": performance_order_bys}
           result = run_find(params)
           out = Path("out")
           (out / "candidates.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -499,7 +521,12 @@ jobs:
                            "title": c.get("title"), "source_url": c.get("source_url"),
                            "video_url_present": bool(c.get("video_url")),
                            "final_score": score.get("final_score") if isinstance(score, dict) else None,
-                           "source_check": c.get("source_check")})
+                           "source_check": c.get("source_check"),
+                           "performance_evidence": c.get("performance_evidence") or {},
+                           "commercial_evidence": c.get("commercial_evidence") or {},
+                           "playback_metrics": {k: (c.get("metrics") or {}).get(k, {}).get("value")
+                                                for k in ("ctr", "cvr", "play_2s_rate", "play_6s_rate")
+                                                if k in (c.get("metrics") or {})}})
           (out / "candidate_summary.json").write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as s:
               mode = os.environ["CME_STAGE"]
@@ -509,7 +536,9 @@ jobs:
                   stats = result.get("stats") or {}
                   diag = result.get("diagnostics") or {}
                   queries = diag.get("search_queries_executed") or []
-                  if diag.get("raw_ads_returned", 0):
+                  if diag.get("outcome") == "INPUT_CONFLICT":
+                      s.write(f"FIND stopped before provider calls: {diag.get('explanation', 'input conflict')}\n\n")
+                  elif diag.get("raw_ads_returned", 0):
                       s.write(f"SocialCrawl returned {diag['raw_ads_returned']} raw ad row(s), but none passed the target-source selection rules.\n\n")
                   else:
                       s.write("SocialCrawl returned no raw ad rows for the planned source queries.\n\n")
@@ -522,7 +551,7 @@ jobs:
                       for item in (selection_diag.get("examples") or [])[:6]:
                           title = str(item.get("title") or "(no title)").replace("\n", " ")[:120]
                           url = item.get("source_url") if str(item.get("source_url") or "").startswith("https://") else ""
-                          s.write(f"- {item.get('ad_id')} — {item.get('reason')}; {title}; action={item.get('action')}; money_gate={item.get('money_gate_pass')}; [open ad]({url})\n")
+                          s.write(f"- {item.get('ad_id')} — {item.get('reason')}; {title}; action={item.get('action')}; money_gate={item.get('money_gate_pass')}; performance={(c.get('performance_evidence') or {}).get('basis', 'unknown')}; commercial_evidence={(c.get('commercial_evidence') or {}).get('level', 'unknown')}; playback={c.get('playback_metrics') or {}}; [open ad]({url})\n")
                       s.write("\n")
                   if queries:
                       s.write("Sponsored Search queries tried: " + ", ".join(queries) + "\n\n")
@@ -530,11 +559,11 @@ jobs:
                   title = str(c.get("title") or "(no title)").replace("\n", " ")[:160]
                   brand = str(c.get("brand") or "unknown brand")[:80]
                   url = c.get("source_url") if isinstance(c.get("source_url"), str) and str(c.get("source_url")).startswith("https://") else ""
-                  s.write(f"- `candidate_id: {c['id']}` — {brand}: {title}; score={c.get('final_score')}; video={'yes' if c.get('video_url_present') else 'no'}; [open ad]({url})\n")
+                  s.write(f"- `candidate_id: {c['id']}` — {brand}: {title}; score={c.get('final_score')}; video={'yes' if c.get('video_url_present') else 'no'}; performance={(c.get('performance_evidence') or {}).get('basis', 'unknown')}; commercial_evidence={(c.get('commercial_evidence') or {}).get('level', 'unknown')}; playback={c.get('playback_metrics') or {}}; [open ad]({url})\n")
               if mode == "find":
                   s.write("\nManual choice: run stage=all with this run ID and the selected candidate_id.\n")
               else:
-                  s.write("\nAutomatic stage=all applies the strict source-commercial/mechanism eligibility gate before analysis, then the independent Target-Fit gate before transfer. A manually supplied candidate_id is an explicit operator override, not evidence of commercial success.\n")
+                  s.write("\nPlayback metrics are shown only when SocialCrawl returned them. commercial_evidence is descriptive, not a profitability prediction. Automatic stage=all applies the strict source-commercial/mechanism eligibility gate before analysis, then the independent Target-Fit gate before transfer. Playback metrics are shown only when SocialCrawl returned them; commercial_evidence is descriptive, not a profitability prediction. A manually supplied candidate_id allows source inspection, not a commercial-success claim.\n")
           print(f"FIND finished: {len(rows)} candidate(s).")
           PY
           elif [[ "$CME_STAGE" == "analyze" ]]; then
@@ -681,7 +710,12 @@ jobs:
                                    "title": c.get("title"), "source_url": c.get("source_url"),
                                    "video_url_present": bool(c.get("video_url")),
                                    "final_score": score.get("final_score") if isinstance(score, dict) else None,
-                                   "source_check": c.get("source_check")})
+                                   "source_check": c.get("source_check"),
+                           "performance_evidence": c.get("performance_evidence") or {},
+                           "commercial_evidence": c.get("commercial_evidence") or {},
+                           "playback_metrics": {k: (c.get("metrics") or {}).get(k, {}).get("value")
+                                                for k in ("ctr", "cvr", "play_2s_rate", "play_6s_rate")
+                                                if k in (c.get("metrics") or {})}})
                   (out / "candidate_summary.json").write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
                   with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
                       summary.write("## TikTok FIND shortlist (automatic pipeline)\n\n")
@@ -690,8 +724,8 @@ jobs:
                           title = str(c.get("title") or "(no title)").replace("\n", " ")[:160]
                           brand = str(c.get("brand") or "unknown brand")[:80]
                           url = c.get("source_url") if isinstance(c.get("source_url"), str) and str(c.get("source_url")).startswith("https://") else ""
-                          summary.write(f"- candidate_id: {c['id']} — {brand}: {title}; score={c.get('final_score')}; video={'yes' if c.get('video_url_present') else 'no'}; {url}\n")
-                      summary.write("\nFIND shortlist admission uses product-type relevance and the strongest available performance evidence. Views/likes-only evidence is an engagement proxy, not proof of sales. Automatic stage=all still enforces source-commercial/mechanism and Target-Fit transfer gates; an explicit candidate_id permits source inspection, not a commercial-success claim.\n")
+                          summary.write(f"- candidate_id: {c['id']} — {brand}: {title}; score={c.get('final_score')}; video={'yes' if c.get('video_url_present') else 'no'}; performance={(c.get('performance_evidence') or {}).get('basis', 'unknown')}; commercial_evidence={(c.get('commercial_evidence') or {}).get('level', 'unknown')}; playback={ {k: (c.get('metrics') or {}).get(k, {}).get('value') for k in ('ctr', 'cvr', 'play_2s_rate', 'play_6s_rate') if k in (c.get('metrics') or {})} }; {url}\n")
+                      summary.write("\nFIND shortlist admission uses product-type relevance and the strongest available performance evidence. Playback rates remain optional; commercial_evidence describes observed signals and is not a profitability forecast. Automatic stage=all still enforces source-commercial/mechanism and Target-Fit transfer gates; an explicit candidate_id permits source inspection, not a commercial-success claim.\n")
               candidates = json.loads(candidates_file.read_text(encoding="utf-8")).get("candidates", [])
               candidate, skipped = select_transfer_candidate(candidates, threshold)
               candidate_pool, ranked_skipped = rank_transfer_candidates(candidates, threshold)

@@ -58,9 +58,75 @@ class VendoredCodeIsTheRealOne(Env):
         self.assertIs(F.SocialCrawlTikTokTopAds, T.SocialCrawlTikTokTopAds)
         self.assertEqual(F.LEGACY_ERROR, "")
 
+    def test_socialcrawl_preserves_zero_playback_rate(self):
+        item = synthetic_post("zero-playback", ctr=0, cvr=0, views=1000)
+        item["post"]["ext"]["ad"]["play_2s_rate"] = 0
+        item["computed"]["play_6s_rate"] = "0.42"
+        record = T.SocialCrawlTikTokTopAds._unwrap_item(item)
+        self.assertEqual(record["play_2s_rate"], 0)
+        self.assertEqual(record["play_6s_rate"], "0.42")
+
+    def test_merge_item_preserves_playback_metrics_when_duplicate_arrives_from_ads_top(self):
+        combined = {
+            "same-ad": {
+                "ad_id": "same-ad",
+                "play_2s_rate": None,
+                "play_6s_rate": None,
+                "discovery_boards": ["sponsored_search"],
+                "discovery_keywords": ["car vacuum"],
+                "discovery_hits": 1,
+            }
+        }
+        incoming = {"ad_id": "same-ad", "play_2s_rate": 0, "play_6s_rate": "0.42"}
+
+        merged = legacy_discover._merge_item(combined, incoming, "play_6s_rate", "car vacuum")
+
+        self.assertFalse(merged)  # duplicate updated in-place, not added as a new ad
+        self.assertEqual(combined["same-ad"]["play_2s_rate"], 0)  # measured zero is data
+        self.assertEqual(combined["same-ad"]["play_6s_rate"], "0.42")
+        self.assertIn("play_6s_rate", combined["same-ad"]["discovery_boards"])
+
+    def test_query_offer_conflict_stops_before_provider_call(self):
+        params = {"country": "US", "max_requests": 2, "keywords": ["portable tire inflator"],
+                  "offer": {"name": "Fanttik V8 Mate Cordless Car Vacuum",
+                            "product_type": "cordless handheld car vacuum"}}
+        calls = []
+        def fake_get(url, params=None, headers=None, timeout=None):
+            calls.append((url, params))
+            return FakeResp(synthetic_response([]))
+        with mock.patch.object(T.requests, "get", fake_get):
+            result = F.run_find(params, client=T.SocialCrawlTikTokTopAds(api_key="TESTKEY"))
+        self.assertEqual(result["diagnostics"]["outcome"], "INPUT_CONFLICT")
+        self.assertEqual(result["candidates"], [])
+        self.assertEqual(result["diagnostics"]["requests_executed"], 0)
+        self.assertEqual(calls, [])
+
+    def test_query_matching_offer_and_generic_keyword_do_not_conflict(self):
+        self.assertIsNone(F._query_offer_conflict(["car vacuum"], {
+            "product_type": "cordless handheld car vacuum", "product_category": ""}))
+        self.assertIsNone(F._query_offer_conflict(["kitchen gadget"], {
+            "product_type": "portable blender", "product_category": ""}))
+
+    def test_playback_rates_score_against_a_comparison_population(self):
+        from cme.radar.legacy.arbitrage import _performance_signal
+        population = [
+            {"play_2s_rate": 0.67, "play_6s_rate": 0.32},
+            {"play_2s_rate": 0.28, "play_6s_rate": 0.14},
+            {"play_2s_rate": 0.45, "play_6s_rate": 0.21},
+        ]
+        _, components, _ = _performance_signal(population[0], population)
+        self.assertIn("play_2s_rate", components)
+        self.assertIn("play_6s_rate", components)
+
     def test_run_find_calls_the_real_client_and_ranker(self):
         calls = []
-        with self.fake_find([synthetic_post("1001")], calls):
+        item = synthetic_post("1001")
+        item["post"]["ext"]["ad"]["play_2s_rate"] = 0.67
+        item["computed"]["play_6s_rate"] = 0.32
+        comparison = synthetic_post("1002")
+        comparison["post"]["ext"]["ad"]["play_2s_rate"] = 0.31
+        comparison["computed"]["play_6s_rate"] = 0.18
+        with self.fake_find([item, comparison], calls):
             res = F.run_find({"country": "us", "max_requests": 2, "keywords": ["car vacuum"], "discovery_mode": "strict",
                               "offer": {"name": "Fanttik V8 Mate Cordless Car Vacuum",
                                         "product_type": "cordless handheld car vacuum"}},
@@ -74,7 +140,45 @@ class VendoredCodeIsTheRealOne(Env):
         self.assertEqual(res["request"]["vertical"], "Physical Products")
         self.assertEqual(res["request"]["search_terms"], ["car vacuum", "Fanttik V8 Mate Cordless Car Vacuum", "cordless handheld car vacuum"])
         self.assertTrue(res["stats"]["discovery_strategy"]["supply_search_enabled"])
-        self.assertEqual(res["candidates"][0]["metrics"]["views"]["source"], "socialcrawl:tiktok_sponsored_search")
+        candidate = res["candidates"][0]
+        self.assertEqual(candidate["metrics"]["views"]["source"], "socialcrawl:tiktok_sponsored_search")
+        self.assertEqual(candidate["metrics"]["play_2s_rate"]["value"], 0.67)
+        self.assertEqual(candidate["metrics"]["play_6s_rate"]["value"], 0.32)
+        self.assertIn("play_2s_rate", candidate["commercial_evidence"]["available_metrics"])
+        self.assertIn("play_6s_rate", candidate["commercial_evidence"]["available_metrics"])
+        self.assertEqual(candidate["commercial_evidence"]["level"], "COMMERCIAL_PROXY")
+
+    def test_find_can_target_playback_boards_and_report_provider_metric_presence(self):
+        calls = []
+        item = synthetic_post("playback-board-probe", ctr=None, cvr=None, views=1000)
+        item["post"]["ext"]["ad"]["play_2s_rate"] = 0.67
+        item["computed"]["play_6s_rate"] = "0.32"
+        offer = {"name": "Fanttik V8 Mate Cordless Car Vacuum",
+                 "product_type": "cordless handheld car vacuum"}
+
+        with self.fake_find([item], calls):
+            result = F.run_find(
+                {"country": "US", "max_requests": 4, "max_ads": 20, "keywords": ["car vacuum"],
+                 "performance_order_bys": ["play_6s_rate", "play_2s_rate"], "offer": offer},
+                client=T.SocialCrawlTikTokTopAds(api_key="TESTKEY"),
+            )
+
+        top_calls = [params for url, params in calls if url == T.SocialCrawlTikTokTopAds.BASE_URL]
+        self.assertEqual([params.get("order_by") for params in top_calls],
+                         ["play_6s_rate", "play_2s_rate"])
+        self.assertEqual(result["request"]["performance_order_bys"], ["play_6s_rate", "play_2s_rate"])
+        top_stats = [call for call in result["stats"]["calls"] if call["source"] == "ads_top"]
+        self.assertEqual([call["order_by"] for call in top_stats], ["play_6s_rate", "play_2s_rate"])
+        for call in top_stats:
+            self.assertEqual(call["playback_metrics_returned"],
+                             {"play_2s_rate": 1, "play_6s_rate": 1})
+            self.assertTrue(call["playback_metric_examples"])
+            raw_diag = call["raw_playback_field_diagnostics"]
+            self.assertGreater(raw_diag["matched_field_occurrences"], 0)
+            matched_paths = " ".join(raw_diag["matched_field_paths"])
+            self.assertIn("play_2s_rate", matched_paths)
+            self.assertIn("play_6s_rate", matched_paths)
+            self.assertTrue(call["provider_params"].get("order_by") in {"play_6s_rate", "play_2s_rate"})
 
     def test_find_uses_product_terms_and_reports_raw_rows_rejected_by_source_gate(self):
         calls = []
@@ -568,6 +672,48 @@ class FindStates(Env):
         self.assertEqual(app.do_find({"period": 14})["status"], "BAD_REQUEST")
         self.assertEqual(app.do_find({"max_requests": 99})["status"], "BAD_REQUEST")
 
+
+
+class CommercialEvidenceContractTests(unittest.TestCase):
+    def test_native_ad_metrics_are_proxy_not_proof_of_profit(self):
+        from cme.radar.evidence import classify_commercial_evidence
+        evidence = classify_commercial_evidence(
+            {"ctr": 0, "cvr": 0.8, "objective": "Conversions",
+             "landing_page_url": "https://example.invalid"},
+            {"final_score": 95, "components": {"money_signal_gate": {"pass": True}}},
+            {"basis": "NATIVE_PERFORMANCE_METRICS", "available_fields": ["ctr", "cvr"]},
+        )
+        self.assertEqual(evidence["level"], "COMMERCIAL_PROXY")
+        self.assertFalse(evidence["commercial_result_confirmed"])
+        self.assertFalse(evidence["money_gate_is_profit_proof"])
+        self.assertFalse(evidence["source_score_is_profit_probability"])
+
+    def test_views_and_likes_remain_attention_only_even_with_high_score(self):
+        from cme.radar.evidence import classify_commercial_evidence
+        evidence = classify_commercial_evidence(
+            {"views": 8000000, "likes": 200000},
+            {"final_score": 99, "components": {"money_signal_gate": {"pass": True}}},
+            {"basis": "ENGAGEMENT_PROXY", "available_fields": ["views", "likes"]},
+        )
+        self.assertEqual(evidence["level"], "ATTENTION_ONLY")
+        self.assertFalse(evidence["commercial_result_confirmed"])
+
+    def test_economic_validation_requires_verified_outcome_and_criterion(self):
+        from cme.radar.evidence import classify_commercial_evidence
+        candidate = {"economic_validation": {
+            "status": "CONFIRMED", "target_met": True,
+            "metrics": {"roas": 2.4, "net_profit": 135},
+            "success_criteria": "ROAS >= 2.0 and net profit > 0",
+            "verification_source": "TikTok Ads Manager export",
+            "verified_at": "2026-10-26", "verified_by": "operator",
+        }}
+        evidence = classify_commercial_evidence(candidate, {}, {})
+        self.assertEqual(evidence["level"], "ECONOMICALLY_VALIDATED")
+        self.assertTrue(evidence["commercial_result_confirmed"])
+        candidate["economic_validation"].pop("verified_by")
+        self.assertNotEqual(
+            classify_commercial_evidence(candidate, {}, {})["level"], "ECONOMICALLY_VALIDATED"
+        )
 
 
 class AutomaticSourceReadinessGate(unittest.TestCase):

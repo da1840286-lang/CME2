@@ -7,8 +7,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import time
 from pathlib import Path
+
+from .evidence import classify_commercial_evidence
 
 DATA_DIR = Path(__file__).resolve().parent / "data"
 # Search-only seeds for the live Sponsored Search lane. Keep separate from the
@@ -17,8 +20,8 @@ PRODUCT_SEARCH_TAGS_DIR = DATA_DIR / "product_search_tags"
 os.environ.setdefault("CME_VERTICALS_DIR", str(DATA_DIR / "verticals"))  # before the legacy import
 
 VERTICAL = "Physical Products"
-METRIC_FIELDS = ("views", "likes", "comments", "shares", "ctr", "cvr", "rank", "cost_score", "like_tier",
-                 "estimated_reach", "engagement_rate")
+METRIC_FIELDS = ("views", "likes", "comments", "shares", "ctr", "cvr", "play_2s_rate", "play_6s_rate",
+                 "rank", "cost_score", "like_tier", "estimated_reach", "engagement_rate")
 PERIODS = (7, 30, 180)
 
 LEGACY_ERROR = ""
@@ -109,6 +112,9 @@ def to_candidate(item: dict, request: dict, collected_at: str, origin: str, sour
         "source_score": score,
         "product_relevance": rec.get("product_relevance") or {},
         "performance_evidence": rec.get("performance_evidence") or {},
+        "commercial_evidence": classify_commercial_evidence(
+            rec, score, rec.get("performance_evidence") or {}
+        ),
         "shortlist_eligibility": rec.get("shortlist_eligibility") or {},
         "why": {**why, "product_relevance": rec.get("product_relevance") or {},
                 "performance_evidence": rec.get("performance_evidence") or {},
@@ -152,6 +158,66 @@ def _offer_context(params: dict) -> dict[str, str]:
         "landing_page": params.get("landing_page") or "",
     }
     return {key: " ".join(str(value or "").strip().split()) for key, value in fields.items()}
+
+
+_PRODUCT_QUERY_MODIFIERS = {
+    "portable", "cordless", "handheld", "rechargeable", "electric", "wireless", "mini", "compact",
+    "foldable", "smart", "new", "best", "top", "lightweight", "small", "large", "automatic",
+    "for", "with", "without", "the", "a", "an", "and", "or", "of", "in", "to", "by", "on",
+    "my", "your", "our", "his", "her", "their", "device", "product", "products", "gadget", "gadgets",
+    "tool", "tools", "accessory", "accessories", "cleaning", "shop", "sale", "buy", "ads", "ad",
+}
+_PRODUCT_CONTEXT_TERMS = {"car", "auto", "automotive", "home", "kitchen", "office", "outdoor"}
+
+
+def _product_terms(value: str) -> set[str]:
+    return {word for word in re.findall(r"[a-z0-9]+", str(value or "").casefold())
+            if len(word) > 1 and word not in _PRODUCT_QUERY_MODIFIERS}
+
+
+def _product_seed_vocabulary() -> set[str]:
+    """Use the configured product-query corpus for high-confidence category mismatch checks."""
+    path = PRODUCT_SEARCH_TAGS_DIR / "physical_products.txt"
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return set()
+    return set().union(*(_product_terms(line) for line in lines if line.strip() and not line.lstrip().startswith("#")))
+
+
+def _query_offer_conflict(keywords: list[str], offer: dict[str, str]) -> dict | None:
+    """Catch clear product-query conflicts; ignore generic, ambiguous, and mixed compatible queries."""
+    identity = offer.get("product_type") or offer.get("product_category")
+    target = _product_terms(identity)
+    vocabulary = _product_seed_vocabulary()
+    target_specific = (target & vocabulary) - _PRODUCT_CONTEXT_TERMS
+    if not target_specific:
+        return None
+
+    checked = []
+    for keyword in keywords:
+        terms = _product_terms(keyword)
+        anchors = (terms & vocabulary) - _PRODUCT_CONTEXT_TERMS
+        # A generic query (e.g. "kitchen gadget") is not specific enough to reject.
+        if not anchors:
+            continue
+        overlap = anchors & target_specific
+        union = anchors | target_specific
+        similarity = len(overlap) / len(union) if union else 0.0
+        checked.append({"query": keyword, "anchors": sorted(anchors), "similarity": round(similarity, 3)})
+
+    if not checked or any(row["similarity"] >= 0.35 for row in checked):
+        return None
+    query_list = ", ".join(repr(row["query"]) for row in checked)
+    return {
+        "status": "INPUT_CONFLICT",
+        "query_anchors": sorted({term for row in checked for term in row["anchors"]}),
+        "offer_anchors": sorted(target_specific),
+        "queries": checked,
+        "reason": (f"The explicit product query ({query_list}) appears to target a different product category "
+                   f"than offer product_type/product_category={identity!r}. Correct the query or offer before FIND; "
+                   "no SocialCrawl requests were sent."),
+    }
 
 
 def _find_diagnostics(stats: dict, candidate_count: int) -> dict:
@@ -235,21 +301,43 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
         raise ValueError(f"period must be one of {PERIODS}")
     if not 1 <= max_requests <= 10 or not 1 <= max_ads <= 50:
         raise ValueError("max_requests must be 1..10 and max_ads 1..50")
-    client = client or SocialCrawlTikTokTopAds()
-    enabled = client.enabled() if callable(client.enabled) else client.enabled  # a property in the old client
-    if not enabled:
-        raise FindUnavailable("NOT_CONFIGURED", find_status()["detail"] or "SOCIALCRAWL_API_KEY is not set")
     order_bys = [str(x) for x in (params.get("order_bys") or ["for_you"])]
+    performance_order_bys = _clean_terms(params.get("performance_order_bys"))
     user_keywords = _clean_terms(params.get("keywords"))
     offer = _offer_context(params)
+    conflict = _query_offer_conflict(user_keywords, offer)
     # Query exact operator terms first, then offer identity, product type and category.
     # The adaptive ranker can fall back to product-category seeds from product_search_tags;
     # CTA-only tags are intentionally not used as the first discovery lane.
     search_terms = _clean_terms(user_keywords + [offer["target_offer"], offer["product_type"], offer["product_category"]])
-    request = {"country": country, "period": period, "order_bys": order_bys, "keywords": user_keywords,
+    request = {"country": country, "period": period, "order_bys": order_bys,
+               "performance_order_bys": performance_order_bys, "keywords": user_keywords,
                "search_terms": search_terms, "target_offer": offer["target_offer"],
                "product_type": offer["product_type"], "product_category": offer["product_category"],
                "max_ads": max_ads, "max_requests": max_requests, "vertical": VERTICAL}
+    if conflict:
+        return {
+            "candidates": [],
+            "stats": {
+                "calls": [], "executed_requests": 0, "unique_ads": 0, "input_validation": conflict,
+                "discovery_strategy": {
+                    "supply_lane": "not_started", "supply_queries_executed": [],
+                    "request_policy": "Stopped by explicit query/offer category conflict before provider calls.",
+                },
+            },
+            "request": request,
+            "diagnostics": {
+                "outcome": "INPUT_CONFLICT", "explanation": conflict["reason"],
+                "search_lane": "not_started", "requests_executed": 0, "raw_ads_returned": 0,
+                "unique_ads": 0, "direct_relevant_ads": 0, "expanded_relevant_ads": 0,
+                "unverified_ads": 0, "hard_excluded_ads": 0, "search_queries_executed": [],
+                "request_sources": [], "input_conflict": conflict,
+            },
+        }
+    client = client or SocialCrawlTikTokTopAds()
+    enabled = client.enabled() if callable(client.enabled) else client.enabled  # a property in the old client
+    if not enabled:
+        raise FindUnavailable("NOT_CONFIGURED", find_status()["detail"] or "SOCIALCRAWL_API_KEY is not set")
     try:
         ranked = discover_and_rank(
             client=client, country=country, period=period, keywords=search_terms, order_bys=order_bys,
@@ -258,7 +346,8 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
             product_type=offer["product_type"] or offer["product_category"],
             prelander=offer["prelander"], landing_page=offer["landing_page"],
             discovery_mode=str(params.get("discovery_mode") or "auto"),
-            search_tags_dir=PRODUCT_SEARCH_TAGS_DIR, supply_search=True)
+            search_tags_dir=PRODUCT_SEARCH_TAGS_DIR, supply_search=True,
+            performance_order_bys=performance_order_bys)
     except SocialCrawlError as e:
         raise FindUnavailable("UNAVAILABLE", str(e)) from e
     except OSError as e:  # network errors from requests derive from OSError
@@ -277,6 +366,16 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
     strategy["supply_search_calls_used"] = sum(1 for call in executed_calls if call.get("source") == "sponsored_search")
     strategy["performance_calls_used"] = sum(1 for call in executed_calls if call.get("source") == "ads_top")
     diagnostics = _find_diagnostics(stats, len(candidates))
+    evidence_counts = {}
+    for candidate in candidates:
+        evidence = candidate.get("commercial_evidence") or {}
+        level = str(evidence.get("level") or "NO_EVIDENCE")
+        evidence_counts[level] = evidence_counts.get(level, 0) + 1
+    diagnostics["commercial_evidence_counts"] = dict(sorted(evidence_counts.items()))
+    diagnostics["economic_validation_note"] = (
+        "Commercial evidence labels describe available evidence only. Score, money-gate pass, CTR/CVR, "
+        "views and engagement do not by themselves confirm profitability."
+    )
     return {"candidates": candidates, "stats": stats, "request": request, "diagnostics": diagnostics}
 
 
