@@ -358,7 +358,7 @@ class VendoredCodeIsTheRealOne(Env):
         by_reason = result["diagnostics"]["source_selection_diagnostics"]["by_reason"]
         self.assertIn("PRODUCT_TYPE_MISMATCH", by_reason)
         row = result["stats"]["source_selection_diagnostics"]["examples"][0]
-        self.assertIn("without product/promotion evidence", row["product_match_reason"])
+        self.assertIn("product hashtag lacks independent source-body product evidence", row["product_match_reason"])
 
     def test_auto_rejects_product_with_explicit_non_target_market(self):
         uganda = synthetic_post(
