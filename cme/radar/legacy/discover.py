@@ -506,8 +506,14 @@ def _fetch_plan(
             "unique_after": len(combined),
             "credits_used": credits,
             "request_id": result.get("request_id"),
+            "provider_params": result.get("params") or {},
+            "returned_ad_ids": [
+                str(item.get("ad_id") or item.get("video_id") or "")
+                for item in result["items"][:12] if isinstance(item, dict)
+            ],
             "playback_metrics_returned": playback_metrics_returned,
             "playback_metric_examples": playback_metric_examples,
+            "raw_playback_field_diagnostics": result.get("raw_playback_field_diagnostics") or {},
         })
     return total_credits
 
