@@ -541,10 +541,18 @@ _PRODUCT_MATCH_MODIFIERS = {
 }
 _PRODUCT_MATCH_STOPWORDS = {"a", "an", "and", "for", "in", "of", "on", "the", "to", "with"}
 _PERFORMANCE_BOARD_ORDER = {"ctr", "cvr", "play_6s_rate", "play_2s_rate"}
+_PRODUCT_AD_EVIDENCE = re.compile(
+    r"\b(?:buy(?:\s+now)?|shop\s+now|order(?:\s+now)?|grab\s+this|love\s+this|needed\s+one|"
+    r"back\s+in\s+stock|new\s+vacuum|more\s+convenient|compact|cordless|wireless|rechargeable|"
+    r"powerful|suction|blower(?:\s+mode)?|vents?|attachments?|washable|filters?|batter(?:y|ies)|"
+    r"one[-\s]handed|detailing|cleaner|aspiradora|inal[aá]mbrica|get\s+so\s+much\s+use|"
+    r"perfect\s+for|works\s+great|easy\s+to\s+carry|multiple\s+cleaning)\b",
+    re.IGNORECASE,
+)
 
 
 def _product_type_relevance(record: dict[str, Any], product_type: str = "") -> dict[str, Any]:
-    """Match the requested product against source text; never use the search query as proof."""
+    """Require source-body evidence that a requested product is actually being promoted or demonstrated."""
     product_type = " ".join(str(product_type or "").lower().split())
     rel = record.get("vertical_relevance") or {}
     if not product_type:
@@ -572,6 +580,7 @@ def _product_type_relevance(record: dict[str, Any], product_type: str = "") -> d
     hashtags = [tag.replace("_", "") for tag in re.findall(r"#([a-z0-9_]+)", source_text)]
     body = re.sub(r"#[a-z0-9_]+", " ", source_text)
     body_tokens = re.findall(r"[a-z0-9]+", body)
+    has_product_pitch = bool(_PRODUCT_AD_EVIDENCE.search(body))
 
     terms = [
         token for token in re.findall(r"[a-z0-9]+", product_type)
@@ -584,40 +593,148 @@ def _product_type_relevance(record: dict[str, Any], product_type: str = "") -> d
     anchor = terms[-1]
     support = terms[:-1]
     compact_phrase = "".join(terms)
-    if any(compact_phrase in tag for tag in hashtags):
-        return {
-            "status": "MATCH", "confidence": "HIGH", "score": 100.0,
-            "reason": "requested product terms found together in a source hashtag",
-        }
+    hashtag_match = any(compact_phrase in tag for tag in hashtags)
 
     positions = {term: [i for i, token in enumerate(body_tokens) if token == term] for term in terms}
-    if not support:
-        if positions.get(anchor):
-            return {
-                "status": "MATCH", "confidence": "MEDIUM", "score": 80.0,
-                "reason": "requested product noun found in source text",
-            }
-    elif all(positions.get(term) for term in terms):
+    nearest_span = None
+    if support and all(positions.get(term) for term in terms):
         nearest_span = min(
             max(min(abs(anchor_pos - other_pos) for other_pos in positions[term]) for term in support)
             for anchor_pos in positions[anchor]
         )
-        if nearest_span <= 3:
-            return {
-                "status": "MATCH", "confidence": "HIGH", "score": 90.0,
-                "reason": "requested product terms found together in source text",
-            }
-        if nearest_span <= 6:
-            return {
-                "status": "MATCH", "confidence": "MEDIUM", "score": 75.0,
-                "reason": "requested product noun and use-case found close together in source text",
-            }
+
+    # Exact body evidence or a matching hashtag alone is not enough: the body must
+    # independently describe, demonstrate, compare, or promote the product.
+    if not has_product_pitch:
+        reason = (
+            "product hashtag lacks independent source-body product evidence"
+            if hashtag_match else
+            "product terms appear as context without product/promotion evidence"
+        )
+        return {"status": "NO_MATCH", "confidence": "NONE", "score": 0.0, "reason": reason}
+
+    if hashtag_match:
+        return {
+            "status": "MATCH", "confidence": "HIGH", "score": 95.0,
+            "reason": "product hashtag corroborated by source-body product/promotion evidence",
+        }
+    if not support and positions.get(anchor):
+        return {
+            "status": "MATCH", "confidence": "MEDIUM", "score": 80.0,
+            "reason": "requested product noun plus source-body product/promotion evidence",
+        }
+    if nearest_span is not None and nearest_span <= 2:
+        return {
+            "status": "MATCH", "confidence": "HIGH", "score": 90.0,
+            "reason": "requested product terms appear together in source body with product/promotion evidence",
+        }
+    if nearest_span is not None and nearest_span <= 6:
+        return {
+            "status": "MATCH", "confidence": "MEDIUM", "score": 75.0,
+            "reason": "requested product terms found near product/promotion evidence in source body",
+        }
 
     return {
         "status": "NO_MATCH", "confidence": "NONE", "score": 0.0,
-        "reason": "source content does not identify the requested product type",
+        "reason": "source body does not sufficiently identify the requested product type",
     }
 
+
+_MARKET_SUFFIX_TO_COUNTRY = {
+    "co.uk": "GB", "uk": "GB", "com.au": "AU", "au": "AU",
+    "ca": "CA", "in": "IN", "ug": "UG", "ke": "KE", "ng": "NG",
+    "za": "ZA", "nz": "NZ", "ie": "IE", "de": "DE", "fr": "FR",
+    "es": "ES", "it": "IT", "nl": "NL", "be": "BE", "pl": "PL",
+    "se": "SE", "no": "NO", "dk": "DK", "fi": "FI", "ch": "CH",
+    "at": "AT", "cz": "CZ", "ro": "RO", "gr": "GR", "pt": "PT",
+    "tr": "TR", "il": "IL", "ae": "AE", "sa": "SA", "eg": "EG",
+    "ma": "MA", "gh": "GH", "tz": "TZ", "zw": "ZW", "ph": "PH",
+    "id": "ID", "my": "MY", "sg": "SG", "th": "TH", "vn": "VN",
+    "kr": "KR", "jp": "JP", "cn": "CN", "hk": "HK", "tw": "TW",
+    "br": "BR", "mx": "MX", "ar": "AR", "cl": "CL", "pe": "PE",
+    "uy": "UY", "us": "US", "pk": "PK", "bd": "BD", "co.za": "ZA",
+    "co.in": "IN", "co.ug": "UG", "com.ng": "NG", "com.br": "BR",
+    "com.mx": "MX", "com.ph": "PH", "com.sg": "SG", "com.my": "MY",
+    "co.nz": "NZ", "com.pk": "PK", "com.bd": "BD",
+}
+_MARKET_GENERIC_SUFFIXES = {
+    "com", "org", "net", "edu", "gov", "biz", "info", "shop", "store",
+    "online", "co", "io", "ai", "app", "dev", "me", "tv", "xyz", "link",
+    "site", "page", "pro", "live", "invalid",
+}
+_MARKET_CUE_RE = re.compile(
+    r"\b(?:delivery|deliver(?:ed|ing)?|shipping|ship(?:s|ped|ping)?\s+to|"
+    r"available\s+in|upcountry|whatsapp|local\s+delivery|nationwide|call\s*/\s*whatsapp)\b",
+    re.IGNORECASE,
+)
+
+
+def _source_market_relevance(record: dict[str, Any], country: str = "") -> dict[str, Any]:
+    """Flag explicit evidence that a source is marketed for a different country."""
+    target = str(country or "").strip().upper()
+    if target == "UK":
+        target = "GB"
+    raw = record.get("raw") or {}
+    post = raw.get("post") if isinstance(raw, dict) else {}
+    post = post if isinstance(post, dict) else {}
+    content = post.get("content") if isinstance(post.get("content"), dict) else {}
+    ext = post.get("ext") if isinstance(post.get("ext"), dict) else {}
+    ad = ext.get("ad") if isinstance(ext.get("ad"), dict) else {}
+    source_text = " ".join(str(value or "") for value in (
+        record.get("title"), content.get("text"), ad.get("title"),
+        ad.get("landing_page_url"), record.get("landing_page_url"),
+    )).lower()
+    market_cues = bool(_MARKET_CUE_RE.search(source_text))
+
+    explicit_codes = []
+    for obj in (post, content, ad):
+        for field in (
+            "target_country", "market_country", "shipping_country", "delivery_country",
+            "market_country_code", "shipping_country_code", "delivery_country_code",
+        ):
+            value = str(obj.get(field) or "").strip().upper()
+            if re.fullmatch(r"[A-Z]{2}", value) and value in set(_MARKET_SUFFIX_TO_COUNTRY.values()):
+                if value != target:
+                    explicit_codes.append(value)
+
+    foreign_domains = []
+    domains = re.findall(
+        r"\b(?:https?://)?(?:www\.)?([a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9-]+)+)\b",
+        source_text,
+        flags=re.IGNORECASE,
+    )
+    suffix_items = sorted(_MARKET_SUFFIX_TO_COUNTRY.items(), key=lambda item: len(item[0]), reverse=True)
+    for domain in domains:
+        domain = domain.lower().rstrip(".")
+        suffix = next((suffix for suffix, _ in suffix_items if domain.endswith("." + suffix)), "")
+        if suffix:
+            source_country = _MARKET_SUFFIX_TO_COUNTRY[suffix]
+            if source_country != target:
+                foreign_domains.append({"domain": domain, "country": source_country})
+
+    mismatch = bool(explicit_codes) or bool(foreign_domains and market_cues)
+    if mismatch:
+        evidence = {
+            "explicit_market_country_codes": sorted(set(explicit_codes)),
+            "localized_domains": foreign_domains,
+            "localized_delivery_or_contact_cues": market_cues,
+        }
+        return {
+            "status": "MISMATCH",
+            "confidence": "HIGH",
+            "reason": "source contains explicit non-target market metadata or a country domain with localized delivery/contact cues",
+            "evidence": evidence,
+        }
+    return {
+        "status": "NO_CONFLICT",
+        "confidence": "LIMITED",
+        "reason": "no explicit non-target market evidence detected; absence of conflict is not proof of market fit",
+        "evidence": {
+            "explicit_market_country_codes": [],
+            "localized_domains": foreign_domains,
+            "localized_delivery_or_contact_cues": market_cues,
+        },
+    }
 
 def _performance_evidence(item: dict[str, Any]) -> dict[str, Any]:
     """Describe available performance evidence without calling it revenue."""
@@ -674,6 +791,7 @@ def _auto_source_candidates(
     pools: list[list[dict[str, Any]]],
     *,
     product_type: str = "",
+    country: str = "",
 ) -> list[dict[str, Any]]:
     """Build an analysis shortlist from product match + evidence tier, not a pre-video money guess."""
     by_identity: dict[tuple[str, ...], dict[str, Any]] = {}
@@ -699,6 +817,10 @@ def _auto_source_candidates(
     }
     for item in by_identity.values():
         record = item.get("record") or {}
+        market = _source_market_relevance(record, country)
+        record["source_market_relevance"] = market
+        if market.get("status") == "MISMATCH":
+            continue
         product_match = record.get("product_relevance") or {}
         if product_match.get("status") != "MATCH":
             continue
@@ -873,6 +995,7 @@ def _selection_diagnostics(
     *,
     mode: str,
     product_type: str = "",
+    country: str = "",
     max_examples: int = 500,
 ) -> dict[str, Any]:
     """Log each candidate's product match, evidence basis and selection outcome."""
@@ -918,6 +1041,7 @@ def _selection_diagnostics(
             duration = components.get("duration") or {}
             rel = record.get("vertical_relevance") or {}
             product = record.get("product_relevance") or _product_type_relevance(record, product_type)
+            market = record.get("source_market_relevance") or _source_market_relevance(record, country)
             evidence = _performance_evidence(item)
             classification = str(rel.get("classification") or "UNVERIFIED").upper()
             action = str(get("action", "") or "").upper()
@@ -933,6 +1057,8 @@ def _selection_diagnostics(
                 reason = "HARD_EXCLUDED"
             elif not _has_video_url(record):
                 reason = "NO_PLAYABLE_VIDEO"
+            elif market.get("status") == "MISMATCH":
+                reason = "SOURCE_MARKET_MISMATCH"
             elif product.get("status") != "MATCH":
                 reason = "PRODUCT_TYPE_MISMATCH" if product_type else "SOURCE_RELEVANCE_UNVERIFIED_REQUIRES_REVIEW"
             elif isinstance(duration, dict) and duration.get("hard_block") and not duration.get("long_source_exception"):
@@ -960,6 +1086,9 @@ def _selection_diagnostics(
                 "product_match_confidence": product.get("confidence"),
                 "product_match_score": product.get("score"),
                 "product_match_reason": str(product.get("reason") or "")[:240],
+                "source_market_status": market.get("status"),
+                "source_market_reason": str(market.get("reason") or "")[:240],
+                "source_market_evidence": market.get("evidence") or {},
                 "performance_basis": evidence["basis"],
                 "performance_score": evidence["performance_score"],
                 "performance_fields": evidence["available_fields"],
@@ -1312,7 +1441,7 @@ def discover_and_rank(
         fallback_path = "MECHANISM_HUNT"
     elif mode == "auto":
         auto_pools = [strict_ranked, expanded_ranked, unverified_diagnostic_ranked, mechanism_ranked]
-        auto_candidates = _auto_source_candidates(auto_pools, product_type=product_type)
+        auto_candidates = _auto_source_candidates(auto_pools, product_type=product_type, country=country)
         selected = auto_candidates[:source_queue_limit]
         for item in selected:
             evidence = _performance_evidence(item)
@@ -1413,9 +1542,19 @@ def discover_and_rank(
         if _has_video_url(record) and not _is_hard_excluded(record)
         and (record.get("product_relevance") or {}).get("status") == "MATCH"
     )
-    target_relevant_ads = product_relevant_ads if product_type else sum(
+    source_market_mismatch_ads = sum(
+        1 for record in fresh_records
+        if _has_video_url(record) and _source_market_relevance(record, country).get("status") == "MISMATCH"
+    )
+    target_relevant_ads = sum(
+        1 for record in fresh_records
+        if _has_video_url(record) and not _is_hard_excluded(record)
+        and (record.get("product_relevance") or {}).get("status") == "MATCH"
+        and _source_market_relevance(record, country).get("status") != "MISMATCH"
+    ) if product_type else sum(
         1 for record in (strict_pool + expanded_pool)
         if _has_video_url(record) and not _is_hard_excluded(record)
+        and _source_market_relevance(record, country).get("status") != "MISMATCH"
     )
     if mode == "auto" and not selected:
         fallback_path = "NO_PRODUCT_PERFORMANCE_SOURCE" if target_relevant_ads else "NO_TARGET_RELEVANCE"
@@ -1428,7 +1567,7 @@ def discover_and_rank(
     ) if diagnostic_only_records else []
     auto_candidate_count = len(_auto_source_candidates(
         [strict_ranked, expanded_ranked, unverified_diagnostic_ranked, mechanism_ranked],
-        product_type=product_type,
+        product_type=product_type, country=country,
     )) if mode == "auto" else 0
     if mode == "auto" and len(selected) >= source_queue_limit:
         discovery_stop_basis = "product_performance_source_queue"
@@ -1453,7 +1592,7 @@ def discover_and_rank(
 
     source_selection_diagnostics = _selection_diagnostics(
         [strict_ranked, expanded_ranked, unverified_diagnostic_ranked, mechanism_ranked, diagnostic_only_ranked],
-        selected, mode=mode, product_type=product_type,
+        selected, mode=mode, product_type=product_type, country=country,
     )
     stats.update({
         "planned_requests": len(calls),
@@ -1476,6 +1615,7 @@ def discover_and_rank(
         "source_selection_diagnostics": source_selection_diagnostics,
         "target_relevant_ads": target_relevant_ads,
         "product_relevant_ads": product_relevant_ads,
+        "source_market_mismatch_ads": source_market_mismatch_ads,
         "performance_ready_source_ads": auto_candidate_count,
         "auto_shortlist_ads": len(selected) if mode == "auto" else 0,
         "target_relevant_shortfall": max(0, source_queue_limit - target_relevant_ads),
