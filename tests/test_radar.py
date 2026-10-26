@@ -333,6 +333,66 @@ class VendoredCodeIsTheRealOne(Env):
         self.assertEqual(result["diagnostics"]["outcome"], "CANDIDATES_FOUND")
 
 
+    def test_auto_rejects_ambient_car_wash_vacuum_mention(self):
+        ambient = synthetic_post(
+            "ambient-car-wash", brand="UNKNOWN",
+            title="Going to the car wash to vacuum 0 crumbs up! I can't touch the vacuums #carvacuum #carcleaning",
+            ctr=None, cvr=None, views=8000000, duration=28,
+        )
+        ambient["post"]["author"]["username"] = "UNKNOWN"
+        ambient["post"]["author"]["display_name"] = ""
+        ambient["post"]["ext"]["ad"].update({"ctr": None, "cvr": None, "objective": "", "landing_page_url": ""})
+
+        def fake_get(url, params=None, headers=None, timeout=None):
+            return FakeResp(synthetic_response([ambient]))
+
+        with mock.patch.object(T.requests, "get", fake_get):
+            result = F.run_find(
+                {"country": "US", "max_requests": 1, "max_ads": 10, "keywords": ["car vacuum"],
+                 "offer": {"name": "Fanttik V8 Mate Cordless Car Vacuum",
+                           "product_type": "cordless handheld car vacuum"}},
+                client=T.SocialCrawlTikTokTopAds(api_key="TESTKEY"),
+            )
+
+        self.assertEqual(result["candidates"], [])
+        by_reason = result["diagnostics"]["source_selection_diagnostics"]["by_reason"]
+        self.assertIn("PRODUCT_TYPE_MISMATCH", by_reason)
+        row = result["stats"]["source_selection_diagnostics"]["examples"][0]
+        self.assertIn("without product/promotion evidence", row["product_match_reason"])
+
+    def test_auto_rejects_product_with_explicit_non_target_market(self):
+        uganda = synthetic_post(
+            "uganda-market-vacuum", brand="UNKNOWN",
+            title="Cordless car vacuum with powerful suction. Delivery available in Kampala and upcountry. "
+                  "Call/WhatsApp #CarAccessoriesUganda #Kampala — jumia.ug",
+            ctr=None, cvr=None, views=8000000, duration=28,
+        )
+        uganda["post"]["author"]["username"] = "UNKNOWN"
+        uganda["post"]["author"]["display_name"] = ""
+        uganda["post"]["ext"]["ad"].update({"ctr": None, "cvr": None, "objective": "", "landing_page_url": ""})
+
+        def fake_get(url, params=None, headers=None, timeout=None):
+            return FakeResp(synthetic_response([uganda]))
+
+        with mock.patch.object(T.requests, "get", fake_get):
+            result = F.run_find(
+                {"country": "US", "max_requests": 1, "max_ads": 10, "keywords": ["car vacuum"],
+                 "offer": {"name": "Fanttik V8 Mate Cordless Car Vacuum",
+                           "product_type": "cordless handheld car vacuum"}},
+                client=T.SocialCrawlTikTokTopAds(api_key="TESTKEY"),
+            )
+
+        self.assertEqual(result["candidates"], [])
+        by_reason = result["diagnostics"]["source_selection_diagnostics"]["by_reason"]
+        self.assertIn("SOURCE_MARKET_MISMATCH", by_reason)
+        self.assertEqual(result["stats"]["source_market_mismatch_ads"], 1)
+        row = next(
+            row for row in result["stats"]["source_selection_diagnostics"]["examples"]
+            if row["ad_id"] == "uganda-market-vacuum"
+        )
+        self.assertEqual(row["source_market_status"], "MISMATCH")
+        self.assertIn("UG", json.dumps(row["source_market_evidence"]))
+
 class CandidateRecord(Env):
     def run_candidates(self, *items):
         with self.fake_find(list(items)):
