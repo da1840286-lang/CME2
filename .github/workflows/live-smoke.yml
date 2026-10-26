@@ -83,7 +83,12 @@ on:
         required: false
         default: ""
       source_contract_json:
-        description: "Alternative for brain/all: saved Radar analysis result or accepted old CME transfer contract. Stage analyze produces a review-only artifact; leave blank when using candidate_id."
+        description: "Optional manual JSON input for brain/all. Prefer source_contract_run_id to load the Analyze artifact automatically."
+        type: string
+        required: false
+        default: ""
+      source_contract_run_id:
+        description: "For brain/all: numeric ID of a successful analyze run. Automatically loads source_contract.json from its cme-analyze-out artifact; avoids manual JSON copy/paste."
         type: string
         required: false
         default: ""
@@ -146,7 +151,7 @@ jobs:
       CME_STAGE: ${{ inputs.stage }}
       FIND_RUN_ID: ${{ inputs.find_run_id }}
       CANDIDATE_ID: ${{ inputs.candidate_id }}
-      SOURCE_CONTRACT_PROVIDED: ${{ inputs.source_contract_json != '' }}
+      SOURCE_CONTRACT_PROVIDED: ${{ inputs.source_contract_json != '' || inputs.source_contract_run_id != '' }}
       FIND_COUNTRY: ${{ inputs.country }}
       FIND_PERIOD: ${{ inputs.period }}
       FIND_REQUESTS: ${{ inputs.find_requests }}
@@ -180,7 +185,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends tesseract-ocr
 
       - name: Verify FFmpeg runtime for GitHub-only source-video analysis
-        if: (inputs.stage == 'all' && inputs.source_contract_json == '') || inputs.stage == 'analyze'
+        if: (inputs.stage == 'all' && inputs.source_contract_json == '' && inputs.source_contract_run_id == '') || inputs.stage == 'analyze'
         timeout-minutes: 1
         run: |
           python - <<'PY'
@@ -203,7 +208,7 @@ jobs:
         run: |
           set -euo pipefail
           python - <<'PY'
-          import json, os, urllib.error, urllib.request
+          import json, os, re, urllib.error, urllib.request, zipfile
           from io import BytesIO
           from pathlib import Path
           from urllib.parse import urlsplit
@@ -218,16 +223,64 @@ jobs:
           dispatch_inputs = event_payload.get("inputs") or {}
           raw_offer = str(dispatch_inputs.get("offer_json") or "").strip()
           raw_source = str(dispatch_inputs.get("source_contract_json") or "").strip()
+          source_run_id = str(dispatch_inputs.get("source_contract_run_id") or "").strip()
           selected_candidate = os.environ.get("CANDIDATE_ID", "").strip()
           photo_url = str(dispatch_inputs.get("target_photo_url") or "").strip()
           if not raw_offer:
               raise SystemExit("offer_json is required.")
           stage = os.environ.get("CME_STAGE", "")
-          if stage == "brain" and not raw_source:
-              raise SystemExit("Brain-only stage requires a saved source_contract_json / Radar analysis.")
+          if raw_source and source_run_id:
+              raise SystemExit("Use only one source input: source_contract_json or source_contract_run_id.")
+          if stage == "brain" and not raw_source and not source_run_id:
+              raise SystemExit("Brain-only stage requires source_contract_json or source_contract_run_id from a successful analyze run.")
           if stage == "all" and selected_candidate and not os.environ.get("FIND_RUN_ID", "").strip():
               raise SystemExit("A manually selected candidate_id requires find_run_id from the FIND stage.")
-          # In stage=all, blank candidate_id + blank source_contract_json means FIND and ranked auto-selection in this same run.
+
+          # Prefer fetching the canonical source_contract.json from the Analyze artifact to avoid manual copy/paste.
+          if source_run_id:
+              if not re.fullmatch(r"[0-9]{1,20}", source_run_id):
+                  raise SystemExit("source_contract_run_id must be the numeric ID of a completed Analyze run.")
+              token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+              if not token:
+                  raise SystemExit("GitHub token unavailable; cannot fetch the Analyze artifact.")
+              api_base = f"https://api.github.com/repos/{os.environ['CME_REPOSITORY']}"
+              headers = {
+                  "Authorization": f"Bearer {token}",
+                  "Accept": "application/vnd.github+json",
+                  "X-GitHub-Api-Version": "2022-11-28",
+                  "User-Agent": "CME-source-contract-loader",
+              }
+              try:
+                  req = urllib.request.Request(
+                      f"{api_base}/actions/runs/{source_run_id}/artifacts?per_page=100", headers=headers)
+                  with urllib.request.urlopen(req, timeout=30) as response:
+                      artifact_index = json.loads(response.read(5 * 1024 * 1024 + 1).decode("utf-8"))
+                  artifacts = artifact_index.get("artifacts", []) if isinstance(artifact_index, dict) else []
+                  artifact = next((a for a in artifacts
+                                   if a.get("name") == "cme-analyze-out" and not a.get("expired")), None)
+                  if artifact is None:
+                      available = ", ".join(str(a.get("name")) for a in artifacts[:20])
+                      raise SystemExit(
+                          f"Run {source_run_id} has no unexpired cme-analyze-out artifact. "
+                          f"Artifacts found: {available or '(none)'}")
+                  req = urllib.request.Request(str(artifact["archive_download_url"]), headers=headers)
+                  with urllib.request.urlopen(req, timeout=30) as response:
+                      archive_bytes = response.read(25 * 1024 * 1024 + 1)
+                  if len(archive_bytes) > 25 * 1024 * 1024:
+                      raise SystemExit("Analyze artifact ZIP exceeds 25 MB.")
+                  with zipfile.ZipFile(BytesIO(archive_bytes)) as archive:
+                      members = [name for name in archive.namelist()
+                                 if name == "source_contract.json" or name.endswith("/source_contract.json")]
+                      if len(members) != 1:
+                          raise SystemExit(
+                              f"Analyze artifact must contain exactly one source_contract.json; found {len(members)}.")
+                      raw_source = archive.read(members[0]).decode("utf-8")
+              except (OSError, urllib.error.URLError, ValueError, KeyError, zipfile.BadZipFile) as exc:
+                  raise SystemExit(
+                      f"Could not load source_contract.json from Analyze run {source_run_id}: "
+                      f"{type(exc).__name__}: {exc}") from exc
+
+          # In stage=all, no source input means FIND + ranked automatic selection in this same run.
           try:
               offer_data = json.loads(raw_offer)
               source_data = json.loads(raw_source) if raw_source else None
