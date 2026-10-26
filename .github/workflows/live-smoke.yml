@@ -170,7 +170,8 @@ jobs:
           cache-dependency-path: requirements.txt
 
       - name: Install project dependencies
-        run: python -m pip install -r requirements.txt
+        timeout-minutes: 5
+        run: python -m pip install --disable-pip-version-check --retries 1 --timeout 20 -r requirements.txt
 
       - name: Install Tesseract for strict branding cleanup
         if: inputs.stage == 'brain' || inputs.stage == 'frame' || inputs.stage == 'all'
@@ -178,29 +179,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends tesseract-ocr
 
-      - name: Install FFmpeg for GitHub-only source-video analysis
+      - name: Verify FFmpeg runtime for GitHub-only source-video analysis
         if: (inputs.stage == 'all' && inputs.source_contract_json == '') || inputs.stage == 'analyze'
-        shell: bash
-        timeout-minutes: 5
+        timeout-minutes: 1
         run: |
-          set -euo pipefail
-          if command -v ffmpeg >/dev/null 2>&1; then
-            echo "FFmpeg already available: $(command -v ffmpeg)"
-            ffmpeg -version | head -n 1
-            exit 0
-          fi
-
-          echo "FFmpeg is missing; installing with bounded network timeouts."
-          timeout 120s sudo apt-get update \
-            -o Acquire::Retries=1 \
-            -o Acquire::http::Timeout=20 \
-            -o Acquire::https::Timeout=20
-          timeout 150s sudo apt-get install -y --no-install-recommends ffmpeg \
-            -o Acquire::Retries=1 \
-            -o Acquire::http::Timeout=20 \
-            -o Acquire::https::Timeout=20
-          command -v ffmpeg
-          ffmpeg -version | head -n 1
+          python - <<'PY'
+          from cme.radar.analyze import ffmpeg_executable, tools_status
+          status = tools_status()
+          if status["state"] != "READY":
+              raise SystemExit(f"FFmpeg runtime unavailable: {status['detail']}")
+          print(f"FFmpeg runtime ready: {ffmpeg_executable()}")
+          PY
 
       - name: Create controlled runtime settings
         run: |

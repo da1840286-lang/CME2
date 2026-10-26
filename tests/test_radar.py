@@ -1,5 +1,5 @@
 """Creative Radar acceptance tests. All data here is SYNTHETIC and lives only in temporary folders."""
-import hashlib, http.client, json, os, shutil, subprocess, tempfile, threading, unittest
+import hashlib, http.client, json, os, subprocess, tempfile, threading, unittest
 from pathlib import Path
 from unittest import mock
 
@@ -22,7 +22,7 @@ def configured_analyst_model():
     return load_catalog(ROOT / "adapters.json")[settings["analyst_adapter"]].model_id
 
 
-HAS_FFMPEG = bool(shutil.which("ffmpeg") and shutil.which("ffprobe"))
+HAS_FFMPEG = A.tools_status()["state"] == "READY"
 
 
 class Env(unittest.TestCase):
@@ -772,13 +772,14 @@ class AutomaticSourceReadinessGate(unittest.TestCase):
         self.assertEqual(skipped, [])
 
 def fake_runner(frames_dir_times=None):
-    """Stands in for ffprobe/ffmpeg: duration 12s; every ffmpeg call writes a tiny file."""
+    """Stands in for FFmpeg metadata probing/extraction: duration 12s."""
     class R:
         returncode, stdout, stderr = 0, "", ""
     def run(cmd):
         r = R()
-        if cmd[0] == "ffprobe":
-            r.stdout = "12.0\n"
+        if "-frames:v" not in cmd:
+            r.returncode = 1
+            r.stderr = "Input #0, mov,mp4,m4a,3gp,3g2,mj2, from 'source.mp4':\n  Duration: 00:00:12.00, start: 0.000000"
         else:
             Path(cmd[-1]).write_bytes(b"\xff\xd8fakejpeg" + cmd[cmd.index("-ss") + 1].encode())
         return r
@@ -893,14 +894,14 @@ class ManualAnalysis(RadarAppFixture):
     def test_no_video_url_and_missing_ffmpeg(self):
         calls = []
         app, cid = self.make_app(calls)
-        app.tools = {"state": "NOT_CONFIGURED", "detail": "ffmpeg/ffprobe not found", "how_to_fix": "install ffmpeg"}
+        app.tools = {"state": "NOT_CONFIGURED", "detail": "FFmpeg binary not found", "how_to_fix": "install imageio-ffmpeg"}
         self.assertEqual(app.do_analyze(cid)["status"], "NOT_CONFIGURED")
         self.assertEqual(calls, [])
 
     @unittest.skipUnless(HAS_FFMPEG, "ffmpeg not installed")
     def test_real_ffmpeg_extracts_frames_with_timestamps(self):
         video = Path(self.tmp.name) / "t.mp4"
-        subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc=duration=6:size=320x568:rate=10",
+        subprocess.run([A.ffmpeg_executable(), "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc=duration=6:size=320x568:rate=10",
                         "-pix_fmt", "yuv420p", str(video)], check=True)
         frames = A.extract_frames(video, Path(self.tmp.name) / "fr", count=3)
         self.assertEqual([f["t_sec"] for f in frames], [1.0, 3.0, 5.0])

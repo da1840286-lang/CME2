@@ -5,6 +5,7 @@ Never runs automatically. The model sees only the extracted frames, and the reco
 from __future__ import annotations
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -15,10 +16,27 @@ RATINGS = ("problem_clarity", "product_demo", "proof_visibility", "sequence_qual
 TOLERANCE_SEC = 0.6
 
 
+def ffmpeg_executable(which=shutil.which) -> str:
+    """Prefer the FFmpeg binary bundled by imageio-ffmpeg; fall back to system FFmpeg."""
+    try:
+        import imageio_ffmpeg
+        executable = imageio_ffmpeg.get_ffmpeg_exe()
+        if executable:
+            return str(executable)
+    except (ImportError, OSError, RuntimeError):
+        pass
+    executable = which("ffmpeg")
+    if executable:
+        return str(executable)
+    raise RuntimeError("FFmpeg binary not found; install imageio-ffmpeg or system ffmpeg")
+
+
 def tools_status(which=shutil.which) -> dict:
-    if not (which("ffmpeg") and which("ffprobe")):
-        return {"state": "NOT_CONFIGURED", "detail": "ffmpeg/ffprobe not found",
-                "how_to_fix": "install ffmpeg (it provides ffprobe) and make sure both are on PATH"}
+    try:
+        ffmpeg_executable(which)
+    except RuntimeError:
+        return {"state": "NOT_CONFIGURED", "detail": "FFmpeg binary not found",
+                "how_to_fix": "install the imageio-ffmpeg Python dependency or system FFmpeg"}
     return {"state": "READY", "detail": "", "how_to_fix": ""}
 
 
@@ -52,19 +70,29 @@ def _run(cmd, runner=None):
 
 
 def extract_frames(video_path, out_dir, count: int = 6, runner=None) -> list:
-    """Evenly spaced frames with their timestamps (seconds)."""
+    """Evenly spaced frames with their timestamps (seconds), using one FFmpeg binary."""
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    res = _run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(video_path)], runner)
-    try:
-        duration = float(str(res.stdout).strip().splitlines()[0])
-    except (ValueError, IndexError) as e:
-        raise RuntimeError("cannot read the video duration") from e
+    ffmpeg = ffmpeg_executable()
+    probe_runner = runner or (lambda c: subprocess.run(c, capture_output=True, text=True, timeout=30))
+    # FFmpeg prints container duration while inspecting the input, so ffprobe is not
+    # required. A non-zero status is expected because no output file is requested.
+    probe = probe_runner([ffmpeg, "-hide_banner", "-i", str(video_path)])
+    probe_text = "\n".join(
+        value for value in (getattr(probe, "stderr", ""), getattr(probe, "stdout", "")) if value
+    )
+    match = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", probe_text)
+    if not match:
+        raise RuntimeError("cannot read the video duration from FFmpeg input metadata")
+    hours, minutes, seconds = match.groups()
+    duration = int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+    if duration <= 0:
+        raise RuntimeError("video duration must be positive")
     frames = []
     for i in range(count):
         t = round(duration * (i + 0.5) / count, 2)
         path = out / f"frame_{i:02d}_{t:.2f}s.jpg"
-        _run(["ffmpeg", "-y", "-v", "error", "-ss", str(t), "-i", str(video_path), "-frames:v", "1",
+        _run([ffmpeg, "-y", "-v", "error", "-ss", str(t), "-i", str(video_path), "-frames:v", "1",
               "-vf", "scale=640:-2", "-q:v", "4", str(path)], runner)
         if not path.exists() or path.stat().st_size == 0:
             raise RuntimeError(f"no frame produced at {t}s")
