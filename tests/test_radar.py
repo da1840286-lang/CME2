@@ -148,25 +148,34 @@ class VendoredCodeIsTheRealOne(Env):
         self.assertEqual(strategy["supply_search_budget"], 1)
         self.assertEqual(strategy["performance_budget"], 1)
 
-    def test_find_reserves_ads_top_requests_without_weakening_money_gate(self):
+    def test_find_shortlists_product_relevant_performance_sources_without_claiming_money(self):
         calls = []
+        target = synthetic_post(
+            "vacuum-target", brand="UNKNOWN",
+            title="Shop now free shipping: cordless car vacuum removes crumbs",
+            ctr=None, cvr=None, views=3110000, duration=28,
+        )
+        target["post"]["author"]["username"] = "UNKNOWN"
+        target["post"]["author"]["display_name"] = ""
+        target["post"]["ext"]["ad"].update({
+            "ctr": None, "cvr": None, "objective": "", "landing_page_url": "",
+        })
+        target["post"]["content"]["text"] = "Shop now free shipping: cordless car vacuum removes crumbs"
+
+        distractor = synthetic_post(
+            "unrelated-gift", brand="UNKNOWN", title="Gifts they will actually use",
+            ctr=None, cvr=None, views=5000, duration=28,
+        )
+        distractor["post"]["author"]["username"] = "UNKNOWN"
+        distractor["post"]["author"]["display_name"] = ""
+        distractor["post"]["ext"]["ad"].update({
+            "ctr": None, "cvr": None, "objective": "", "landing_page_url": "",
+        })
+
         def fake_get(url, params=None, headers=None, timeout=None):
-            params = dict(params or {})
-            calls.append((url, params))
-            item = synthetic_post(
-                str(9300 + len(calls)), brand="UNKNOWN",
-                title="Shop now free shipping: cordless car vacuum removes crumbs",
-                ctr=None, cvr=None, views=3110000, duration=28,
-            )
-            item["post"]["author"]["username"] = "UNKNOWN"
-            item["post"]["author"]["display_name"] = ""
-            ad = item["post"]["ext"]["ad"]
-            ad["ctr"] = None
-            ad["cvr"] = None
-            ad["objective"] = ""
-            ad["landing_page_url"] = ""
-            item["post"]["content"]["text"] = "Shop now free shipping: cordless car vacuum removes crumbs"
-            return FakeResp(synthetic_response([item]))
+            calls.append((url, dict(params or {})))
+            return FakeResp(synthetic_response([target, distractor]))
+
         with mock.patch.object(T.requests, "get", fake_get):
             result = F.run_find(
                 {"country": "US", "max_requests": 10, "max_ads": 10, "keywords": ["car vacuum"],
@@ -174,6 +183,7 @@ class VendoredCodeIsTheRealOne(Env):
                            "product_type": "cordless handheld car vacuum"}},
                 client=T.SocialCrawlTikTokTopAds(api_key="TESTKEY"),
             )
+
         sources = [call.get("source") for call in result["stats"]["calls"]]
         self.assertEqual(sources.count("sponsored_search"), 7)
         self.assertEqual(sources.count("ads_top"), 3)
@@ -188,15 +198,17 @@ class VendoredCodeIsTheRealOne(Env):
         self.assertEqual(result["stats"]["mechanism_ready_source_ads"], 0)
         self.assertEqual(result["stats"]["discovery_strategy"]["supply_search_budget"], 7)
         self.assertEqual(result["stats"]["discovery_strategy"]["performance_budget"], 3)
-        self.assertEqual(result["candidates"], [])
-        self.assertEqual(result["stats"]["final_ranked_ads"], 0)
-        self.assertEqual(result["diagnostics"]["outcome"], "NO_QUALIFIED_SOURCE")
+        self.assertEqual([c["ad_id"] for c in result["candidates"]], ["vacuum-target"])
+        self.assertEqual(result["diagnostics"]["outcome"], "CANDIDATES_FOUND")
         selection_diag = result["diagnostics"]["source_selection_diagnostics"]
         self.assertGreater(selection_diag["not_selected_count"], 0)
-        self.assertTrue(
-            {"SCORER_REJECT", "MONEY_SIGNAL_HARD_BLOCK", "NO_MONEY_OR_MECHANISM_SIGNAL"}
-            & set(selection_diag["by_reason"])
-        )
+        self.assertGreater(selection_diag["selected_by_basis"].get("ADS_TOP_PERFORMANCE_BOARD", 0), 0)
+        self.assertIn("PRODUCT_TYPE_MISMATCH", selection_diag["by_reason"])
+        candidate = result["candidates"][0]
+        self.assertFalse(candidate["source_score"]["components"]["money_signal_gate"]["pass"])
+        self.assertEqual(candidate["performance_evidence"]["basis"], "ADS_TOP_PERFORMANCE_BOARD")
+        self.assertFalse(candidate["performance_evidence"]["commercial_result_confirmed"])
+
 
     def test_ads_top_money_ready_candidate_is_kept_without_weak_backfill(self):
         calls = []
@@ -275,7 +287,50 @@ class VendoredCodeIsTheRealOne(Env):
         self.assertEqual(result["candidates"], [])
         self.assertEqual(result["diagnostics"]["outcome"], "NO_TARGET_RELEVANCE")
         by_reason = result["diagnostics"]["source_selection_diagnostics"]["by_reason"]
-        self.assertIn("SOURCE_RELEVANCE_UNVERIFIED_REQUIRES_REVIEW", by_reason)
+        self.assertIn("PRODUCT_TYPE_MISMATCH", by_reason)
+
+
+
+    def test_auto_shortlists_high_engagement_exact_product_as_proxy_not_sale(self):
+        target = synthetic_post(
+            "car-vacuum-hit", brand="UNKNOWN",
+            title="Use the blower mode to push dust out of AC vents, then vacuum it away #carvacuumcleaner #carcleaning",
+            ctr=None, cvr=None, views=8000000, duration=28,
+        )
+        target["post"]["author"]["username"] = "UNKNOWN"
+        target["post"]["author"]["display_name"] = ""
+        target["post"]["ext"]["ad"].update({"ctr": None, "cvr": None, "objective": "", "landing_page_url": ""})
+        target["post"]["content"]["text"] = "Use the blower mode to push dust out of AC vents, then vacuum it away #carvacuumcleaner #carcleaning"
+        distractors = [
+            synthetic_post("unrelated-f150", brand="UNKNOWN", title="Twin Turbo F150 for sale", ctr=None, cvr=None,
+                           views=4000, duration=28),
+            synthetic_post("unrelated-gifts", brand="UNKNOWN", title="Gifts they will actually use", ctr=None, cvr=None,
+                           views=7000, duration=28),
+        ]
+        for item in distractors:
+            item["post"]["author"]["username"] = "UNKNOWN"
+            item["post"]["author"]["display_name"] = ""
+            item["post"]["ext"]["ad"].update({"ctr": None, "cvr": None, "objective": "", "landing_page_url": ""})
+
+        def fake_get(url, params=None, headers=None, timeout=None):
+            return FakeResp(synthetic_response([target] + distractors))
+
+        with mock.patch.object(T.requests, "get", fake_get):
+            result = F.run_find(
+                {"country": "US", "max_requests": 1, "max_ads": 3, "keywords": ["car vacuum"],
+                 "offer": {"name": "Fanttik V8 Mate Cordless Car Vacuum",
+                           "product_type": "cordless handheld car vacuum"}},
+                client=T.SocialCrawlTikTokTopAds(api_key="TESTKEY"),
+            )
+
+        self.assertEqual(len(result["candidates"]), 1)
+        candidate = result["candidates"][0]
+        self.assertEqual(candidate["ad_id"], "car-vacuum-hit")
+        self.assertEqual(candidate["product_relevance"]["status"], "MATCH")
+        self.assertEqual(candidate["performance_evidence"]["basis"], "ENGAGEMENT_PROXY")
+        self.assertFalse(candidate["performance_evidence"]["commercial_result_confirmed"])
+        self.assertFalse(candidate["source_score"]["components"]["money_signal_gate"]["pass"])
+        self.assertEqual(result["diagnostics"]["outcome"], "CANDIDATES_FOUND")
 
 
 class CandidateRecord(Env):

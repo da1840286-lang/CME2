@@ -532,6 +532,225 @@ def _preselection_relevance(item: dict[str, Any]) -> float:
         return 0.0
 
 
+
+
+_PRODUCT_MATCH_MODIFIERS = {
+    "cordless", "handheld", "portable", "wireless", "rechargeable", "mini",
+    "compact", "small", "lightweight", "electric", "powered", "powerful",
+    "ultra", "premium", "foldable", "automatic", "smart", "new",
+}
+_PRODUCT_MATCH_STOPWORDS = {"a", "an", "and", "for", "in", "of", "on", "the", "to", "with"}
+_PERFORMANCE_BOARD_ORDER = {"ctr", "cvr", "play_6s_rate", "play_2s_rate"}
+
+
+def _product_type_relevance(record: dict[str, Any], product_type: str = "") -> dict[str, Any]:
+    """Match the requested product against source text; never use the search query as proof."""
+    product_type = " ".join(str(product_type or "").lower().split())
+    rel = record.get("vertical_relevance") or {}
+    if not product_type:
+        classification = str(rel.get("classification") or "").upper()
+        if classification in {"DIRECT", "EXPANDED"} and not _is_hard_excluded(record):
+            return {
+                "status": "MATCH", "confidence": "CATEGORY_ONLY",
+                "score": float(rel.get("score") or 0.0),
+                "reason": "product_type_not_supplied; existing market classification used",
+            }
+        return {
+            "status": "UNVERIFIED", "confidence": "NONE", "score": 0.0,
+            "reason": "product_type_not_supplied_and_market_classification_unverified",
+        }
+
+    raw = record.get("raw") or {}
+    post = raw.get("post") if isinstance(raw, dict) else {}
+    post = post if isinstance(post, dict) else {}
+    content = post.get("content") if isinstance(post.get("content"), dict) else {}
+    ext = post.get("ext") if isinstance(post.get("ext"), dict) else {}
+    ad = ext.get("ad") if isinstance(ext.get("ad"), dict) else {}
+    source_text = " ".join(str(value or "") for value in (
+        record.get("title"), content.get("text"), ad.get("title"),
+    )).lower()
+    hashtags = [tag.replace("_", "") for tag in re.findall(r"#([a-z0-9_]+)", source_text)]
+    body = re.sub(r"#[a-z0-9_]+", " ", source_text)
+    body_tokens = re.findall(r"[a-z0-9]+", body)
+
+    terms = [
+        token for token in re.findall(r"[a-z0-9]+", product_type)
+        if token not in _PRODUCT_MATCH_MODIFIERS and token not in _PRODUCT_MATCH_STOPWORDS and len(token) > 1
+    ]
+    if not terms:
+        return {"status": "UNVERIFIED", "confidence": "NONE", "score": 0.0,
+                "reason": "product_type_has_no_matchable_terms"}
+
+    anchor = terms[-1]
+    support = terms[:-1]
+    compact_phrase = "".join(terms)
+    if any(compact_phrase in tag for tag in hashtags):
+        return {
+            "status": "MATCH", "confidence": "HIGH", "score": 100.0,
+            "reason": "requested product terms found together in a source hashtag",
+        }
+
+    positions = {term: [i for i, token in enumerate(body_tokens) if token == term] for term in terms}
+    if not support:
+        if positions.get(anchor):
+            return {
+                "status": "MATCH", "confidence": "MEDIUM", "score": 80.0,
+                "reason": "requested product noun found in source text",
+            }
+    elif all(positions.get(term) for term in terms):
+        nearest_span = min(
+            max(min(abs(anchor_pos - other_pos) for other_pos in positions[term]) for term in support)
+            for anchor_pos in positions[anchor]
+        )
+        if nearest_span <= 3:
+            return {
+                "status": "MATCH", "confidence": "HIGH", "score": 90.0,
+                "reason": "requested product terms found together in source text",
+            }
+        if nearest_span <= 6:
+            return {
+                "status": "MATCH", "confidence": "MEDIUM", "score": 75.0,
+                "reason": "requested product noun and use-case found close together in source text",
+            }
+
+    return {
+        "status": "NO_MATCH", "confidence": "NONE", "score": 0.0,
+        "reason": "source content does not identify the requested product type",
+    }
+
+
+def _performance_evidence(item: dict[str, Any]) -> dict[str, Any]:
+    """Describe available performance evidence without calling it revenue."""
+    record = item.get("record") or {}
+    decision = item.get("decision") or {}
+    raw_score = decision.get("performance_score", 0.0) if isinstance(decision, dict) else getattr(decision, "performance_score", 0.0)
+    try:
+        performance_score = float(raw_score or 0.0)
+    except (TypeError, ValueError):
+        performance_score = 0.0
+
+    boards = sorted({str(x).lower() for x in (record.get("discovery_boards") or [])})
+    performance_boards = sorted(set(boards) & _PERFORMANCE_BOARD_ORDER)
+    native_fields = []
+    for field in ("ctr", "cvr", "play_6s_rate", "play_2s_rate"):
+        value = record.get(field)
+        if value in (None, ""):
+            value = (record.get("source_signal") or {}).get(field)
+        try:
+            present = value not in (None, "") and float(value) > 0
+        except (TypeError, ValueError):
+            present = False
+        if present:
+            native_fields.append(field)
+
+    if performance_boards:
+        basis = "ADS_TOP_PERFORMANCE_BOARD"
+    elif native_fields:
+        basis = "NATIVE_PERFORMANCE_METRICS"
+    else:
+        proxy_fields = []
+        for field in ("views", "likes"):
+            value = record.get(field)
+            if value in (None, ""):
+                value = (record.get("source_signal") or {}).get(field)
+            try:
+                if value not in (None, "") and float(value) > 0:
+                    proxy_fields.append(field)
+            except (TypeError, ValueError):
+                pass
+        basis = "ENGAGEMENT_PROXY" if proxy_fields else "NO_PERFORMANCE_SIGNAL"
+        native_fields = proxy_fields
+
+    return {
+        "basis": basis,
+        "performance_score": round(performance_score, 2),
+        "available_fields": native_fields,
+        "performance_boards": performance_boards,
+        "commercial_result_confirmed": False,
+    }
+
+
+def _auto_source_candidates(
+    pools: list[list[dict[str, Any]]],
+    *,
+    product_type: str = "",
+) -> list[dict[str, Any]]:
+    """Build an analysis shortlist from product match + evidence tier, not a pre-video money guess."""
+    by_identity: dict[tuple[str, ...], dict[str, Any]] = {}
+    for pool in pools:
+        for item in pool:
+            record = item.get("record") or {}
+            keys = canonical_source_identity_keys(record)
+            stable = {key for key in keys if key.startswith(("url:", "video:"))}
+            identity = tuple(sorted(stable or keys))
+            if not identity:
+                fallback = str(record.get("ad_id") or record.get("video_id") or "")
+                if not fallback:
+                    continue
+                identity = (f"id:{fallback}",)
+            if identity not in by_identity:
+                by_identity[identity] = item
+
+    eligible = []
+    basis_priority = {
+        "ADS_TOP_PERFORMANCE_BOARD": 3,
+        "NATIVE_PERFORMANCE_METRICS": 2,
+        "ENGAGEMENT_PROXY": 1,
+    }
+    for item in by_identity.values():
+        record = item.get("record") or {}
+        product_match = record.get("product_relevance") or {}
+        if product_match.get("status") != "MATCH":
+            continue
+        if _is_hard_excluded(record) or not _has_video_url(record):
+            continue
+
+        evidence = _performance_evidence(item)
+        if evidence["basis"] == "NO_PERFORMANCE_SIGNAL":
+            continue
+        if evidence["basis"] != "ADS_TOP_PERFORMANCE_BOARD" and evidence["performance_score"] < 65.0:
+            continue
+
+        decision = item.get("decision") or {}
+        get = decision.get if isinstance(decision, dict) else (lambda key, default=None: getattr(decision, key, default))
+        components = get("components", {}) or {}
+        if not isinstance(components, dict):
+            components = {}
+        duration = components.get("duration") or {}
+        if isinstance(duration, dict) and duration.get("hard_block") and not duration.get("long_source_exception"):
+            continue
+        gate = components.get("money_signal_gate") or {}
+        action = str(get("action", "") or "").upper()
+        # A scorer rejection caused only by missing source-commercial metadata must not
+        # prevent shortlisting for source analysis. Other rejection reasons remain terminal.
+        if action == "REJECT" and not (isinstance(gate, dict) and gate.get("hard_block") is True):
+            continue
+
+        record["performance_evidence"] = evidence
+        record["shortlist_eligibility"] = {
+            "status": "ELIGIBLE",
+            "reason": "product match + available performance evidence",
+        }
+        item["_shortlist_basis_priority"] = basis_priority[evidence["basis"]]
+        eligible.append(item)
+
+    def metric(item):
+        d = item.get("decision") or {}
+        v = d.get("final_score", 0.0) if isinstance(d, dict) else getattr(d, "final_score", 0.0)
+        try:
+            return float(v or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    eligible.sort(key=lambda item: (
+        -int(item.get("_shortlist_basis_priority", 0)),
+        -float(_performance_evidence(item).get("performance_score", 0.0)),
+        -metric(item),
+        str((item.get("record") or {}).get("ad_id") or ""),
+    ))
+    return eligible
+
+
 def _rank(pool: list[dict[str, Any]], *, target_offer: str, prelander: str, landing_page: str, vertical: str, population: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     if not pool:
         return []
@@ -653,11 +872,12 @@ def _selection_diagnostics(
     selected: list[dict[str, Any]],
     *,
     mode: str,
-    max_examples: int = 25,
+    product_type: str = "",
+    max_examples: int = 500,
 ) -> dict[str, Any]:
-    """Record why potential sources were held/rejected without passing them into Selection."""
+    """Log each candidate's product match, evidence basis and selection outcome."""
     if mode != "auto":
-        return {"not_selected_count": 0, "by_reason": {}, "examples": []}
+        return {"not_selected_count": 0, "selected_count": len(selected), "by_reason": {}, "selected_by_basis": {}, "examples": []}
 
     def identity(record: dict[str, Any]) -> set[str]:
         keys = canonical_source_identity_keys(record)
@@ -670,6 +890,9 @@ def _selection_diagnostics(
     seen: set[tuple[str, ...]] = set()
     rows: list[dict[str, Any]] = []
     counts: dict[str, int] = {}
+    selected_by_basis: dict[str, int] = {}
+    not_selected_count = 0
+
     for pool in pools:
         for item in pool:
             record = item.get("record") or {}
@@ -683,8 +906,7 @@ def _selection_diagnostics(
             if identity_key in seen:
                 continue
             seen.add(identity_key)
-            if keys & selected_keys:
-                continue
+            is_selected = bool(keys & selected_keys)
             decision = item.get("decision") or {}
             get = decision.get if isinstance(decision, dict) else (lambda key, default=None: getattr(decision, key, default))
             components = get("components", {}) or {}
@@ -693,57 +915,77 @@ def _selection_diagnostics(
             gate = components.get("money_signal_gate") or {}
             if not isinstance(gate, dict):
                 gate = {}
+            duration = components.get("duration") or {}
             rel = record.get("vertical_relevance") or {}
+            product = record.get("product_relevance") or _product_type_relevance(record, product_type)
+            evidence = _performance_evidence(item)
             classification = str(rel.get("classification") or "UNVERIFIED").upper()
             action = str(get("action", "") or "").upper()
-            source_value_type = str(get("source_value_type", "") or "").upper()
             try:
                 final_score = float(get("final_score", 0.0) or 0.0)
             except (TypeError, ValueError):
                 final_score = 0.0
-            if classification == "HARD_EXCLUDE" or rel.get("excluded"):
+
+            if is_selected:
+                reason = "SELECTED"
+                selected_by_basis[evidence["basis"]] = selected_by_basis.get(evidence["basis"], 0) + 1
+            elif _is_hard_excluded(record):
                 reason = "HARD_EXCLUDED"
-            elif classification not in {"DIRECT", "EXPANDED"}:
-                reason = "SOURCE_RELEVANCE_UNVERIFIED_REQUIRES_REVIEW"
-            elif action == "REJECT":
-                reason = "SCORER_REJECT"
-            elif not _source_ready_item(item):
-                if action not in {"DEEP", "SHALLOW"}:
-                    reason = "SCORER_ACTION_NOT_READY"
-                elif gate.get("hard_block") is True:
-                    reason = "MONEY_SIGNAL_HARD_BLOCK"
-                else:
-                    reason = "NO_MONEY_OR_MECHANISM_SIGNAL"
+            elif not _has_video_url(record):
+                reason = "NO_PLAYABLE_VIDEO"
+            elif product.get("status") != "MATCH":
+                reason = "PRODUCT_TYPE_MISMATCH" if product_type else "SOURCE_RELEVANCE_UNVERIFIED_REQUIRES_REVIEW"
+            elif isinstance(duration, dict) and duration.get("hard_block") and not duration.get("long_source_exception"):
+                reason = "DURATION_HARD_BLOCK"
+            elif evidence["basis"] == "NO_PERFORMANCE_SIGNAL":
+                reason = "NO_PERFORMANCE_SIGNAL"
+            elif evidence["basis"] != "ADS_TOP_PERFORMANCE_BOARD" and evidence["performance_score"] < 65.0:
+                reason = "BELOW_PERFORMANCE_FLOOR"
+            elif action == "REJECT" and not gate.get("hard_block"):
+                reason = "SCORER_REJECT_OTHER_THAN_MISSING_MONEY_METADATA"
             else:
                 reason = "QUALIFIED_NOT_SELECTED_QUEUE_LIMIT"
-            try:
-                mechanism_score = float(get("mechanism_source_score", 0.0) or 0.0)
-            except (TypeError, ValueError):
-                mechanism_score = 0.0
+            if not is_selected:
+                not_selected_count += 1
+                counts[reason] = counts.get(reason, 0) + 1
+
             rows.append({
                 "ad_id": str(record.get("ad_id") or record.get("video_id") or ""),
                 "source": "ads_top" if str(record.get("discovery_source") or "") == "ads_top" else "sponsored_search",
                 "title": str(record.get("title") or "")[:180],
                 "source_url": str(record.get("source_url") or ""),
+                "selected": is_selected,
                 "classification": classification,
-                "relevance_reason": str(rel.get("reason") or "")[:240],
+                "product_match": product.get("status"),
+                "product_match_confidence": product.get("confidence"),
+                "product_match_score": product.get("score"),
+                "product_match_reason": str(product.get("reason") or "")[:240],
+                "performance_basis": evidence["basis"],
+                "performance_score": evidence["performance_score"],
+                "performance_fields": evidence["available_fields"],
+                "performance_boards": evidence["performance_boards"],
+                "commercial_result_confirmed": False,
                 "action": action,
                 "final_score": round(final_score, 2),
                 "money_gate_pass": gate.get("pass") is True,
                 "money_gate_reason": str(gate.get("reason") or "")[:240],
-                "mechanism_source_score": round(mechanism_score, 2),
-                "source_value_type": source_value_type,
                 "reason": reason,
             })
-            counts[reason] = counts.get(reason, 0) + 1
-    rows.sort(key=lambda row: (-row["final_score"], row["ad_id"]))
+
+    rows.sort(key=lambda row: (
+        not row["selected"],
+        -({"ADS_TOP_PERFORMANCE_BOARD": 3, "NATIVE_PERFORMANCE_METRICS": 2, "ENGAGEMENT_PROXY": 1}.get(row["performance_basis"], 0)),
+        -float(row["performance_score"] or 0),
+        row["ad_id"],
+    ))
     return {
-        "not_selected_count": len(rows),
+        "not_selected_count": not_selected_count,
+        "selected_count": len(selected),
         "by_reason": dict(sorted(counts.items())),
+        "selected_by_basis": dict(sorted(selected_by_basis.items())),
         "examples": rows[:max_examples],
         "examples_truncated": max(0, len(rows) - max_examples),
     }
-
 
 def discover_and_rank(
     *,
@@ -760,6 +1002,7 @@ def discover_and_rank(
     keyword_boards: int = 1,
     vertical: str = "",
     target_offer: str = "",
+    product_type: str = "",
     prelander: str = "",
     landing_page: str = "",
     discovery_mode: str = "auto",
@@ -817,6 +1060,12 @@ def discover_and_rank(
         """Count target-relevant candidates with usable media; this controls Discovery recovery."""
         records = [r for r in eligible_records() if not r.get("seen_before")]
         strict, expanded, _, _ = _classify(records, vertical, mode="strict")
+        if product_type:
+            return sum(
+                1 for record in records
+                if _has_video_url(record) and not _is_hard_excluded(record)
+                and _product_type_relevance(record, product_type).get("status") == "MATCH"
+            )
         return sum(
             1
             for record in (strict + expanded)
@@ -1020,6 +1269,8 @@ def discover_and_rank(
     records = eligible_records()
     fresh_records = [r for r in records if not r.get("seen_before")]
     strict_pool, expanded_pool, excluded_pool, unverified_pool = _classify(fresh_records, vertical, mode="strict")
+    for record in fresh_records:
+        record["product_relevance"] = _product_type_relevance(record, product_type)
 
     # Seen ads stay in raw diagnostics but cannot satisfy supply gates, occupy handoff
     # slots, or be sent through external reasoning again.
@@ -1059,41 +1310,34 @@ def discover_and_rank(
     elif mode == "mechanism-hunt":
         selected = mechanism_ranked[:source_queue_limit]
         fallback_path = "MECHANISM_HUNT"
+    elif mode == "auto":
+        auto_pools = [strict_ranked, expanded_ranked, unverified_diagnostic_ranked, mechanism_ranked]
+        auto_candidates = _auto_source_candidates(auto_pools, product_type=product_type)
+        selected = auto_candidates[:source_queue_limit]
+        for item in selected:
+            evidence = _performance_evidence(item)
+            item["record"]["auto_selection_reason"] = "SELECTED_" + evidence["basis"]
+        fallback_path = "PRODUCT_PERFORMANCE_SHORTLIST" if selected else "NO_PRODUCT_PERFORMANCE_SOURCE"
     else:
-        # Automatic selection requires confirmed DIRECT/EXPANDED relevance plus one of the
-        # two existing readiness paths. Unknown-relevance Ads Top rows stay diagnostic-only
-        # until a separate source-verification step confirms them.
-        auto_pools = [strict_ranked, expanded_ranked]
-        if mode == "auto":
-            selected = _select_source_ready_queue(auto_pools, source_queue_limit)
-        else:
-            selected = _select_source_ready_queue(
-                [strict_ranked, expanded_ranked, unverified_ranked, mechanism_ranked],
-                source_queue_limit,
-            )
+        selected = _select_source_ready_queue(
+            [strict_ranked, expanded_ranked, unverified_ranked, mechanism_ranked],
+            source_queue_limit,
+        )
         selected_ids = {str(x["record"].get("ad_id") or x["record"].get("video_id") or "") for x in selected}
-        # Explicit research modes retain their existing fill/review behavior. Automatic
-        # mode never fills empty slots with rejected or unverified sources.
-        if mode != "auto":
-            fill_pools = (strict_ranked, expanded_ranked, unverified_ranked, mechanism_ranked)
-            for pool in fill_pools:
-                for x in pool:
-                    cid = str(x["record"].get("ad_id") or x["record"].get("video_id") or "")
-                    if not cid or cid in selected_ids:
-                        continue
-                    selected.append(x)
-                    selected_ids.add(cid)
-                    if len(selected) >= source_queue_limit:
-                        break
+        fill_pools = (strict_ranked, expanded_ranked, unverified_ranked, mechanism_ranked)
+        for pool in fill_pools:
+            for x in pool:
+                cid = str(x["record"].get("ad_id") or x["record"].get("video_id") or "")
+                if not cid or cid in selected_ids:
+                    continue
+                x["record"]["discovery_scope"] = "SOURCE_VERIFY_REQUIRED"
+                selected.append(x)
+                selected_ids.add(cid)
                 if len(selected) >= source_queue_limit:
                     break
-
-        # In target-specific live mode, a raw/unverified video is not allowed to fill
-        # a target-market queue merely because a target source was found elsewhere.
-        # That would reintroduce the exact broad-market contamination this adaptive
-        # policy is designed to eliminate. Legacy/source-verification fallback remains
-        # available only outside auto mode.
-        if mode != "auto" and len(selected) < source_queue_limit and raw_source_queue:
+            if len(selected) >= source_queue_limit:
+                break
+        if len(selected) < source_queue_limit and raw_source_queue:
             raw_ranked = _fresh_first(_rank(
                 raw_source_queue,
                 target_offer=target_offer,
@@ -1112,20 +1356,7 @@ def discover_and_rank(
                 selected_ids.add(cid)
                 if len(selected) >= source_queue_limit:
                     break
-
-        if mode == "auto" and not selected:
-            fallback_path = "NO_QUALIFIED_SOURCE"
-        elif len(strict_ranked) >= max_ads:
-            fallback_path = "STRICT"
-        elif len(strict_ranked) + len(expanded_ranked) >= max_ads:
-            fallback_path = "STRICT_TO_EXPANDED"
-        elif unverified_ranked and len(selected) > len(strict_ranked) + len(expanded_ranked):
-            fallback_path = "STRICT_TO_EXPANDED_TO_UNVERIFIED_VERIFY"
-        elif mechanism_ranked and len(selected) > len(strict_ranked) + len(expanded_ranked):
-            fallback_path = "STRICT_TO_EXPANDED_TO_MECHANISM_HUNT"
-        else:
-            fallback_path = "STRICT_TO_EXPANDED_SHORTFALL"
-
+        fallback_path = "STRICT_TO_EXPANDED_SHORTFALL"
 
     # IDs can differ while a platform returns the same underlying post; collapse by the
     # stable source URL/video identity before discovery stats and handoff ranking.
@@ -1151,7 +1382,9 @@ def discover_and_rank(
     for item in selected:
         r = item["record"]
         status = (r.get("vertical_relevance") or {}).get("status", "UNKNOWN")
-        if r in strict_pool:
+        if mode == "auto" and product_type and (r.get("product_relevance") or {}).get("status") == "MATCH":
+            scope = "PRODUCT_MATCH_PERFORMANCE_SHORTLIST"
+        elif r in strict_pool:
             scope = "STRICT"
         elif r in expanded_pool:
             scope = "EXPANDED"
@@ -1175,15 +1408,37 @@ def discover_and_rank(
         for r in excluded_pool
     ]
 
-    target_relevant_ads = sum(
+    product_relevant_ads = sum(
+        1 for record in fresh_records
+        if _has_video_url(record) and not _is_hard_excluded(record)
+        and (record.get("product_relevance") or {}).get("status") == "MATCH"
+    )
+    target_relevant_ads = product_relevant_ads if product_type else sum(
         1 for record in (strict_pool + expanded_pool)
         if _has_video_url(record) and not _is_hard_excluded(record)
     )
     if mode == "auto" and not selected:
-        fallback_path = "NO_QUALIFIED_SOURCE" if target_relevant_ads else "NO_TARGET_RELEVANCE"
+        fallback_path = "NO_PRODUCT_PERFORMANCE_SOURCE" if target_relevant_ads else "NO_TARGET_RELEVANCE"
     money_ready_source_ads, mechanism_ready_source_ads = source_analysis_ready_counts()
     analysis_ready_source_ads = money_ready_source_ads + mechanism_ready_source_ads
-    if analysis_ready_source_ads >= source_queue_limit:
+    diagnostic_only_records = [r for r in fresh_records if _is_hard_excluded(r) or not _has_video_url(r)]
+    diagnostic_only_ranked = _rank(
+        diagnostic_only_records, target_offer=target_offer, prelander=prelander,
+        landing_page=landing_page, vertical=vertical, population=records,
+    ) if diagnostic_only_records else []
+    auto_candidate_count = len(_auto_source_candidates(
+        [strict_ranked, expanded_ranked, unverified_diagnostic_ranked, mechanism_ranked],
+        product_type=product_type,
+    )) if mode == "auto" else 0
+    if mode == "auto" and len(selected) >= source_queue_limit:
+        discovery_stop_basis = "product_performance_source_queue"
+    elif mode == "auto" and len(calls) >= max_requests and not selected:
+        discovery_stop_basis = "request_budget_exhausted_no_product_performance_source"
+    elif mode == "auto" and selected:
+        discovery_stop_basis = "product_performance_shortlist"
+    elif mode == "auto":
+        discovery_stop_basis = "product_or_performance_evidence_missing"
+    elif analysis_ready_source_ads >= source_queue_limit:
         discovery_stop_basis = "analysis_ready_source_queue"
     elif len(calls) >= max_requests and analysis_ready_source_ads == 0:
         discovery_stop_basis = "request_budget_exhausted_no_analysis_ready_source"
@@ -1197,9 +1452,8 @@ def discover_and_rank(
         discovery_stop_basis = "target_relevance_shortfall"
 
     source_selection_diagnostics = _selection_diagnostics(
-        [strict_ranked, expanded_ranked, unverified_diagnostic_ranked, mechanism_ranked],
-        selected,
-        mode=mode,
+        [strict_ranked, expanded_ranked, unverified_diagnostic_ranked, mechanism_ranked, diagnostic_only_ranked],
+        selected, mode=mode, product_type=product_type,
     )
     stats.update({
         "planned_requests": len(calls),
@@ -1221,6 +1475,9 @@ def discover_and_rank(
         "analysis_ready_source_ads": analysis_ready_source_ads,
         "source_selection_diagnostics": source_selection_diagnostics,
         "target_relevant_ads": target_relevant_ads,
+        "product_relevant_ads": product_relevant_ads,
+        "performance_ready_source_ads": auto_candidate_count,
+        "auto_shortlist_ads": len(selected) if mode == "auto" else 0,
         "target_relevant_shortfall": max(0, source_queue_limit - target_relevant_ads),
         "discovery_stop_basis": discovery_stop_basis,
         "performance_lane_reserved": bool(use_adaptive_supply_search and performance_budget > 0),
@@ -1264,7 +1521,7 @@ def discover_and_rank(
             "supply_queries_executed": [c.get("keyword", "") for c in calls if c.get("source") == "sponsored_search"],
             "performance_calls_used": sum(1 for c in calls if c.get("source") == "ads_top"),
             "query_failover_policy": (
-                "bounded_target_queries_then_ads_top_even_without_source_gate; downstream money/mechanism and target-fit gates remain strict"
+                "bounded product-specific search then Ads Top; shortlist uses product match and strongest available performance evidence"
                 if use_adaptive_supply_search else "legacy_ads_top_hybrid"
             ),
         },

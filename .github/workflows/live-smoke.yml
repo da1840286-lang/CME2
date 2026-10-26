@@ -514,7 +514,7 @@ jobs:
                   else:
                       s.write("SocialCrawl returned no raw ad rows for the planned source queries.\n\n")
                   s.write(f"Diagnosis: `{diag.get('outcome', 'UNKNOWN')}` — {diag.get('explanation', 'No additional FIND diagnostics available')}\n\n")
-                  s.write(f"Requests: {diag.get('requests_executed', 0)}; unique ads: {diag.get('unique_ads', 0)}; DIRECT: {diag.get('direct_relevant_ads', 0)}; EXPANDED: {diag.get('expanded_relevant_ads', 0)}; UNVERIFIED: {diag.get('unverified_ads', 0)}; money-ready: {diag.get('money_ready_source_ads', 0)}; mechanism-ready: {diag.get('mechanism_ready_source_ads', 0)}; hard-excluded: {diag.get('hard_excluded_ads', 0)}.\n\n")
+                  s.write(f"Requests: {diag.get('requests_executed', 0)}; unique ads: {diag.get('unique_ads', 0)}; product-relevant: {diag.get('product_relevant_ads', diag.get('target_relevant_ads', 0))}; performance-ready: {diag.get('performance_ready_source_ads', 0)}; shortlisted: {diag.get('auto_shortlist_ads', 0)}; source-money-gate pass (not revenue): {diag.get('money_ready_source_ads', 0)}; hard-excluded: {diag.get('hard_excluded_ads', 0)}.\n\n")
                   selection_diag = diag.get("source_selection_diagnostics") or {}
                   by_reason = selection_diag.get("by_reason") or {}
                   if by_reason:
@@ -691,7 +691,7 @@ jobs:
                           brand = str(c.get("brand") or "unknown brand")[:80]
                           url = c.get("source_url") if isinstance(c.get("source_url"), str) and str(c.get("source_url")).startswith("https://") else ""
                           summary.write(f"- candidate_id: {c['id']} — {brand}: {title}; score={c.get('final_score')}; video={'yes' if c.get('video_url_present') else 'no'}; {url}\n")
-                      summary.write("\nAutomatic transfer uses only candidates passing the strict source-commercial gate; scorer REJECT and failed money-signal candidates are skipped even if their videos are playable. On INVALID_OUTPUT, CME retries the same candidate once before advancing to the next eligible source, up to three distinct candidates. An explicit candidate_id is never replaced automatically.\n")
+                      summary.write("\nFIND shortlist admission uses product-type relevance and the strongest available performance evidence. Views/likes-only evidence is an engagement proxy, not proof of sales. Automatic stage=all still enforces source-commercial/mechanism and Target-Fit transfer gates; an explicit candidate_id permits source inspection, not a commercial-success claim.\n")
               candidates = json.loads(candidates_file.read_text(encoding="utf-8")).get("candidates", [])
               candidate, skipped = select_transfer_candidate(candidates, threshold)
               candidate_pool, ranked_skipped = rank_transfer_candidates(candidates, threshold)

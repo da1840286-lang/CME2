@@ -104,8 +104,16 @@ def to_candidate(item: dict, request: dict, collected_at: str, origin: str, sour
         "metrics": metrics,
         "source_check": {"status": rel.get("status") or "UNKNOWN", "classification": rel.get("classification"),
                          "score": rel.get("score"), "excluded": rel.get("excluded"), "reason": rel.get("reason"),
+                         "product_relevance": rec.get("product_relevance") or {},
                          "scope": rec.get("discovery_scope")},
-        "source_score": score, "why": why, "discovered_at": collected_at,
+        "source_score": score,
+        "product_relevance": rec.get("product_relevance") or {},
+        "performance_evidence": rec.get("performance_evidence") or {},
+        "shortlist_eligibility": rec.get("shortlist_eligibility") or {},
+        "why": {**why, "product_relevance": rec.get("product_relevance") or {},
+                "performance_evidence": rec.get("performance_evidence") or {},
+                "selection_reason": rec.get("auto_selection_reason") or ""},
+        "discovered_at": collected_at,
         "request": {k: request.get(k) for k in ("country", "period", "order_bys", "keywords", "vertical")},
         "legacy_record": rec,
     }
@@ -159,12 +167,13 @@ def _find_diagnostics(stats: dict, candidate_count: int) -> dict:
     analysis_ready = int(stats.get("analysis_ready_source_ads") or 0)
     hard_excluded = int(stats.get("pre_visual_verification_hard_excluded_ads") or 0)
     selection_details = stats.get("source_selection_diagnostics") or {}
+    performance_ready = int(stats.get("performance_ready_source_ads") or 0)
     if candidate_count:
         outcome = "CANDIDATES_FOUND"
         explanation = (
-            "FIND returned sources admitted by the configured discovery mode. Automatic mode requires confirmed "
-            "DIRECT/EXPANDED relevance plus either the source-commercial gate or the independent mechanism-source path; "
-            "Target-Fit still gates transfer."
+            "FIND shortlisted product-relevant sources using the strongest available platform-performance evidence. "
+            "Views/likes-only candidates are labeled as engagement proxies, not proof of sales. "
+            "Source-commercial/mechanism eligibility and Target-Fit remain separate downstream transfer gates."
         )
     elif raw_returned == 0:
         outcome = "NO_API_ROWS"
@@ -176,11 +185,11 @@ def _find_diagnostics(stats: dict, candidate_count: int) -> dict:
             "for a separate source check, not admitted from the query keyword alone. "
             "commercial success is not required to extract a pattern in the manual pattern-only path."
         )
-    elif analysis_ready == 0:
-        outcome = "NO_QUALIFIED_SOURCE"
+    elif performance_ready == 0:
+        outcome = "NO_PERFORMANCE_EVIDENCE"
         explanation = (
-            "Target-relevant ads were found, but none passed the source-commercial gate or the independent "
-            "mechanism-source path. Weak ads were not used to fill the candidate list."
+            "Product-relevant sources were found, but none had a performance-board position or an available "
+            "performance/engagement score strong enough to justify the analysis shortlist. This is not a profitability verdict."
         )
     else:
         outcome = "NO_RANKED_CANDIDATE"
@@ -198,6 +207,8 @@ def _find_diagnostics(stats: dict, candidate_count: int) -> dict:
         "direct_relevant_ads": direct,
         "expanded_relevant_ads": expanded,
         "target_relevant_ads": target_relevant,
+        "product_relevant_ads": int(stats.get("product_relevant_ads") or target_relevant),
+        "performance_ready_source_ads": performance_ready,
         "money_ready_source_ads": money_ready,
         "mechanism_ready_source_ads": mechanism_ready,
         "analysis_ready_source_ads": analysis_ready,
@@ -244,6 +255,7 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
             client=client, country=country, period=period, keywords=search_terms, order_bys=order_bys,
             limit_per_board=int(params.get("limit_per_board") or 10), max_ads=max_ads, max_requests=max_requests,
             keyword_boards=max_requests, vertical=VERTICAL, target_offer=offer["target_offer"],
+            product_type=offer["product_type"] or offer["product_category"],
             prelander=offer["prelander"], landing_page=offer["landing_page"],
             discovery_mode=str(params.get("discovery_mode") or "auto"),
             search_tags_dir=PRODUCT_SEARCH_TAGS_DIR, supply_search=True)
@@ -257,8 +269,8 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
     strategy = stats.setdefault("discovery_strategy", {})
     executed_calls = stats.get("calls") or []
     strategy["request_policy"] = (
-        "Bounded Sponsored Search plus reserved Ads Top performance queries, even when no prior source passes "
-        "the money/mechanism gate; final automatic eligibility and Target-Fit transfer gates remain strict."
+        "Bounded Sponsored Search plus reserved Ads Top performance queries. FIND shortlists by product-type match "
+        "and strongest available performance evidence; money/mechanism and Target-Fit remain downstream transfer gates."
     )
     strategy["supply_search_enabled"] = True
     strategy["supply_lane"] = "tiktok_sponsored_search_plus_ads_top_performance"
