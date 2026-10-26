@@ -173,6 +173,12 @@ class VendoredCodeIsTheRealOne(Env):
             self.assertEqual(call["playback_metrics_returned"],
                              {"play_2s_rate": 1, "play_6s_rate": 1})
             self.assertTrue(call["playback_metric_examples"])
+            raw_diag = call["raw_playback_field_diagnostics"]
+            self.assertGreater(raw_diag["matched_field_occurrences"], 0)
+            matched_paths = " ".join(raw_diag["matched_field_paths"])
+            self.assertIn("play_2s_rate", matched_paths)
+            self.assertIn("play_6s_rate", matched_paths)
+            self.assertTrue(call["provider_params"].get("order_by") in {"play_6s_rate", "play_2s_rate"})
 
     def test_find_uses_product_terms_and_reports_raw_rows_rejected_by_source_gate(self):
         calls = []
