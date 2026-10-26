@@ -1,7 +1,7 @@
 {
   "source_archive": "CME-live-integration-layer2-receipt-reconcile-2026-10-19.zip",
   "source_archive_sha256": "467767cad429a0ec8192d844fae164082fb493e79cb8f671a71f9bbdf14adc35",
-  "note": "Vendored source is based on the old CME build. legacy/discover.py contains the live discovery policy: bounded targeted Sponsored Search is paired with reserved Ads Top performance discovery; automatic FIND shortlists only product-relevant sources with the strongest available platform-performance evidence. Views/likes-only evidence is labeled a proxy, not revenue. Source-commercial/mechanism and Target-Fit gates remain downstream transfer checks.",
+  "note": "Vendored source is based on the old CME build. legacy/discover.py contains the live discovery policy: bounded targeted Sponsored Search plus reserved Ads Top performance discovery; automatic FIND requires independent source-body product/promotion evidence and rejects explicit cross-market delivery signals. Views/likes-only evidence remains an engagement proxy, not revenue. Source-commercial/mechanism and Target-Fit gates remain downstream transfer checks.",
   "decisions": {
     "REUSE": {
       "legacy/discover.py": "discover_and_rank: the real discovery, filtering, dedup keys and ranking",
@@ -26,7 +26,7 @@
     }
   },
   "files": {
-    "legacy/discover.py": "8a80bdd7fad1633c741fbb7831cfd4b038411ffbb882d8e94d854bad2cc68019",
+    "legacy/discover.py": "808260eb33d062bd22e465cbbe82be9324065c838b34cb6a72fd0bb5d7b71791",
     "legacy/arbitrage.py": "51bbafc094c47662c1ebfa2f93a0651f9554ab5ab674946bb1cb56156af28957",
     "legacy/verticals.py": "20a2b48a4b4e554ac9914c628178a8e672fc9739785b4d797c989b788ed77277",
     "legacy/market_taxonomy.py": "0966d0fb52533bda275ed54d4860fc83f52b5136c8a9daa72ef165312c7fa6f0",
