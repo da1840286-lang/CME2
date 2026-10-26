@@ -754,7 +754,7 @@ def _performance_evidence(item: dict[str, Any]) -> dict[str, Any]:
         if value in (None, ""):
             value = (record.get("source_signal") or {}).get(field)
         try:
-            present = value not in (None, "") and float(value) > 0
+            present = value not in (None, "") and float(value) >= 0
         except (TypeError, ValueError):
             present = False
         if present:

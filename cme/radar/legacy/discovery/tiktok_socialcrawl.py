@@ -73,6 +73,26 @@ class SocialCrawlTikTokTopAds:
         video_url_360p = ad.get("video_url_360p") or ""
 
         author = post.get("author", {}) or {}
+
+        # Preserve TikTok playback-rate metrics, including measured zero values.
+        # Ranking compares provider values within the source population; do not guess their scale.
+        ad_metrics = ad.get("metrics") if isinstance(ad.get("metrics"), dict) else {}
+        computed_metrics = computed.get("metrics") if isinstance(computed.get("metrics"), dict) else {}
+        item_metrics = item.get("metrics") if isinstance(item.get("metrics"), dict) else {}
+
+        def playback_metric(field: str):
+            aliases = (field, "play2sRate" if field == "play_2s_rate" else "play6sRate")
+            for container in (ad, ad_metrics, ext, computed, computed_metrics, item_metrics, item, post):
+                if not isinstance(container, dict):
+                    continue
+                for key in aliases:
+                    value = container.get(key)
+                    if value is not None and value != "":
+                        return value
+            return None
+
+        play_2s_rate = playback_metric("play_2s_rate")
+        play_6s_rate = playback_metric("play_6s_rate")
         # IMPORTANT: only treat fields explicitly named in seconds as duration.
         # A generic `duration` field is ambiguous and may not be in seconds, so it
         # must never silently become a 0.8s / 2.3s fake duration for our hard gate.
@@ -139,6 +159,8 @@ class SocialCrawlTikTokTopAds:
             "language": computed.get("language"),
             "ctr": ad.get("ctr"),
             "cvr": ad.get("cvr"),
+            "play_2s_rate": play_2s_rate,
+            "play_6s_rate": play_6s_rate,
             "rank": ad.get("rank"),
             "cost_score": ad.get("cost_score"),
             "like_tier": ad.get("like_tier"),
