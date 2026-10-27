@@ -237,7 +237,7 @@ ANALYST_SYSTEM = (
     "where S = {\"text\": str, \"kind\": \"OBSERVED\"|\"INFERRED\"}. OBSERVED only for what is visible in the frames; "
     "interpretations are INFERRED. mechanism_hypothesis and transferability are always INFERRED and are hypotheses, not proof "
     "of profitability. evidence t_sec must be one of the given frame timestamps. If something cannot be known from the frames, "
-    "say so in limits.missing and use null ratings. Write all text values in Russian."
+    "say so in limits.missing and use null ratings. Write all text values in English."
 )
 
 

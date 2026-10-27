@@ -681,6 +681,69 @@ def _trace_excerpt(value, limit: int = 3500) -> str:
     return text if len(text) <= limit else text[:limit] + f"...[+{len(text) - limit} chars]"
 
 
+def _explicit_vacuum_action_evidence(source_transfer) -> list:
+    """Return source-frame timestamps whose observations explicitly show suction/pickup.
+
+    This is deliberately evidence-scoped: ad titles, inferred mechanism text, and search
+    keywords cannot trigger it. The multilingual checks prevent Russian source observations
+    from being treated as absent merely because the downstream gate writes English.
+    """
+    if not isinstance(source_transfer, dict):
+        return []
+    rows = source_transfer.get("evidence")
+    if not isinstance(rows, list):
+        return []
+    out = []
+    english_action = re.compile(r"\b(?:vacuum(?:s|ed|ing)?|suction|sucks?\s+up|picks?\s+up)\b", re.I)
+    english_object = re.compile(r"\b(?:crumbs?|dust|debris|dirt|carpet|mat)\b", re.I)
+    russian_action = re.compile(r"(?:всасыва\w*|пылесос\w*)", re.I)
+    russian_object = re.compile(r"(?:крош\w*|пыл\w*|мусор\w*|ковр\w*)", re.I)
+    for row in rows[:8]:
+        if not isinstance(row, dict):
+            continue
+        observation = str(row.get("observation") or "").strip()
+        try:
+            timestamp = float(row.get("t_sec"))
+        except (TypeError, ValueError):
+            continue
+        if timestamp < 0 or not observation:
+            continue
+        english_match = english_action.search(observation) and english_object.search(observation)
+        russian_match = russian_action.search(observation) and russian_object.search(observation)
+        if (english_match or russian_match) and timestamp not in out:
+            out.append(timestamp)
+    return out
+
+
+def _source_evidence_contradiction(decision, source_transfer) -> str:
+    """Catch a negative gate verdict that says suction was not observed despite explicit evidence."""
+    timestamps = _explicit_vacuum_action_evidence(source_transfer)
+    if not timestamps or not isinstance(decision, dict) or decision.get("transferable") is not False:
+        return ""
+    denial_patterns = (
+        re.compile(r"\bno\s+(?:source\s+)?(?:evidence|observation|frame)\b.{0,120}\b(?:vacuum|suction|device|action|cleaning|crumbs?)\b", re.I),
+        re.compile(r"\b(?:source\s+)?(?:evidence|observations?|frames?)\b.{0,100}\b(?:lack(?:s|ing)?|do(?:es)?\s+not|doesn't|never|cannot|can't|without|missing)\b.{0,100}\b(?:vacuum|suction|device|action|cleaning|crumbs?)\b", re.I),
+        re.compile(r"\b(?:lack(?:s|ing)?|no|without|never|cannot|can't|does\s+not|doesn't)\b.{0,100}\b(?:evidence|observation|frame)\b.{0,100}\b(?:vacuum|suction|device|action)\b", re.I),
+    )
+    claims = [str(decision.get("reason") or "")]
+    dropped = decision.get("source_elements_dropped")
+    if isinstance(dropped, list):
+        claims.extend(
+            str(item.get("why") or "")
+            for item in dropped
+            if isinstance(item, dict) and item.get("element") in {"mechanism", "intervention", "result"}
+        )
+    if not any(pattern.search(claim) for claim in claims for pattern in denial_patterns):
+        return ""
+    marks = ", ".join(f"{t:g}s" for t in timestamps)
+    return (
+        "SOURCE_EVIDENCE_CONTRADICTION: supplied source observations at "
+        f"{marks} explicitly describe vacuum suction/pickup. Re-evaluate those observations; "
+        "do not claim the action was never shown. A negative verdict is still allowed if a "
+        "separate, specific target incompatibility supports it."
+    )
+
+
 def request_transfer_fit(offer, brief: str, source_transfer: dict, call, trace_out=None, max_rounds: int = 2) -> dict:
     """Run the pre-generation fit gate, allowing one correction for invalid model output.
 
@@ -710,6 +773,7 @@ def request_transfer_fit(offer, brief: str, source_transfer: dict, call, trace_o
             "Judge the source's causal commercial mechanism, not superficial product similarity, source score, generic ease/speed language, or CTA.",
             "Cross-category transfer is allowed only when you can explain how the same causal persuasion mechanism maps to a real target-native problem, intervention and observable proof.",
             "The current OfferCard is authoritative for target facts. The sampled source analysis is a hypothesis, not full-video or performance proof. Never transfer source-only hardware, special features, quantitative claims, or capabilities without target evidence.",
+            "SOURCE LANGUAGE AND EVIDENCE CONSISTENCY: source fields and observations may be Russian or another language. Interpret them semantically and write this decision in English; language alone is never a reason to drop an element. Treat source_evidence_refs as the observation ledger. If an observation explicitly records an action (for example, a device vacuuming crumbs), do not claim that action was never observed. Acknowledge the exact evidence and reject only for a separate, specific target incompatibility if one remains.",
             "Separate a visually demonstrable ordinary action from product claims: if the OfferCard confirms the target product class/function, a plausible normal-use demo does not require verified suction numbers, runtime, accessory lists, noise levels, or container-emptying details unless one is essential to the source's actual causal mechanism.",
             "ORDINARY DEMO IS NOT A DEFAULT ANSWER: a plain demonstration of the target product is a valid transfer only when the source mechanism itself is a plain demonstration. If the source hook or mechanism is a comparison (old vs new, A vs B, rival method, before vs after), replacing it with a single-product demo is a substitution, not a transfer. Map the comparison onto a target-native comparison (for example this product against the old way of doing the same task) or choose transferable=false.",
             "Do not invent or imply unverified specifications, runtime, accessories, container design, special features, or performance outcomes. An ordinary visible action may transfer without those claims; a mechanism that depends on an unverified unique feature must be rejected.",
@@ -756,6 +820,9 @@ def request_transfer_fit(offer, brief: str, source_transfer: dict, call, trace_o
         else:
             decision = response.get("transfer_decision")
             errors = validate_transfer_fit_decision(offer, decision, source_transfer)
+            contradiction = _source_evidence_contradiction(decision, source_transfer)
+            if contradiction:
+                errors.append(contradiction)
 
         if errors:
             record["validation_errors"] = errors
