@@ -534,9 +534,16 @@ class CandidateRecord(Env):
 
 class DedupeAndFilters(Env):
     def cand(self, ad, **kw):
-        with self.fake_find([synthetic_post(ad, **kw)]):
-            return F.run_find({"country": kw.pop("country", "US"), "max_requests": 1, "discovery_mode": "strict"},
-                              client=T.SocialCrawlTikTokTopAds(api_key="K"), now="2026-10-21T00:00:00Z")["candidates"][0]
+        country = kw.pop("country", "US")
+        self._fixture_seen_counter = getattr(self, "_fixture_seen_counter", 0) + 1
+        fixture_seen_path = Path(self.tmp.name) / f"find-seen-fixture-{self._fixture_seen_counter}.json"
+        # These tests exercise Store deduplication, not the separate cross-run FIND history.
+        # Give every synthetic discovery fixture fresh FIND state; persistence is tested explicitly.
+        with mock.patch.dict(os.environ, {"CME_FIND_SEEN_PATH": str(fixture_seen_path)}):
+            with self.fake_find([synthetic_post(ad, **kw)]):
+                return F.run_find({"country": country, "max_requests": 1, "discovery_mode": "strict"},
+                                  client=T.SocialCrawlTikTokTopAds(api_key="K"),
+                                  now="2026-10-21T00:00:00Z")["candidates"][0]
 
     def test_same_ad_twice_is_one_card_with_history_and_latest_metrics(self):
         s = Store(self.data / "r.db")

@@ -148,3 +148,17 @@ class MechanismFindTests(unittest.TestCase):
         self.assertFalse(candidate["source_selection"]["attention_is_commercial_proof"])
         self.assertEqual(result["diagnostics"]["performance_calls_used"], 0)
         self.assertEqual(result["request"]["selection_mode"], "mechanism")
+
+    def test_find_applies_seen_ledger_across_runs(self):
+        client = FakeClient([self.item("seen-across-runs")])
+        params = {"selection_mode": "mechanism", "country": "US", "period": 30, "max_requests": 1,
+                  "max_ads": 5, "keywords": ["air duster"], "offer": self.target}
+        with mock.patch.dict("os.environ", {"CME_FIND_SEEN_PATH": str(self.ledger_path)}):
+            first = run_find(params, client=client, now="2026-01-01T00:00:00Z")
+            second = run_find(params, client=client, now="2026-01-01T00:00:01Z")
+        self.assertEqual(len(first["candidates"]), 1)
+        self.assertEqual(second["candidates"], [])
+        diag = second["diagnostics"]["source_selection_diagnostics"]
+        self.assertEqual(diag["rejected_by_reason"].get("SEEN_WITHIN_TTL"), 1)
+        self.assertEqual(second["diagnostics"]["performance_calls_used"], 0)
+        self.assertEqual(len(client.calls), 2)
