@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import json
 import re
 from pathlib import Path
@@ -7,7 +8,7 @@ from typing import Any, Iterable
 from urllib.parse import urlsplit, urlunsplit
 
 from .arbitrage import score_tiktok_candidate
-from .discovery.tiktok_socialcrawl import SocialCrawlTikTokTopAds
+from .discovery.tiktok_socialcrawl import RETENTION_BOARDS, SocialCrawlTikTokTopAds
 
 
 from .verticals import canonical_vertical, discovery_seed_groups
@@ -352,7 +353,8 @@ def remember_seen_ad_ids(ranked: list[dict[str, Any]], request: dict[str, Any]) 
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def _merge_item(combined: dict[str, dict[str, Any]], item: dict[str, Any], order_by: str, keyword: str | None) -> bool:
+def _merge_item(combined: dict[str, dict[str, Any]], item: dict[str, Any], order_by: str,
+                keyword: str | None, retention_requested: bool = False) -> bool:
     key = item.get("ad_id") or item.get("video_id") or item.get("source_url") or item.get("video_url")
     if not key:
         return False
@@ -383,6 +385,27 @@ def _merge_item(combined: dict[str, dict[str, Any]], item: dict[str, Any], order
     ):
         if existing.get(field) in (None, "") and item.get(field) not in (None, ""):
             existing[field] = item[field]
+    if retention_requested:
+        incoming_provenance = item.get("retention_provenance")
+        incoming_provenance = incoming_provenance if isinstance(incoming_provenance, dict) else {}
+        existing_provenance = existing.get("retention_provenance")
+        existing_provenance = dict(existing_provenance) if isinstance(existing_provenance, dict) else {}
+        for field in ("retention_2s", "retention_6s", "retention_curve"):
+            incoming_value = item.get(field)
+            provenance = incoming_provenance.get(field)
+            if incoming_value not in (None, "", []):
+                existing[field] = incoming_value
+                if provenance:
+                    existing_provenance[field] = provenance
+            elif existing.get(field) in (None, "", []) and provenance:
+                existing_provenance[field] = provenance
+        curve_source = str(incoming_provenance.get("retention_curve") or "")
+        if item.get("retention_curve") not in (None, "", []) or (
+            not existing.get("retention_curve") and "retention" in curve_source
+        ):
+            existing["retention_curve_invalid_points"] = int(item.get("retention_curve_invalid_points") or 0)
+        if existing_provenance:
+            existing["retention_provenance"] = existing_provenance
     if float(existing.get("discovery_query_quality", 0.0) or 0.0) < float(item.get("discovery_query_quality", 0.0) or 0.0):
         existing["discovery_query_quality"] = item.get("discovery_query_quality", 0.0)
         existing["discovery_query_confidence"] = item.get("discovery_query_confidence", "NONE")
@@ -450,8 +473,10 @@ def _fetch_plan(
     combined: dict[str, dict[str, Any]],
     calls: list[dict[str, Any]],
     total_credits: int,
+    retention_boards: frozenset | set | None = None,
 ) -> int:
     for call_no, (order_by, keyword) in enumerate(plan, start=len(calls) + 1):
+        retention_requested = bool(retention_boards and order_by in retention_boards and not keyword)
         if order_by == "sponsored_search":
             result = client.fetch_sponsored_search(
                 query=keyword or "", region=country,
@@ -459,10 +484,16 @@ def _fetch_plan(
                 sort_by="most-liked", relevance="filter",
             )
         else:
-            result = client.fetch_board(
+            board_kwargs = dict(
                 country=country, period=period, order_by=order_by, keyword=keyword,
                 industry=industry or None, ad_language=ad_language, limit=limit_per_board,
             )
+            if retention_requested:
+                # SocialCrawl disallows keyword/industry filters with include=retention.
+                board_kwargs["keyword"] = None
+                board_kwargs["industry"] = None
+                board_kwargs["include_retention"] = True
+            result = client.fetch_board(**board_kwargs)
         credits = result.get("credits_used")
         if isinstance(credits, (int, float)):
             total_credits += int(credits)
@@ -494,7 +525,7 @@ def _fetch_plan(
             item.setdefault("discovery_source", "tiktok_sponsored_search" if order_by == "sponsored_search" else "ads_top")
             item.setdefault("discovery_query", keyword or "")
             item.setdefault("discovery_order_by", order_by)
-            if _merge_item(combined, item, order_by, keyword):
+            if _merge_item(combined, item, order_by, keyword, retention_requested=retention_requested):
                 new_items += 1
         calls.append({
             "call": call_no,
@@ -512,6 +543,12 @@ def _fetch_plan(
                 for item in result["items"][:12] if isinstance(item, dict)
             ],
             "playback_metrics_returned": playback_metrics_returned,
+            "retention_requested": retention_requested,
+            "retention_returned": {
+                field: sum(1 for item in result["items"]
+                           if isinstance(item, dict) and item.get(field) not in (None, "", []))
+                for field in ("retention_2s", "retention_6s", "retention_curve")
+            },
             "playback_metric_examples": playback_metric_examples,
             "raw_playback_field_diagnostics": result.get("raw_playback_field_diagnostics") or {},
         })
@@ -1271,7 +1308,10 @@ def discover_and_rank(
     supply_search: bool = False,
     source_queue_size: int | None = None,
     performance_order_bys: list[str] | None = None,
+    include_retention: bool = False,
 ) -> list[dict[str, Any]]:
+    retention_boards = RETENTION_BOARDS if include_retention else None
+    _plan = functools.partial(_fetch_plan, retention_boards=retention_boards)
     mode = (discovery_mode or "auto").lower().strip()
     if mode not in {"auto", "strict", "expanded", "mechanism-hunt"}:
         raise ValueError("discovery_mode must be auto, strict, expanded or mechanism-hunt")
@@ -1433,7 +1473,7 @@ def discover_and_rank(
                 kw = supply_queries[query_index]
                 query_index += 1
                 search_calls += 1
-                total_credits = _fetch_plan(
+                total_credits = _plan(
                     client=client, country=country, period=period, industry=industry, vertical=vertical,
                     ad_language=ad_language, limit_per_board=limit_per_board,
                     plan=[("sponsored_search", kw)], combined=combined, calls=calls,
@@ -1457,7 +1497,9 @@ def discover_and_rank(
             # If a source becomes eligible early, remaining request capacity can help fill the queue.
             order_by = performance_order_list[top_index % len(performance_order_list)]
             performance_keyword = supply_queries[top_index % len(supply_queries)] if supply_queries else None
-            total_credits = _fetch_plan(
+            if retention_boards and order_by in retention_boards:
+                performance_keyword = None
+            total_credits = _plan(
                 client=client, country=country, period=period, industry=industry, vertical=vertical,
                 ad_language=ad_language, limit_per_board=limit_per_board,
                 plan=[(order_by, performance_keyword)], combined=combined, calls=calls,
@@ -1481,7 +1523,7 @@ def discover_and_rank(
 
         for idx in range(initial_broad_budget):
             order_by = order_list[idx % len(order_list)]
-            total_credits = _fetch_plan(
+            total_credits = _plan(
                 client=client, country=country, period=period, industry=industry, vertical=vertical,
                 ad_language=ad_language, limit_per_board=limit_per_board,
                 plan=[(order_by, None)], combined=combined, calls=calls,
@@ -1510,7 +1552,7 @@ def discover_and_rank(
                     break
                 used_keywords.add(kw.lower())
                 order_by = target_order_list[len(calls) % len(target_order_list)]
-                total_credits = _fetch_plan(
+                total_credits = _plan(
                     client=client, country=country, period=period, industry=industry, vertical=vertical,
                     ad_language=ad_language, limit_per_board=limit_per_board,
                     plan=[(order_by, kw)], combined=combined, calls=calls, total_credits=total_credits,
@@ -1521,7 +1563,7 @@ def discover_and_rank(
         if source_queue_count() < source_queue_limit and len(calls) < max_requests:
             fallback_index = initial_broad_budget
             while len(calls) < max_requests and source_queue_count() < source_queue_limit:
-                total_credits = _fetch_plan(
+                total_credits = _plan(
                     client=client, country=country, period=period, industry=industry, vertical=vertical,
                     ad_language=ad_language, limit_per_board=limit_per_board,
                     plan=[(order_list[fallback_index % len(order_list)], None)],

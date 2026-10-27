@@ -552,6 +552,10 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
         raise ValueError("limit_per_board must be 1..100")
     order_bys = [str(x) for x in (params.get("order_bys") or ["for_you"])]
     performance_order_bys = _clean_terms(params.get("performance_order_bys"))
+    raw_include_retention = params.get("include_retention", False)
+    include_retention = raw_include_retention is True or str(raw_include_retention).strip().lower() in {"1", "true", "yes", "on"}
+    if include_retention and not {"play_2s_rate", "play_6s_rate"} & set(performance_order_bys):
+        raise ValueError("include_retention needs performance_order_bys with play_2s_rate and/or play_6s_rate")
     user_keywords = _clean_terms(params.get("keywords"))
     offer = _offer_context(params)
     performance_names = {"ctr", "cvr", "play_2s_rate", "play_6s_rate"}
@@ -564,7 +568,8 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
     search_terms = _clean_terms(user_keywords + [offer["target_offer"], offer["product_type"], offer["product_category"]]) if selection_mode == "product" else user_keywords
     request = {
         "country": country, "period": period, "order_bys": order_bys,
-        "performance_order_bys": performance_order_bys, "keywords": user_keywords,
+        "performance_order_bys": performance_order_bys, "include_retention": include_retention,
+        "keywords": user_keywords,
         "search_terms": search_terms, "selection_mode": selection_mode,
         "target_offer": offer["target_offer"], "product_type": offer["product_type"],
         "product_category": offer["product_category"], "max_ads": max_ads,
@@ -615,7 +620,7 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
             discovery_mode=str(params.get("discovery_mode") or "auto"),
             exclude_ad_ids=prior_seen_keys,
             search_tags_dir=PRODUCT_SEARCH_TAGS_DIR, supply_search=True,
-            performance_order_bys=performance_order_bys)
+            performance_order_bys=performance_order_bys, include_retention=include_retention)
     except SocialCrawlError as exc:
         raise FindUnavailable("UNAVAILABLE", str(exc)) from exc
     except OSError as exc:

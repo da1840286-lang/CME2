@@ -58,11 +58,19 @@ def qa_retry_feedback(state, receipts_dir, shot: int) -> tuple[str, ...]:
     if receipt.get("receipt_id") != receipt_id or receipt.get("overall") != "FAILED_QA":
         return ()
 
-    failed = [
+    # A failed MUST-atom row can make the receipt FAILED_QA even when its own check is
+    # required=False; its failure still needs to inform the next generated prompt.
+    failed_must_rows = {
+        str(row.get("atom_id")) for row in receipt.get("rows", [])
+        if isinstance(row, dict) and row.get("priority") == "MUST"
+        and str(row.get("status", "")).upper() == "FAILED_QA"
+    }
+    all_failed = [
         check for check in receipt.get("checks", [])
-        if isinstance(check, dict) and check.get("required") is True
-        and str(check.get("status", "")).upper() == "FAIL"
-    ][:4]
+        if isinstance(check, dict) and str(check.get("status", "")).upper() == "FAIL"
+        and (check.get("required") is True or str(check.get("check_id")) in failed_must_rows)
+    ]
+    failed = sorted(all_failed, key=lambda check: check.get("required") is not True)[:4]
     feedback = []
     for check in failed:
         check_id = str(check.get("check_id") or "required_qa_check")
@@ -80,6 +88,12 @@ def qa_retry_feedback(state, receipts_dir, shot: int) -> tuple[str, ...]:
                 "silhouette, proportions, materials, colors, and visible functional parts; do not substitute a generic "
                 "product or redesign the body. Preserve any missing parts identified in the QA finding, while keeping "
                 "all markings blank when the no-branding policy applies."
+            )
+        elif check.get("required") is not True:
+            correction = (
+                "This required scene element was not clearly visible in the previous frame. Make it unmistakable "
+                "and large enough to judge on sight, while preserving all other passing MUST elements and "
+                "system-owned policies."
             )
         else:
             correction = (

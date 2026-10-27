@@ -13,6 +13,54 @@ class SocialCrawlError(RuntimeError):
     pass
 
 
+RETENTION_BOARDS = frozenset({"play_2s_rate", "play_6s_rate"})
+RETENTION_MAX_CURVE_POINTS = 120
+
+
+def _finite_number(value: Any):
+    """Return a float for a real finite number, else None. Zero is a measured value and is kept."""
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number != number or number in (float("inf"), float("-inf")) or number < 0:
+        return None
+    return number
+
+
+def parse_retention(ad: dict) -> dict:
+    """Extract SocialCrawl include=retention data without inventing scale or curve shape."""
+    ad = ad if isinstance(ad, dict) else {}
+    out = {"retention_2s": None, "retention_6s": None, "retention_curve": None,
+           "retention_curve_invalid_points": 0, "retention_provenance": {}}
+    for key in ("retention_2s", "retention_6s"):
+        if key in ad:
+            number = _finite_number(ad.get(key))
+            out[key] = number
+            out["retention_provenance"][key] = (
+                f"post.ext.ad.{key}" if number is not None else f"post.ext.ad.{key}:invalid")
+    curve = ad.get("retention")
+    if isinstance(curve, list):
+        points, bad = [], 0
+        for point in curve[:RETENTION_MAX_CURVE_POINTS]:
+            number = _finite_number(point)
+            if number is None:
+                bad += 1
+            else:
+                points.append(number)
+        out["retention_curve_invalid_points"] = bad + max(0, len(curve) - RETENTION_MAX_CURVE_POINTS)
+        if points:
+            out["retention_curve"] = points
+            out["retention_provenance"]["retention_curve"] = "post.ext.ad.retention"
+        else:
+            out["retention_provenance"]["retention_curve"] = "post.ext.ad.retention:no_valid_points"
+    elif curve is not None:
+        out["retention_provenance"]["retention_curve"] = f"post.ext.ad.retention:unsupported_{type(curve).__name__}"
+    return out
+
+
 class SocialCrawlTikTokTopAds:
     """Adapter for SocialCrawl's TikTok Creative Center Top Ads leaderboard."""
 
@@ -231,6 +279,7 @@ class SocialCrawlTikTokTopAds:
             "cvr": ad.get("cvr"),
             "play_2s_rate": play_2s_rate,
             "play_6s_rate": play_6s_rate,
+            **parse_retention(ad),
             "rank": ad.get("rank"),
             "cost_score": ad.get("cost_score"),
             "like_tier": ad.get("like_tier"),
@@ -305,6 +354,7 @@ class SocialCrawlTikTokTopAds:
         like_tier: int | None = None,
         ad_format: str | None = None,
         limit: int = 20,
+        include_retention: bool = False,
     ) -> dict[str, Any]:
         if order_by not in self.ORDER_BY:
             raise ValueError(f"Unsupported order_by={order_by}; choose one of {self.ORDER_BY}")
@@ -326,6 +376,12 @@ class SocialCrawlTikTokTopAds:
             params["like_tier"] = like_tier
         if ad_format:
             params["ad_format"] = ad_format
+        if include_retention:
+            if order_by not in RETENTION_BOARDS:
+                raise ValueError(f"include_retention is only allowed for {sorted(RETENTION_BOARDS)}")
+            if keyword or industry:
+                raise ValueError("include_retention must not be combined with keyword/industry filters")
+            params["include"] = "retention"
 
         payload = self._get(params)
         data = payload.get("data") or {}

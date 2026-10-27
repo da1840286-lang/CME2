@@ -54,6 +54,11 @@ on:
           - playback_both
         required: true
         default: default
+      find_include_retention:
+        description: "Add include=retention to playback Ads Top calls (extra credits, minimum 20 per call). Requires find_performance_order other than default."
+        type: boolean
+        required: false
+        default: false
       find_selection_mode:
         description: "FIND selector. Product keeps the current scored product lane; mechanism searches explicit keywords using Sponsored Search and an attention proxy only."
         type: choice
@@ -167,6 +172,7 @@ jobs:
       FIND_KEYWORDS: ${{ inputs.keywords }}
       FIND_SELECTION_MODE: ${{ inputs.find_selection_mode }}
       FIND_PERFORMANCE_ORDER: ${{ inputs.find_performance_order }}
+      FIND_INCLUDE_RETENTION: ${{ inputs.find_include_retention }}
       SHOTS: ${{ inputs.shots }}
       CME_SHOT: ${{ inputs.shot }}
       BRAIN_RUN_ID: ${{ inputs.brain_run_id }}
@@ -640,7 +646,8 @@ jobs:
                     "max_ads": int(os.environ["FIND_MAX_ADS"]),
                     "keywords": keywords, "offer": offer_data, "discovery_mode": "auto",
                     "selection_mode": os.environ.get("FIND_SELECTION_MODE", "product"),
-                    "performance_order_bys": performance_order_bys}
+                    "performance_order_bys": performance_order_bys,
+                    "include_retention": os.environ.get("FIND_INCLUDE_RETENTION", "false").lower() == "true"}
           result = run_find(params)
           def mark_find_state_if_executed(result):
               stats = result.get("stats") or {}
@@ -885,7 +892,8 @@ jobs:
                             "max_ads": int(os.environ["FIND_MAX_ADS"]),
                             "keywords": keywords, "offer": offer_data, "discovery_mode": "auto",
                             "selection_mode": os.environ.get("FIND_SELECTION_MODE", "product"),
-                            "performance_order_bys": performance_order_options[order_mode]}
+                            "performance_order_bys": performance_order_options[order_mode],
+                            "include_retention": os.environ.get("FIND_INCLUDE_RETENTION", "false").lower() == "true"}
                   find_result = run_find(params)
                   def mark_find_state_if_executed(result):
                       stats = result.get("stats") or {}

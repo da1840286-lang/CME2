@@ -30,6 +30,11 @@ on:
           - "180"
         required: true
         default: "30"
+      include_retention:
+        description: "Send include=retention (extra credits) to inspect real post.ext.ad.retention shape"
+        type: boolean
+        required: false
+        default: false
       limit:
         description: "Maximum rows (10 is the minimum useful probe)"
         type: number
@@ -49,6 +54,7 @@ jobs:
       SC_COUNTRY: ${{ inputs.country }}
       SC_PERIOD: ${{ inputs.period }}
       SC_LIMIT: ${{ inputs.limit }}
+      SC_INCLUDE_RETENTION: ${{ inputs.include_retention }}
     steps:
       - name: Query SocialCrawl directly (no CME adapter, keyword, or language filter)
         shell: bash
@@ -78,6 +84,9 @@ jobs:
               "status": "NOT_RUN",
               "interpretation": None,
           }
+
+          if os.environ.get("SC_INCLUDE_RETENTION", "false").lower() == "true":
+              report["params"]["include"] = "retention"
 
           if not api_key:
               report.update({
@@ -184,6 +193,32 @@ jobs:
                       result["$.post.content"] = sorted(str(k) for k in content.keys())[:80]
               return result
 
+          # Show the retention shape and first six values only; do not dump full ad rows.
+          retention_value_samples = []
+          for item in items[:10]:
+              post = item.get("post") if isinstance(item, dict) else None
+              post = post if isinstance(post, dict) else (item if isinstance(item, dict) else {})
+              ext = post.get("ext") if isinstance(post.get("ext"), dict) else {}
+              ad = ext.get("ad") if isinstance(ext.get("ad"), dict) else {}
+              if not any(key in ad for key in ("retention", "retention_2s", "retention_6s")):
+                  continue
+              curve = ad.get("retention")
+              sample = {
+                  "retention_type": type(curve).__name__ if curve is not None else "missing",
+                  "retention_2s": ad.get("retention_2s"),
+                  "retention_6s": ad.get("retention_6s"),
+              }
+              if isinstance(curve, list):
+                  sample["retention_first_points"] = [
+                      point if point is None or isinstance(point, (str, int, float, bool))
+                      else f"<{type(point).__name__}>"
+                      for point in curve[:6]
+                  ]
+                  sample["retention_length"] = len(curve)
+              elif isinstance(curve, dict):
+                  sample["retention_keys"] = sorted(str(key) for key in curve.keys())[:12]
+              retention_value_samples.append(sample)
+
           report.update({
               "http_status": http_status,
               "api_success": payload.get("success") if isinstance(payload, dict) else None,
@@ -195,6 +230,7 @@ jobs:
               "playback_field_occurrences": sum(field_hits.values()),
               "playback_field_paths": field_hits,
               "playback_field_samples": field_samples,
+              "retention_value_samples": retention_value_samples,
               "first_item_key_shapes": shape(items[0]) if items else {},
           })
 
