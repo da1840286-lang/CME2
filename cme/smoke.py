@@ -16,8 +16,9 @@ from pathlib import Path
 from .atoms import check_claims, check_language, parse_atoms
 from .branding import allowed_brand_tokens, resolved_brand_marks
 from .brain import (BrainError, TransferRejected, atom_budget_errors, build_source_transfer_context,
-                    derive_mechanism_links, missing_mechanism_links, reserved_system_atom_errors,
-                    validate_transfer_decision, visual_structure_errors, request_atoms, request_transfer_fit)
+                    core_preservation_verdict, derive_mechanism_links, missing_mechanism_links,
+                    reserved_system_atom_errors, validate_transfer_decision, validate_transfer_fit_decision,
+                    visual_structure_errors, request_atoms, request_transfer_fit)
 from .compiler import BudgetError
 from .offer import OfferError, load_offer
 from .providers import CallLog, InfraError, ProviderCallError, ProviderPolicyError
@@ -85,12 +86,36 @@ def validate_atoms_manifest(atoms_path, manifest_path, atoms_json, offer, shot=N
                                       for a in atoms_json if isinstance(a, dict)):
         errors["#atoms"] = ["atoms contain a shot outside the Brain contract's requested range"]
     decision = manifest.get("transfer_decision")
-    if manifest.get("source_contract_sha256"):
+    source_bound = bool(manifest.get("source_contract_sha256"))
+    fit_gate = manifest.get("target_fit_gate")
+    if source_bound:
         if not isinstance(decision, dict) or decision.get("transferable") is not True:
             errors["#transfer_decision"] = ["source-bound manifest must contain transfer_decision.transferable=true"]
         decision_errors = validate_transfer_decision(decision, atoms_json)
         if decision_errors:
             errors["#transfer_decision"] = decision_errors
+
+        # A frame-stage run consumes a saved Brain artifact; it must not turn into a bypass around
+        # the independent Target-Fit Gate simply because someone reuses the atoms/manifest later.
+        if not isinstance(fit_gate, dict) or fit_gate.get("transferable") is not True:
+            errors["#target_fit_gate"] = [
+                "source-bound manifest must contain target_fit_gate.transferable=true; rerun Brain to create a valid gate"
+            ]
+        else:
+            gate_errors = validate_transfer_fit_decision(offer, fit_gate)
+            if fit_gate.get("transferable") is True:
+                core_error = core_preservation_verdict(fit_gate)
+                if core_error:
+                    gate_errors.append(core_error)
+            if gate_errors:
+                errors["#target_fit_gate"] = gate_errors
+
+            if isinstance(decision, dict):
+                normalize = lambda value: re.sub(r"[^\\w]+", " ", str(value or "").casefold(), flags=re.UNICODE).strip()
+                if normalize(fit_gate.get("abstract_mechanism")) != normalize(decision.get("abstract_mechanism")):
+                    errors["#target_fit_gate"] = list(errors.get("#target_fit_gate", [])) + [
+                        "target_fit_gate.abstract_mechanism must match transfer_decision.abstract_mechanism in the saved Brain contract"
+                    ]
     elif decision is not None:
         decision_errors = validate_transfer_decision(decision, atoms_json)
         if decision_errors:

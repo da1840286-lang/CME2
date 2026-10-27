@@ -156,7 +156,7 @@ class MechanismCoverageTests(unittest.TestCase):
         self.assertEqual(missing_mechanism_links(fake, ["problem", "intervention", "result"]),
                          ["problem", "intervention", "result"])
 
-    def test_manifest_records_links_and_frame_stage_rejects_a_contract_that_lost_one(self):
+    def test_manifest_requires_target_fit_gate_and_rejects_contract_that_lost_a_link(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "settings.json").write_text((ROOT / "settings.example.json").read_text(encoding="utf-8"), encoding="utf-8")
@@ -185,6 +185,27 @@ class MechanismCoverageTests(unittest.TestCase):
             offer = load_offer(EX)
             data = json.loads((out / "atoms.json").read_text(encoding="utf-8"))
             validate_atoms_manifest(out / "atoms.json", out / "atoms_manifest.json", data, offer, shot=1)
+
+            # A saved source-bound Brain contract may not bypass the gate at frame time.
+            # Exercise missing gate, explicit negative verdict and a gate/atom-mechanism mismatch.
+            valid_gate = manifest["target_fit_gate"]
+            invalid_gate_manifests = [
+                {**manifest, "target_fit_gate": None},
+                {**manifest, "target_fit_gate": {**valid_gate, "transferable": False}},
+                {**manifest, "target_fit_gate": {
+                    **valid_gate, "abstract_mechanism": "A different causal mechanism with no matching transfer"
+                }},
+            ]
+            for invalid_manifest in invalid_gate_manifests:
+                (out / "atoms_manifest.json").write_text(
+                    json.dumps(invalid_manifest, ensure_ascii=False, indent=1), encoding="utf-8")
+                with self.assertRaises(BrainError) as gate_cm:
+                    validate_atoms_manifest(out / "atoms.json", out / "atoms_manifest.json", data, offer, shot=1)
+                self.assertIn("#target_fit_gate", gate_cm.exception.errors)
+            # Restore the valid manifest before exercising the separate missing-link regression.
+            (out / "atoms_manifest.json").write_text(
+                json.dumps(manifest, ensure_ascii=False, indent=1), encoding="utf-8")
+
             # Re-bind a contract that silently dropped the result link: hashes are consistent, coverage is not.
             data = [a for a in data if a["id"] != "mech_result_clean"]
             (out / "atoms.json").write_text(json.dumps(data, indent=1), encoding="utf-8")
