@@ -30,7 +30,7 @@ on:
         required: true
         default: "30"
       find_requests:
-        description: "Hard cap on SocialCrawl requests. FIND reserves part of the budget for Ads Top performance queries even if Sponsored Search yields no source passing the preliminary money/mechanism gate. Final eligibility and Target-Fit gates stay strict."
+        description: "Hard cap on SocialCrawl requests. Product mode reserves part of the budget for Ads Top performance queries; mechanism mode uses explicit Sponsored Search keywords only. Source-commercial and Target-Fit remain separate downstream gates."
         type: number
         required: true
         default: 4
@@ -54,6 +54,14 @@ on:
           - playback_both
         required: true
         default: default
+      find_selection_mode:
+        description: "FIND selector. Product keeps the current scored product lane; mechanism searches explicit keywords using Sponsored Search and an attention proxy only."
+        type: choice
+        options:
+          - product
+          - mechanism
+        required: true
+        default: product
       find_run_id:
         description: "For analyze/all: numeric run ID of a completed FIND run"
         type: string
@@ -157,6 +165,7 @@ jobs:
       FIND_REQUESTS: ${{ inputs.find_requests }}
       FIND_MAX_ADS: ${{ inputs.find_max_ads }}
       FIND_KEYWORDS: ${{ inputs.keywords }}
+      FIND_SELECTION_MODE: ${{ inputs.find_selection_mode }}
       FIND_PERFORMANCE_ORDER: ${{ inputs.find_performance_order }}
       SHOTS: ${{ inputs.shots }}
       CME_SHOT: ${{ inputs.shot }}
@@ -173,6 +182,24 @@ jobs:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: requirements.txt
+
+      - name: Restore FIND source history
+        if: inputs.stage == 'find' || inputs.stage == 'all'
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/cme-find-state
+          key: cme-find-state-${{ runner.os }}-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            cme-find-state-${{ runner.os }}-${{ github.ref_name }}-
+      - name: Initialize FIND source history
+        if: inputs.stage == 'find' || inputs.stage == 'all'
+        shell: bash
+        run: |
+          mkdir -p "${RUNNER_TEMP}/cme-find-state"
+          echo "CME_FIND_SEEN_PATH=${RUNNER_TEMP}/cme-find-state/seen.json" >> "$GITHUB_ENV"
+          if [[ ! -s "${RUNNER_TEMP}/cme-find-state/seen.json" ]]; then
+            printf '{"version":1,"entries":{}}\n' > "${RUNNER_TEMP}/cme-find-state/seen.json"
+          fi
 
       - name: Install project dependencies
         timeout-minutes: 5
@@ -375,6 +402,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          if [[ "$CME_STAGE" == "all" && "$FIND_SELECTION_MODE" == "mechanism" && -z "$CANDIDATE_ID" && "$SOURCE_CONTRACT_PROVIDED" != "true" ]]; then
+            echo "::error::Mechanism mode discovers adjacent pattern candidates; it cannot auto-approve commercial transfer. Run stage=find, then explicitly choose a candidate for stage=analyze/all, or provide a reviewed source contract."
+            exit 1
+          fi
           case "$CME_STAGE" in
             find)
               [[ -n "${SOCIALCRAWL_API_KEY:-}" ]] || { echo "::error::Add SOCIALCRAWL_API_KEY in repository Actions secrets."; exit 1; }
@@ -587,6 +618,7 @@ jobs:
                     "max_requests": int(os.environ["FIND_REQUESTS"]),
                     "max_ads": int(os.environ["FIND_MAX_ADS"]),
                     "keywords": keywords, "offer": offer_data, "discovery_mode": "auto",
+                    "selection_mode": os.environ.get("FIND_SELECTION_MODE", "product"),
                     "performance_order_bys": performance_order_bys}
           result = run_find(params)
           out = Path("out")
@@ -598,7 +630,7 @@ jobs:
                            "title": c.get("title"), "source_url": c.get("source_url"),
                            "video_url_present": bool(c.get("video_url")),
                            "final_score": score.get("final_score") if isinstance(score, dict) else None,
-                           "source_check": c.get("source_check"),
+                           "source_check": c.get("source_check"), "stage": c.get("stage"), "source_gate_eligible": c.get("source_gate_eligible"), "target_fit_status": c.get("target_fit_status"), "source_selection": c.get("source_selection") or {},
                            "performance_evidence": c.get("performance_evidence") or {},
                            "commercial_evidence": c.get("commercial_evidence") or {},
                            "playback_metrics": {k: (c.get("metrics") or {}).get(k, {}).get("value")
@@ -608,7 +640,7 @@ jobs:
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as s:
               mode = os.environ["CME_STAGE"]
               s.write("## TikTok FIND results\n\n")
-              s.write(f"Country: {params['country']} · Period: {params['period']} days · Request cap: {params['max_requests']} · Candidate cap: {params['max_ads']} · Keywords: {', '.join(keywords) or 'broad Top Ads'}\n\n")
+              s.write(f"Mode: {params.get('selection_mode', 'product')} · Country: {params['country']} · Period: {params['period']} days · Request cap: {params['max_requests']} · Candidate cap: {params['max_ads']} · Keywords: {', '.join(keywords) or 'none'}\n\n")
               if not rows:
                   stats = result.get("stats") or {}
                   diag = result.get("diagnostics") or {}
@@ -638,7 +670,10 @@ jobs:
                   url = c.get("source_url") if isinstance(c.get("source_url"), str) and str(c.get("source_url")).startswith("https://") else ""
                   s.write(f"- `candidate_id: {c['id']}` — {brand}: {title}; score={c.get('final_score')}; video={'yes' if c.get('video_url_present') else 'no'}; performance={(c.get('performance_evidence') or {}).get('basis', 'unknown')}; commercial_evidence={(c.get('commercial_evidence') or {}).get('level', 'unknown')}; playback={c.get('playback_metrics') or {}}; [open ad]({url})\n")
               if mode == "find":
-                  s.write("\nManual choice: run stage=all with this run ID and the selected candidate_id.\n")
+                  if params.get("selection_mode") == "mechanism":
+                      s.write("\nMechanism results are PATTERN_CANDIDATE records, not commercial approval; attention is a proxy only and Target-Fit remains NOT_EVALUATED. Use this run ID plus an explicit candidate_id for stage=analyze.\n")
+                  else:
+                      s.write("\nManual choice: run stage=all with this run ID and the selected candidate_id.\n")
               else:
                   s.write("\nPlayback metrics are shown only when SocialCrawl returned them. commercial_evidence is descriptive, not a profitability prediction. Automatic stage=all applies the strict source-commercial/mechanism eligibility gate before analysis, then the independent Target-Fit gate before transfer. Playback metrics are shown only when SocialCrawl returned them; commercial_evidence is descriptive, not a profitability prediction. A manually supplied candidate_id allows source inspection, not a commercial-success claim.\n")
           print(f"FIND finished: {len(rows)} candidate(s).")
@@ -797,11 +832,22 @@ jobs:
                   offer_data = json.loads(raw_offer) if raw_offer else {}
                   if not isinstance(offer_data, dict):
                       raise SystemExit("offer_json must be a JSON object")
+                  order_mode = os.environ.get("FIND_PERFORMANCE_ORDER", "default")
+                  performance_order_options = {
+                      "default": [],
+                      "play_6s_rate": ["play_6s_rate"],
+                      "play_2s_rate": ["play_2s_rate"],
+                      "playback_both": ["play_6s_rate", "play_2s_rate"],
+                  }
+                  if order_mode not in performance_order_options:
+                      raise SystemExit(f"Unknown FIND_PERFORMANCE_ORDER={order_mode!r}")
                   params = {"country": os.environ["FIND_COUNTRY"].upper(),
                             "period": int(os.environ["FIND_PERIOD"]),
                             "max_requests": int(os.environ["FIND_REQUESTS"]),
                             "max_ads": int(os.environ["FIND_MAX_ADS"]),
-                            "keywords": keywords, "offer": offer_data, "discovery_mode": "auto"}
+                            "keywords": keywords, "offer": offer_data, "discovery_mode": "auto",
+                            "selection_mode": os.environ.get("FIND_SELECTION_MODE", "product"),
+                            "performance_order_bys": performance_order_options[order_mode]}
                   find_result = run_find(params)
                   candidates_file.write_text(json.dumps(find_result, ensure_ascii=False, indent=2), encoding="utf-8")
                   rows = []
@@ -811,7 +857,7 @@ jobs:
                                    "title": c.get("title"), "source_url": c.get("source_url"),
                                    "video_url_present": bool(c.get("video_url")),
                                    "final_score": score.get("final_score") if isinstance(score, dict) else None,
-                                   "source_check": c.get("source_check"),
+                                   "source_check": c.get("source_check"), "stage": c.get("stage"), "source_gate_eligible": c.get("source_gate_eligible"), "target_fit_status": c.get("target_fit_status"), "source_selection": c.get("source_selection") or {},
                            "performance_evidence": c.get("performance_evidence") or {},
                            "commercial_evidence": c.get("commercial_evidence") or {},
                            "playback_metrics": {k: (c.get("metrics") or {}).get(k, {}).get("value")
@@ -820,7 +866,7 @@ jobs:
                   (out / "candidate_summary.json").write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
                   with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
                       summary.write("## TikTok FIND shortlist (automatic pipeline)\n\n")
-                      summary.write(f"Country: {params['country']} · Period: {params['period']} days · Request cap: {params['max_requests']} · Candidate cap: {params['max_ads']} · Keywords: {', '.join(keywords) or 'broad Top Ads'}\n\n")
+                      summary.write(f"Mode: {params.get('selection_mode', 'product')} · Country: {params['country']} · Period: {params['period']} days · Request cap: {params['max_requests']} · Candidate cap: {params['max_ads']} · Keywords: {', '.join(keywords) or 'none'}\n\n")
                       for c in rows:
                           title = str(c.get("title") or "(no title)").replace("\n", " ")[:160]
                           brand = str(c.get("brand") or "unknown brand")[:80]
@@ -1174,6 +1220,13 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
           exit 0
+
+      - name: Save FIND source history
+        if: always() && (inputs.stage == 'find' || inputs.stage == 'all')
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/cme-find-state
+          key: cme-find-state-${{ runner.os }}-${{ github.ref_name }}-${{ github.run_id }}
 
       - name: Remove raw source-transfer input from downloadable artifacts
         if: always() && inputs.stage != 'frame' && inputs.stage != 'analyze'

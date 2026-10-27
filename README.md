@@ -234,6 +234,17 @@ Workflow `.github/workflows/live-smoke.yml` запускается вручну�
 
 `PASS` возможен только после подтверждённых проверок. `UNVERIFIED`, `FAILED_QA`, `NOT_DELIVERED` и инфраструктурные ошибки не считаются успехом; workflow сохраняет доступные диагностику и артефакты и завершается соответствующим статусом. Артефакты хранятся 7 дней. Успешная проверка CI не является доказательством успешного live-производства.
 
+
+### FIND Selection: product и mechanism
+
+- `find_selection_mode=product` — прежний путь: целевой товар, продуктовая релевантность и доступные Ads Top/performance-сигналы. Source-commercial/mechanism и Target-Fit остаются отдельными downstream gates.
+- `find_selection_mode=mechanism` — явные ключевые слова и только Sponsored Search. Ads Top/playback-ranking отключены; запрос не считается доказательством содержания объявления. Нужны видео, отсутствие hard-exclude, смежный продвигаемый товар и достаточные attention proxy/coverage.
+- `attention_absolute_v1` использует фиксированные абсолютные веса без перенормировки отсутствующих метрик; coverage показывает полноту данных. Это proxy внимания, а не продажи, конверсия, прибыль или доказательство причинной механики.
+- У кандидата отдельно записываются `stage=PATTERN_CANDIDATE`, `source_gate_eligible` и `target_fit_status=NOT_EVALUATED`. Устаревший `transfer_eligible` — только alias source gate, не разрешение переноса.
+- История на 30 дней ограничена по platform/country/offer/mode. Повторяющиеся запросы не пропускаются; сохраняются identities просмотренных источников и история для диагностики. Отсутствующее/повреждённое состояние работает fail-open.
+- Механический режим не запускает автоматический коммерческий `stage=all` без явного выбора кандидата/источника. Сначала `stage=find`, затем `stage=analyze`; ручной выбор для полного контура остаётся явным override и проходит downstream проверки.
+
+
 ## Выбор адаптера для тестов
 
 `adapters.json` содержит бесплатный `hf_zerogpu_flux2_klein` и платные `fal_flux2_pro`, `fal_seedream`.

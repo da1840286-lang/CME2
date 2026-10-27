@@ -411,10 +411,12 @@ table{border-collapse:collapse;width:100%}td,th{border-bottom:1px solid var(--bd
 <main><div id="list"></div><div id="detail"><p class="unk">Лента пуста. Нажмите «Найти (FIND)» или импортируйте сохранённый файл discovery.</p></div></main>
 <div id="msg"></div>
 <dialog id="dlgFind"><form method="dialog"><h3>FIND: поиск товарных рекламных источников</h3>
-<p class="unk">Каждый запуск делает до N платных запросов к SocialCrawl: часть бюджета идёт на Sponsored Search товарных роликов, часть — на Ads Top по CTR/CVR и другим показателям даже без предварительного прохождения money-gate. Это расширяет поиск, но не ослабляет коммерческий отбор и Target-Fit при переносе. Автоматический анализ здесь не запускается.</p>
+<p class="unk">Каждый запуск может делать до N платных запросов к SocialCrawl. В режиме «Целевой товар» часть бюджета резервируется для Ads Top/performance; в режиме «Смежный товар» выполняется только Sponsored Search по явным ключевым словам. Source Gate и Target-Fit остаются отдельными проверками. Автоматический анализ здесь не запускается.</p>
 <p>Страна <input id="fCountry" value="US" size="4"> Период <select id="fPeriod"><option>7</option><option selected>30</option><option>180</option></select></p>
 <p>Запросов (макс.) <input id="fReq" type="number" min="1" max="10" value="3" style="width:60px"> Объявлений <input id="fAds" type="number" min="1" max="50" value="20" style="width:60px"></p>
-<p>Ключевые слова (через запятую, необязательно)<br><input id="fKw" size="40"></p>
+<p>Режим отбора <select id="fMode"><option value="product">Целевой товар + Ads Top</option><option value="mechanism">Смежный товар / поиск механики</option></select></p>
+<p id="fModeInfo" class="unk">Товарный режим: текущий поиск и ранжирование; Source Gate и Target-Fit остаются отдельными проверками.</p>
+<p>Ключевые слова (через запятую)<br><input id="fKw" size="40"></p>
 <p><button value="go" class="primary">Запустить поиск</button> <button value="cancel">Отмена</button></p></form></dialog>
 <dialog id="dlgImp"><form method="dialog"><h3>Импорт сохранённого discovery-файла</h3>
 <p class="unk">Формат старого CME (tiktok_discovery.json). Кандидаты помечаются как «импортировано».</p>
@@ -479,6 +481,12 @@ function renderDetail(c){const sc=c.source_score,sk=c.source_check,op=c.operator
   el('h3',{},'Оценка источника (старый ранжировщик, только по данным источника)'),
   sc?el('table',{},['final_score','performance_score','commercial_score','funnel_fit_score','evidence_score','longevity_score','duration_fit_score','action'].map(k=>el('tr',{},el('td',{},k),el('td',{},UNK(sc[k]))))):el('p',{class:'unk'},'оценки нет (импорт без решения старого ранжировщика)'),
   el('h3',{},'Проверка источника'),el('div',{class:'box'},`статус: ${sk.status} · класс: ${sk.classification??'н/д'} · scope: ${sk.scope??'н/д'}`,el('div',{class:'unk'},sk.reason||'')),
+  el('h3',{},'Source Selection (до Target-Fit)'),c.source_selection?el('div',{class:'box'},
+   el('b',{},`mode=${c.source_selection.mode||'н/д'} · role=${c.source_selection.role||'н/д'} · stage=${c.stage||'н/д'}`),
+   el('div',{},`source_gate_eligible=${c.source_gate_eligible===true?'true':'false'} · target_fit_status=${c.target_fit_status||'NOT_EVALUATED'}`),
+   el('div',{},`attention proxy=${c.source_selection.attention?.score??'н/д'} / 100 · coverage=${c.source_selection.attention?.coverage??'н/д'} · commercial proof=no`),
+   el('div',{class:'unk'},c.source_selection.role_reason||c.source_selection.reason||'')):
+   el('p',{class:'unk'},'Source Selection ещё не классифицирована.'),
   el('h3',{},'Коммерческие доказательства (не прогноз прибыли)'),c.commercial_evidence?el('div',{class:'box'},
     el('b',{},c.commercial_evidence.level||'NO_EVIDENCE'),el('div',{},c.commercial_evidence.explanation||''),
     el('div',{class:'unk'},'Сигналы: '+((c.commercial_evidence.signals||[]).join(', ')||'нет')),
@@ -491,8 +499,17 @@ function renderDetail(c){const sc=c.source_score,sk=c.source_check,op=c.operator
   c.analyses.length>1?el('div',{class:'unk'},`предыдущих попыток анализа: ${c.analyses.length-1}`):null,
   el('section',{id:'productionPanel',class:'box'},el('h3',{},'Производство: атомы → кадр → QA'),el('p',{class:'unk'},'Загрузка истории производства…')));refreshProductions(c.id)}
 $('btnFind').onclick=()=>{const s=S.state?.find;if(s&&s.state!=='READY'){say(`FIND ${s.state}: ${s.detail}. ${s.how_to_fix}`,true)}$('dlgFind').showModal()};
+function syncFindMode(){
+ const mechanism=$('fMode').value==='mechanism';
+ $('fKw').required=mechanism;
+ $('fKw').placeholder=mechanism?'Введите явные ключевые слова для смежного товара':'Ключевые слова товара (необязательно)';
+ $('fModeInfo').textContent=mechanism
+  ?'Режим механик использует только Sponsored Search. Роль товара определяется по тексту самого объявления; attention proxy не доказывает продажи. Target-Fit на этапе FIND не выполняется.'
+  :'Товарный режим сохраняет прежний поиск. Данные внимания и коммерческие сигналы не заменяют Source Gate и независимый Target-Fit.';
+}
+$('fMode').addEventListener('change',syncFindMode);syncFindMode();
 $('dlgFind').addEventListener('close',async()=>{if($('dlgFind').returnValue!=='go')return;say('Поиск выполняется…');
- const r=await api('POST','/api/find',{country:$('fCountry').value,period:+$('fPeriod').value,max_requests:+$('fReq').value,max_ads:+$('fAds').value,keywords:$('fKw').value.split(',').map(x=>x.trim()).filter(Boolean)});
+ const r=await api('POST','/api/find',{country:$('fCountry').value,period:+$('fPeriod').value,max_requests:+$('fReq').value,max_ads:+$('fAds').value,selection_mode:$('fMode').value,keywords:$('fKw').value.split(',').map(x=>x.trim()).filter(Boolean)});
  const d=r.diagnostics||{};
  const note=r.status==='OK'?(r.returned>0?`Найдено: новых ${r.new}, обновлено ${r.updated}. FIND ${d.outcome||'OK'}; DIRECT ${d.direct_relevant_ads??'н/д'}, EXPANDED ${d.expanded_relevant_ads??'н/д'}.`:`FIND ${d.outcome||'без кандидатов'}: API-строк ${d.raw_ads_returned??0}; DIRECT ${d.direct_relevant_ads??0}; EXPANDED ${d.expanded_relevant_ads??0}; непроверенных ${d.unverified_ads??0}. ${d.explanation||''}${(d.search_queries_executed||[]).length?' Запросы: '+d.search_queries_executed.join(', '):''}`):`${r.status}: ${r.detail||''} ${r.how_to_fix||''}`;
  say(note,r.status!=='OK'||!r.returned);await loadFeed()});
