@@ -534,7 +534,11 @@ class CandidateRecord(Env):
 
 class DedupeAndFilters(Env):
     def cand(self, ad, **kw):
-        with self.fake_find([synthetic_post(ad, **kw)]):
+        # Store dedupe tests deliberately rediscover the same synthetic source. Keep this
+        # fixture independent from the production cross-run SeenLedger state.
+        with tempfile.TemporaryDirectory() as ledger_dir, \
+             mock.patch.dict(os.environ, {"CME_FIND_SEEN_PATH": str(Path(ledger_dir) / "seen.json")}), \
+             self.fake_find([synthetic_post(ad, **kw)]):
             return F.run_find({"country": kw.pop("country", "US"), "max_requests": 1, "discovery_mode": "strict"},
                               client=T.SocialCrawlTikTokTopAds(api_key="K"), now="2026-10-21T00:00:00Z")["candidates"][0]
 
