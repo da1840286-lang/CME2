@@ -149,6 +149,16 @@ def write_run_result(out: Path, command: str, exit_code: int, failure_class: str
     except OSError as exc: print(f"Не удалось записать run_result.json: {exc}")
 
 
+def frame_attempt_numbers(command: str, requested_attempt: int, max_attempts: int) -> tuple[int, ...]:
+    """Keep an externally requested retry number for frame; all manages its own retries."""
+    if command == "all":
+        tries = min(2, max(1, int(max_attempts or 1)))
+        return tuple(range(1, tries + 1))
+    if type(requested_attempt) is not int or requested_attempt < 1:
+        raise SettingsError("frame attempt must be a positive integer")
+    return (requested_attempt,)
+
+
 def image_seed_for_attempt(base_seed: int, attempt: int, contract_id: str) -> int:
     """Use a reproducible per-contract seed, then advance it for each retry of that contract."""
     if type(base_seed) is not int:
@@ -347,12 +357,15 @@ def main(argv=None, ctx=None) -> int:
             for shot_number in shot_numbers:
                 args.shot = shot_number
                 frame_run_id = args.run_id if shot_number == 1 else f"{args.run_id}-s{shot_number:02d}"
-                # Retry only rejected/undelivered frames; UNVERIFIED is a checker failure, not a frame failure.
-                tries = min(2, max(1, int(settings.max_attempts_per_shot or 1))) if args.command == "all" else 1
-                for attempt_number in range(1, tries + 1):
+                # A standalone frame run may be dispatched with --attempt=N by Actions to
+                # continue a controlled retry from restored state. Only the all stage owns its retry loop.
+                attempt_numbers = frame_attempt_numbers(
+                    args.command, args.attempt, settings.max_attempts_per_shot
+                )
+                for attempt_index, attempt_number in enumerate(attempt_numbers):
                     args.attempt = attempt_number
                     verdict = run_frame(args, offer, settings, catalog, vertical, log, frame_run_id, ctx, out, data, atom_provenance)
-                    if verdict not in ("FAILED_QA", "NOT_DELIVERED") or attempt_number == tries:
+                    if verdict not in ("FAILED_QA", "NOT_DELIVERED") or attempt_index == len(attempt_numbers) - 1:
                         break
                     print(f"Кадр {shot_number}: попытка {attempt_number} не прошла QA ({verdict}); новая попытка с другим seed.")
                 if verdict == "UNVERIFIED":
