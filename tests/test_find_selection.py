@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from cme.radar.attention import attention_absolute_v1
+from cme.radar.attention import attention_absolute_v1, attention_rank
 from cme.radar.fit import ADJACENT_MECHANISM, OFF_TOPIC, TARGET_PRODUCT, classify_source_role
 from cme.radar.find import run_find
 from cme.radar.select import pattern_source_reason
@@ -162,3 +162,95 @@ class MechanismFindTests(unittest.TestCase):
         self.assertEqual(diag["rejected_by_reason"].get("SEEN_WITHIN_TTL"), 1)
         self.assertEqual(second["diagnostics"]["performance_calls_used"], 0)
         self.assertEqual(len(client.calls), 2)
+
+
+class ZipAuditIntegrationRegressionTests(unittest.TestCase):
+    def test_product_head_does_not_turn_usage_context_into_product_anchor(self):
+        text = "Tire inflator inflates a flat tire in seconds. Get yours today."
+        result = classify_source_role(
+            {"title": text, "raw": {"post": {"content": {"text": text}}}},
+            product_type="tire inflator for cars",
+        )
+        self.assertEqual(result["target_anchor"], "inflator")
+        self.assertEqual(result["role"], TARGET_PRODUCT)
+
+    def test_missing_target_use_context_is_explicitly_low_confidence(self):
+        text = "This vacuum removes crumbs in seconds. Get yours today."
+        result = classify_source_role(
+            {"title": text, "raw": {"post": {"content": {"text": text}}}},
+            product_type="cordless handheld car vacuum",
+        )
+        self.assertEqual(result["role"], TARGET_PRODUCT)
+        self.assertFalse(result["context_verified"])
+        self.assertEqual(result["confidence"], "LOW")
+        self.assertIn("context is not stated", result["reason"])
+
+    def test_compound_product_hashtag_can_support_identity(self):
+        text = "Quick cleaning for your car. Get yours today. #carvacuum"
+        result = classify_source_role(
+            {"title": text, "raw": {"post": {"content": {"text": text}}}},
+            product_type="cordless handheld car vacuum",
+        )
+        self.assertEqual(result["role"], TARGET_PRODUCT)
+        self.assertEqual(result["target_mention_source"], "hashtag")
+
+    def test_verb_only_product_hashtag_is_not_noun_evidence(self):
+        text = "Cleaning dusty seats. Get yours today. #vacuuming"
+        result = classify_source_role(
+            {"title": text, "raw": {"post": {"content": {"text": text}}}},
+            product_type="cordless handheld car vacuum",
+        )
+        self.assertEqual(result["role"], OFF_TOPIC)
+        self.assertFalse(result["target_promotion_evidence"])
+
+
+class QueryRotationRegressionTests(unittest.TestCase):
+    def test_find_prefers_unseen_query_then_least_recently_used(self):
+        with tempfile.TemporaryDirectory() as temp:
+            ledger_path = Path(temp) / "seen.json"
+            client = FakeClient([{
+                "ad_id": "rotation-ad", "video_id": "rotation-video",
+                "source_url": "https://www.tiktok.com/@brand/video/rotation-ad",
+                "video_url": "https://cdn.example.test/rotation.mp4",
+                "title": "Rechargeable air duster blows dust from car vents. Get yours today.",
+                "views": 600_000, "likes": 20_000, "comments": 400, "shares": 600,
+                "published_at": "2025-12-20T00:00:00Z",
+                "raw": {"post": {"content": {"text": "Rechargeable air duster blows dust from car vents. Get yours today."}}},
+            }])
+            params = {
+                "selection_mode": "mechanism", "country": "US", "period": 30, "max_requests": 1,
+                "max_ads": 5, "keywords": ["air duster", "portable blower"],
+                "offer": {"name": "Car vacuum", "product_type": "car vacuum"},
+            }
+            with mock.patch.dict("os.environ", {"CME_FIND_SEEN_PATH": str(ledger_path)}):
+                run_find(params, client=client, now="2026-01-01T00:00:00Z")
+                run_find(params, client=client, now="2026-01-01T00:00:01Z")
+            calls = [entry[1]["query"] for entry in client.calls]
+            self.assertEqual(calls, ["air duster", "portable blower"])
+
+
+class MechanismAttentionRankRegressionTests(unittest.TestCase):
+    def test_mechanism_rank_uses_fixed_weights_and_exposes_missing_coverage(self):
+        now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        result = attention_rank({"views": 1_000_000}, period_days=30, now=now)
+        self.assertAlmostEqual(result["score"], 25.71, delta=0.02)
+        self.assertEqual(result["coverage"], 0.3)
+        self.assertIn("amplification", result["missing_components"])
+        self.assertIn("recency", result["missing_components"])
+        self.assertFalse(result["is_commercial_proof"])
+
+    def test_mechanism_rank_shrinks_very_small_sample_engagement_rates(self):
+        now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        small = attention_rank({"views": 1_000, "likes": 1_000, "published_at": now.isoformat()}, now=now)
+        large = attention_rank({"views": 100_000, "likes": 100_000, "published_at": now.isoformat()}, now=now)
+        self.assertLess(small["components"]["like_rate"], 3.0)
+        self.assertGreater(large["components"]["like_rate"], 60.0)
+        self.assertFalse(small["is_commercial_proof"])
+
+    def test_mechanism_rank_recency_uses_requested_period(self):
+        now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        record = {"views": 500_000, "likes": 5_000, "shares": 500,
+                  "published_at": (now - timedelta(days=30)).isoformat()}
+        recent_window = attention_rank(record, period_days=7, now=now)
+        broad_window = attention_rank(record, period_days=180, now=now)
+        self.assertGreater(broad_window["score"], recent_window["score"])

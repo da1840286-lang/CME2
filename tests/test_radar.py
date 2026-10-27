@@ -1076,3 +1076,45 @@ class CoreStaysCompatible(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ProductHeadContextAuditRegressionTests(unittest.TestCase):
+    def test_trailing_use_context_is_not_mistaken_for_product_head(self):
+        text = "Tire inflator inflates a flat tire in seconds. Get yours today."
+        result = legacy_discover._product_type_relevance(
+            {"title": text, "raw": {"post": {"content": {"text": text}}}},
+            "tire inflator for cars",
+        )
+        self.assertEqual(result["status"], "MATCH")
+        self.assertEqual(result["product_anchor"], "inflator")
+        self.assertFalse(result["context_verified"])
+        self.assertEqual(result["confidence"], "LOW")
+
+    def test_product_noun_without_target_context_is_low_confidence_not_silently_misclassified(self):
+        text = "This vacuum removes crumbs in seconds. Get yours today."
+        result = legacy_discover._product_type_relevance(
+            {"title": text, "raw": {"post": {"content": {"text": text}}}},
+            "cordless handheld car vacuum",
+        )
+        self.assertEqual(result["status"], "MATCH")
+        self.assertEqual(result["product_anchor"], "vacuum")
+        self.assertFalse(result["context_verified"])
+        self.assertEqual(result["confidence"], "LOW")
+
+    def test_verb_only_hashtag_is_not_a_product_anchor(self):
+        text = "Cleaning dusty seats. Get yours today. #vacuuming"
+        result = legacy_discover._product_type_relevance(
+            {"title": text, "raw": {"post": {"content": {"text": text}}}},
+            "cordless handheld car vacuum",
+        )
+        self.assertEqual(result["status"], "NO_MATCH")
+        self.assertNotEqual(result["product_anchor"], "vacuuming")
+
+    def test_compound_product_hashtag_needs_independent_pitch(self):
+        text = "A quiet morning. #carvacuum"
+        result = legacy_discover._product_type_relevance(
+            {"title": text, "raw": {"post": {"content": {"text": text}}}},
+            "cordless handheld car vacuum",
+        )
+        self.assertEqual(result["status"], "NO_MATCH")
+        self.assertIn("product hashtag lacks independent source-body product evidence", result["reason"])

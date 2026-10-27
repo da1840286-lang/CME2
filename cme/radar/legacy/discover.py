@@ -567,19 +567,42 @@ _PRODUCT_MATCH_MODIFIERS = {
     "ultra", "premium", "foldable", "automatic", "smart", "new",
 }
 _PRODUCT_MATCH_STOPWORDS = {"a", "an", "and", "for", "in", "of", "on", "the", "to", "with"}
-_PERFORMANCE_BOARD_ORDER = {"ctr", "cvr", "play_6s_rate", "play_2s_rate"}
+_PRODUCT_CONTEXT_ALIASES = {
+    "car": {"car", "cars", "auto", "automotive", "vehicle", "vehicles", "dashboard", "trunk", "road"},
+    "home": {"home", "household", "house", "indoor", "livingroom", "bedroom"},
+    "kitchen": {"kitchen", "cooking", "cookware", "foodprep"},
+    "office": {"office", "desk", "workstation"},
+    "travel": {"travel", "traveling", "travelling", "roadtrip", "camping"},
+}
+_PRODUCT_HEAD_PATTERNS = (
+    (re.compile(r"\b(?:vacuum\s+cleaner|car\s+vacuum|handheld\s+vacuum|vacuum)\b", re.I), "vacuum"),
+    (re.compile(r"\b(?:tyre|tire)\s+inflator\b", re.I), "inflator"),
+    (re.compile(r"\b(?:portable\s+)?air\s+compressor\b", re.I), "compressor"),
+    (re.compile(r"\b(?:pressure|power)\s+washer\b", re.I), "washer"),
+    (re.compile(r"\bnoise[ -]?cancel(?:ling|ing)?\s+headphones?\b", re.I), "headphones"),
+    (re.compile(r"\bwireless\s+earbuds?\b", re.I), "earbuds"),
+    (re.compile(r"\bair\s+duster\b", re.I), "duster"),
+    (re.compile(r"\bpower\s+bank\b", re.I), "bank"),
+    (re.compile(r"\bphone\s+case\b", re.I), "case"),
+    (re.compile(r"\bphone\s+stand\b", re.I), "stand"),
+    (re.compile(r"\bdash\s*cam\b", re.I), "cam"),
+)
 _PRODUCT_AD_EVIDENCE = re.compile(
-    r"\b(?:buy(?:\s+now)?|shop\s+now|order(?:\s+now)?|grab\s+this|love\s+this|needed\s+one|"
+    r"\b(?:buy(?:\s+now)?|shop\s+now|order(?:\s+now)?|grab\s+this|get\s+yours|love\s+this|needed\s+one|"
     r"back\s+in\s+stock|new\s+vacuum|more\s+convenient|compact|cordless|wireless|rechargeable|"
     r"powerful|suction|blower(?:\s+mode)?|vents?|attachments?|washable|filters?|batter(?:y|ies)|"
     r"one[-\s]handed|detailing|cleaner|aspiradora|inal[aá]mbrica|get\s+so\s+much\s+use|"
-    r"perfect\s+for|works\s+great|easy\s+to\s+carry|multiple\s+cleaning)\b",
+    r"perfect\s+for|works?\s+great|easy\s+to\s+carry|multiple\s+cleaning|"
+    r"blows?|removes?|cleans?|sucks?|picks?\s+up|scrubs?|cuts?|charges?|stores?|organizes?|"
+    r"reduces?|washes?|polishes?|dries?|inflates?|deflates?|in\s+seconds|game\s*changer|"
+    r"must[-\s]?have|free\s+shipping|discount|sale|deal|try\s+it)\b",
     re.IGNORECASE,
 )
+_PERFORMANCE_BOARD_ORDER = {"ctr", "cvr", "play_6s_rate", "play_2s_rate"}
 
 
 def _product_type_relevance(record: dict[str, Any], product_type: str = "") -> dict[str, Any]:
-    """Require source-body evidence that a requested product is actually being promoted or demonstrated."""
+    """Require source-body evidence for the advertised product; context terms are not product heads."""
     product_type = " ".join(str(product_type or "").lower().split())
     rel = record.get("vertical_relevance") or {}
     if not product_type:
@@ -589,10 +612,12 @@ def _product_type_relevance(record: dict[str, Any], product_type: str = "") -> d
                 "status": "MATCH", "confidence": "CATEGORY_ONLY",
                 "score": float(rel.get("score") or 0.0),
                 "reason": "product_type_not_supplied; existing market classification used",
+                "context_verified": None, "product_anchor": None,
             }
         return {
             "status": "UNVERIFIED", "confidence": "NONE", "score": 0.0,
             "reason": "product_type_not_supplied_and_market_classification_unverified",
+            "context_verified": None, "product_anchor": None,
         }
 
     raw = record.get("raw") or {}
@@ -601,70 +626,120 @@ def _product_type_relevance(record: dict[str, Any], product_type: str = "") -> d
     content = post.get("content") if isinstance(post.get("content"), dict) else {}
     ext = post.get("ext") if isinstance(post.get("ext"), dict) else {}
     ad = ext.get("ad") if isinstance(ext.get("ad"), dict) else {}
-    source_text = " ".join(str(value or "") for value in (
-        record.get("title"), content.get("text"), ad.get("title"),
-    )).lower()
-    hashtags = [tag.replace("_", "") for tag in re.findall(r"#([a-z0-9_]+)", source_text)]
+    source_parts = [str(value or "") for value in (record.get("title"), content.get("text"), ad.get("title"))]
+    source_text = " ".join(value for value in source_parts if value).lower()
     body = re.sub(r"#[a-z0-9_]+", " ", source_text)
     body_tokens = re.findall(r"[a-z0-9]+", body)
-    has_product_pitch = bool(_PRODUCT_AD_EVIDENCE.search(body))
+    tags = [tag.replace("_", "") for tag in re.findall(r"#([a-z0-9_]+)", source_text)]
+    raw_tags = ext.get("hashtags") or []
+    if isinstance(raw_tags, (list, tuple, set)):
+        for item in raw_tags:
+            if isinstance(item, dict):
+                item = item.get("name") or item.get("title") or item.get("hashtag") or ""
+            tag = str(item or "").strip().lstrip("#").lower().replace("_", "")
+            if tag and tag not in tags:
+                tags.append(tag)
 
-    terms = [
+    phrase_terms = [
         token for token in re.findall(r"[a-z0-9]+", product_type)
         if token not in _PRODUCT_MATCH_MODIFIERS and token not in _PRODUCT_MATCH_STOPWORDS and len(token) > 1
     ]
-    if not terms:
-        return {"status": "UNVERIFIED", "confidence": "NONE", "score": 0.0,
-                "reason": "product_type_has_no_matchable_terms"}
+    context_tokens = set().union(*_PRODUCT_CONTEXT_ALIASES.values())
+    identity_terms = [token for token in phrase_terms if token not in context_tokens]
+    anchor = ""
+    normalized_type = " ".join(re.findall(r"[a-z0-9]+", product_type))
+    for pattern, product_head in _PRODUCT_HEAD_PATTERNS:
+        if pattern.search(normalized_type):
+            anchor = product_head
+            break
+    if not anchor:
+        anchor = identity_terms[-1] if identity_terms else ""
+    if not anchor:
+        return {
+            "status": "UNVERIFIED", "confidence": "NONE", "score": 0.0,
+            "reason": "product_type_has_no_matchable_terms", "context_verified": False,
+            "product_anchor": None,
+        }
 
-    anchor = terms[-1]
-    support = terms[:-1]
-    compact_phrase = "".join(terms)
-    hashtag_match = any(compact_phrase in tag for tag in hashtags)
+    expected_contexts = {
+        context for context, aliases in _PRODUCT_CONTEXT_ALIASES.items()
+        if set(phrase_terms) & aliases
+    }
+    context_verified = not expected_contexts or any(
+        set(body_tokens) & _PRODUCT_CONTEXT_ALIASES[context] for context in expected_contexts
+    )
+    if expected_contexts and not context_verified:
+        for tag in tags:
+            compact_tag = re.sub(r"[^a-z0-9]", "", tag)
+            if any(alias.replace(" ", "") in compact_tag
+                   for context in expected_contexts for alias in _PRODUCT_CONTEXT_ALIASES[context]):
+                context_verified = True
+                break
 
-    positions = {term: [i for i, token in enumerate(body_tokens) if token == term] for term in terms}
-    nearest_span = None
-    if support and all(positions.get(term) for term in terms):
-        nearest_span = min(
-            max(min(abs(anchor_pos - other_pos) for other_pos in positions[term]) for term in support)
-            for anchor_pos in positions[anchor]
-        )
+    # Accept only an actual product noun in body/hashtag form. A verb such as #vacuuming isn't a noun anchor.
+    anchor_forms = {anchor, anchor + "s", anchor + "es"}
+    anchor_in_body = any(token in anchor_forms for token in body_tokens)
+    anchor_in_hashtag = False
+    compact_full = "".join(phrase_terms)
+    compact_identity = "".join(identity_terms)
+    allowed_suffixes = {"cleaner", "cleaners", "machine", "machines", "tool", "tools", "review", "reviews"}
+    for tag in tags:
+        tag = re.sub(r"[^a-z0-9]", "", tag)
+        if tag in anchor_forms or (compact_full and tag == compact_full) or (compact_identity and tag == compact_identity):
+            anchor_in_hashtag = True
+            break
+        if anchor == "vacuum" and tag.startswith("vacuum") and tag[len("vacuum"):] in allowed_suffixes:
+            anchor_in_hashtag = True
+            break
+        if tag.endswith(anchor) and tag[:-len(anchor)] and not tag.endswith("ing"):
+            # Specific compounds such as #carvacuum and #tireinflator; never infer from a gerund.
+            anchor_in_hashtag = True
+            break
 
-    # Exact body evidence or a matching hashtag alone is not enough: the body must
-    # independently describe, demonstrate, compare, or promote the product.
+    has_product_pitch = bool(_PRODUCT_AD_EVIDENCE.search(body))
+    product_spec = bool(re.search(r"\b\d+(?:\.\d+)?\s?(?:psi|v|w|kpa|pa|mah|mm|cm|oz|ml|l|rpm|lm|gb)\b", body))
+    has_product_pitch = has_product_pitch or product_spec
     if not has_product_pitch:
         reason = (
             "product hashtag lacks independent source-body product evidence"
-            if hashtag_match else
+            if anchor_in_hashtag else
             "product terms appear as context without product/promotion evidence"
         )
-        return {"status": "NO_MATCH", "confidence": "NONE", "score": 0.0, "reason": reason}
+        return {
+            "status": "NO_MATCH", "confidence": "NONE", "score": 0.0, "reason": reason,
+            "context_verified": context_verified, "product_anchor": anchor,
+        }
 
-    if hashtag_match:
+    if not anchor_in_body and not anchor_in_hashtag:
         return {
-            "status": "MATCH", "confidence": "HIGH", "score": 95.0,
-            "reason": "product hashtag corroborated by source-body product/promotion evidence",
+            "status": "NO_MATCH", "confidence": "NONE", "score": 0.0,
+            "reason": "source body does not sufficiently identify the requested product type",
+            "context_verified": context_verified, "product_anchor": anchor,
         }
-    if not support and positions.get(anchor):
-        return {
-            "status": "MATCH", "confidence": "MEDIUM", "score": 80.0,
-            "reason": "requested product noun plus source-body product/promotion evidence",
-        }
-    if nearest_span is not None and nearest_span <= 2:
-        return {
-            "status": "MATCH", "confidence": "HIGH", "score": 90.0,
-            "reason": "requested product terms appear together in source body with product/promotion evidence",
-        }
-    if nearest_span is not None and nearest_span <= 6:
-        return {
-            "status": "MATCH", "confidence": "MEDIUM", "score": 75.0,
-            "reason": "requested product terms found near product/promotion evidence in source body",
-        }
+
+    # Product noun + independent pitch is sufficient for a low-confidence family match.
+    # Context must increase confidence, not silently turn a compatible product into a mismatch.
+    if anchor_in_hashtag:
+        confidence = "HIGH" if context_verified else "LOW"
+        score = 95.0 if context_verified else 60.0
+        reason = ("product hashtag corroborated by source-body product/promotion evidence"
+                  if context_verified else
+                  "product hashtag plus independent pitch; target use context is not stated")
+    else:
+        has_support_terms = any(token in body_tokens for token in identity_terms if token != anchor)
+        confidence = "HIGH" if context_verified and (bool(expected_contexts) or has_support_terms) else (
+            "MEDIUM" if context_verified else "LOW"
+        )
+        score = 90.0 if confidence == "HIGH" else 75.0 if confidence == "MEDIUM" else 55.0
+        reason = ("requested product noun and source-body product/promotion evidence; target context is present"
+                  if context_verified else
+                  "requested product noun and source-body product/promotion evidence; target context is not stated")
 
     return {
-        "status": "NO_MATCH", "confidence": "NONE", "score": 0.0,
-        "reason": "source body does not sufficiently identify the requested product type",
+        "status": "MATCH", "confidence": confidence, "score": score, "reason": reason,
+        "context_verified": context_verified, "product_anchor": anchor,
     }
+
 
 
 _MARKET_SUFFIX_TO_COUNTRY = {

@@ -109,5 +109,101 @@ def attention_absolute_v1(record: dict, period_days: int = 30, now=None) -> dict
     }
 
 
+# Independent, fixed-weight rank for the mechanism lane when the source has no conversion evidence.
+# This deliberately scores attention/reach signals only; it must never be surfaced as money proof.
+MECHANISM_WEIGHTS = {
+    "reach": 0.30, "amplification": 0.20, "save_rate": 0.20,
+    "share_rate": 0.15, "like_rate": 0.10, "recency": 0.05,
+}
+MECHANISM_RATE_CAPS = {"save_rate": 0.004, "share_rate": 0.001, "like_rate": 0.02}
+MECHANISM_REACH_SHRINK = 50_000.0
+
+
+def attention_rank(record: dict, period_days: int = 30, now=None) -> dict:
+    """Absolute mechanism-source attention score with no within-batch percentile or missing-field renormalization."""
+    record = record if isinstance(record, dict) else {}
+    raw = record.get("raw") if isinstance(record.get("raw"), dict) else {}
+    post = raw.get("post") if isinstance(raw.get("post"), dict) else {}
+    ext = post.get("ext") if isinstance(post.get("ext"), dict) else {}
+    engagement = post.get("engagement") if isinstance(post.get("engagement"), dict) else {}
+    metrics = record.get("metrics") if isinstance(record.get("metrics"), dict) else {}
+
+    def pick(*values):
+        for value in values:
+            parsed = _number(value)
+            if parsed is not None:
+                return parsed
+        return None
+
+    views = pick(record.get("views"), metrics.get("views"), engagement.get("views"))
+    if views is None or views <= 0:
+        return {
+            "version": "attention_rank_v1", "score": None, "rank": None, "coverage": 0.0,
+            "components": {}, "available_fields": [], "missing_components": list(MECHANISM_WEIGHTS),
+            "is_commercial_proof": False,
+            "warning": "Attention proxy only; no usable view count. Not sales, conversion or profit evidence.",
+        }
+
+    likes = pick(record.get("likes"), metrics.get("likes"), engagement.get("likes"))
+    shares = pick(record.get("shares"), metrics.get("shares"), engagement.get("shares"))
+    saves = pick(record.get("saves"), metrics.get("saves"), engagement.get("saves"))
+    followers = pick(record.get("author_followers"), record.get("followers"), ext.get("author_followers"),
+                     post.get("author_followers"))
+    try:
+        period = int(period_days or 30)
+    except (TypeError, ValueError):
+        period = 30
+    period = period if period in (7, 30, 180) else 30
+
+    def clamp(value):
+        return max(0.0, min(100.0, value))
+
+    components = {"reach": clamp((math.log10(max(views, 1.0)) - 3.0) / 3.5 * 100.0)}
+    if followers is not None and followers > 0:
+        components["amplification"] = clamp(math.log10(max(views / followers, 1.0)) / 3.0 * 100.0)
+
+    # Shrink engagement rates toward zero for small view counts so a tiny sample cannot dominate.
+    confidence = views / (views + MECHANISM_REACH_SHRINK)
+    for name, count in (("save_rate", saves), ("share_rate", shares), ("like_rate", likes)):
+        if count is not None:
+            components[name] = clamp(count / views / MECHANISM_RATE_CAPS[name] * 100.0) * confidence
+
+    published = _date(_published_at(record))
+    now_dt = _date(now) if now is not None and not isinstance(now, datetime) else now
+    now_dt = now_dt or datetime.now(timezone.utc)
+    if now_dt.tzinfo is None:
+        now_dt = now_dt.replace(tzinfo=timezone.utc)
+    else:
+        now_dt = now_dt.astimezone(timezone.utc)
+    age_days = None if published is None else max(0.0, (now_dt - published).total_seconds() / 86400.0)
+    if age_days is not None:
+        components["recency"] = clamp(100.0 * (1.0 - age_days / max(1.0, float(period) * 2.0)))
+
+    total_weight = sum(MECHANISM_WEIGHTS.values())
+    score = sum(MECHANISM_WEIGHTS[name] * value for name, value in components.items()) / total_weight
+    coverage = sum(MECHANISM_WEIGHTS[name] for name in components) / total_weight
+    missing = [name for name in MECHANISM_WEIGHTS if name not in components]
+    fields_used = sorted({
+        field for name in components for field in {
+            "reach": ["views"],
+            "amplification": ["views", "author_followers"],
+            "save_rate": ["views", "saves"],
+            "share_rate": ["views", "shares"],
+            "like_rate": ["views", "likes"],
+            "recency": ["published_at"],
+        }[name]
+    })
+    rounded = round(score, 2)
+    return {
+        "version": "attention_rank_v1", "score": rounded, "rank": rounded,
+        "base_score": round(score, 2), "coverage": round(coverage, 3),
+        "components": {name: round(value, 2) for name, value in components.items()},
+        "available_fields": fields_used, "missing_components": missing,
+        "period_days": period, "age_days": None if age_days is None else round(age_days, 2),
+        "is_commercial_proof": False,
+        "warning": "Attention proxy only; not sales, conversion, profit, or causal-mechanism evidence.",
+    }
+
+
 MECHANISM_ATTENTION_FLOOR = 25.0
 MECHANISM_MIN_COVERAGE = 0.35

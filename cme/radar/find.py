@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 
 from .evidence import classify_commercial_evidence
-from .attention import attention_absolute_v1, MECHANISM_ATTENTION_FLOOR, MECHANISM_MIN_COVERAGE
+from .attention import attention_absolute_v1, attention_rank, MECHANISM_ATTENTION_FLOOR, MECHANISM_MIN_COVERAGE
 from .fit import ADJACENT_MECHANISM, classify_source_role
 from .seen import SeenLedger, build_scope
 
@@ -149,10 +149,15 @@ def to_candidate(item: dict, request: dict, collected_at: str, origin: str, sour
         "role": role.get("role") or "OFF_TOPIC",
         "role_reason": role.get("reason") or "",
         "source_body_evidence": role.get("source_body_evidence") or "",
+        "target_anchor": role.get("target_anchor"),
+        "target_mention_source": role.get("target_mention_source"),
         "matched_target_terms": role.get("matched_target_terms") or [],
         "detected_product_nouns": role.get("detected_product_nouns") or [],
         "promotion_evidence": bool(role.get("promotion_evidence")),
         "target_promotion_evidence": bool(role.get("target_promotion_evidence")),
+        "promo_signals": role.get("promo_signals") or [],
+        "context_verified": role.get("context_verified"),
+        "confidence": role.get("confidence") or "UNKNOWN",
         "attention": attention,
         "attention_is_commercial_proof": False,
         "decision": rec.get("selection_decision") or "RANKED_BY_LEGACY_DISCOVERY",
@@ -160,6 +165,18 @@ def to_candidate(item: dict, request: dict, collected_at: str, origin: str, sour
     }
     c["id"] = stable_id(c)
     return c
+
+
+def _rotate_query_terms(terms: list[str], prior_queries: list[str]) -> list[str]:
+    """Prefer unseen queries, then least-recently-used queries; preserve caller order for ties."""
+    history_position = {str(term).casefold(): index for index, term in enumerate(prior_queries or []) if str(term).strip()}
+    indexed = list(enumerate(terms))
+    indexed.sort(key=lambda pair: (
+        0 if str(pair[1]).casefold() not in history_position else 1,
+        history_position.get(str(pair[1]).casefold(), -1),
+        pair[0],
+    ))
+    return [term for _, term in indexed]
 
 
 def _clean_terms(value) -> list[str]:
@@ -397,7 +414,7 @@ def _run_mechanism_find(*, request: dict, offer: dict, keywords: list[str], clie
             product_category=offer.get("product_category") or "",
             target_offer=offer.get("target_offer") or "",
         )
-        attention = attention_absolute_v1(record, period_days=period, now=parsed_now)
+        attention = attention_rank(record, period_days=period, now=parsed_now)
         record["source_role_info"], record["attention_score"] = role, attention
         video = record.get("video_url_540p") or record.get("video_url") or record.get("video_url_360p")
         hard_excluded = bool(rel.get("excluded")) or str(rel.get("classification") or "").upper() == "HARD_EXCLUDE"
@@ -567,13 +584,19 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
     ledger = SeenLedger()
     scope = build_scope(country=country, offer=offer, selection_mode=selection_mode)
     prior_seen_keys = ledger.seen_keys(scope)
+    prior_query_history = ledger.recent_queries(scope)
     if selection_mode == "mechanism":
+        user_keywords = _rotate_query_terms(user_keywords, prior_query_history)
+        request["keywords"] = list(user_keywords)
+        request["search_terms"] = list(user_keywords)
         return _run_mechanism_find(
             request=request, offer=offer, keywords=user_keywords, client=client,
             ledger=ledger, scope=scope, prior_seen_keys=prior_seen_keys, stamp=stamp,
             country=country, period=period, max_requests=max_requests, max_ads=max_ads,
             limit_per_board=limit_per_board,
         )
+    search_terms = _rotate_query_terms(search_terms, prior_query_history)
+    request["search_terms"] = list(search_terms)
     try:
         ranked = discover_and_rank(
             client=client, country=country, period=period, keywords=search_terms, order_bys=order_bys,
@@ -614,7 +637,8 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
         "views and engagement do not by themselves confirm profitability."
     )
     executed_queries = [str(call.get("keyword") or "") for call in executed_calls
-                        if isinstance(call, dict) and call.get("keyword")]
+                        if isinstance(call, dict) and call.get("keyword")
+                        and str(call.get("source") or "") == "sponsored_search"]
     if not executed_queries:
         executed_queries = list(strategy.get("supply_queries_executed") or [])
     ledger.remember(scope, [item.get("record") or {} for item in ranked], queries=executed_queries)

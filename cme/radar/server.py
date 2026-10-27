@@ -483,7 +483,7 @@ function renderDetail(c){const sc=c.source_score,sk=c.source_check,op=c.operator
   el('h3',{},'Проверка источника'),el('div',{class:'box'},`статус: ${sk.status} · класс: ${sk.classification??'н/д'} · scope: ${sk.scope??'н/д'}`,el('div',{class:'unk'},sk.reason||'')),
   el('h3',{},'Source Selection (до Target-Fit)'),c.source_selection?el('div',{class:'box'},
    el('b',{},`mode=${c.source_selection.mode||'н/д'} · role=${c.source_selection.role||'н/д'} · stage=${c.stage||'н/д'}`),
-   el('div',{},`source_gate_eligible=${c.source_gate_eligible===true?'true':'false'} · target_fit_status=${c.target_fit_status||'NOT_EVALUATED'}`),
+   el('div',{},`source_gate_eligible=${c.source_gate_eligible===true?'true':'false'} · target_fit_status=${c.target_fit_status||'NOT_EVALUATED'} · source_confidence=${(c.source_selection||{}).confidence||'UNKNOWN'} · target_context=${(c.source_selection||{}).context_verified===true?'verified':(c.source_selection||{}).context_verified===false?'missing':'unknown'}`),
    el('div',{},`attention proxy=${c.source_selection.attention?.score??'н/д'} / 100 · coverage=${c.source_selection.attention?.coverage??'н/д'} · commercial proof=no`),
    el('div',{class:'unk'},c.source_selection.role_reason||c.source_selection.reason||'')):
    el('p',{class:'unk'},'Source Selection ещё не классифицирована.'),

@@ -162,11 +162,14 @@ class SeenLedger:
             for key in source_identity_keys(record):
                 sources[key] = now
         history = entry.setdefault("queries", [])
-        seen = {str(row.get("query") or "").casefold() for row in history if isinstance(row, dict)}
+        # Refresh timestamps on every actual use so recent_queries() supports real least-recently-used rotation.
         for query in queries or ():
             query = " ".join(str(query or "").split())
-            if query and query.casefold() not in seen:
-                history.append({"query": query, "seen_at": now})
-                seen.add(query.casefold())
+            if not query:
+                continue
+            key = query.casefold()
+            history = [row for row in history
+                       if not (isinstance(row, dict) and str(row.get("query") or "").casefold() == key)]
+            history.append({"query": query, "seen_at": now})
         entry["queries"] = history[-200:]
         return self._write(data)
