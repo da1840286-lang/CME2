@@ -1,9 +1,8 @@
 """Regressions for Brain retry reconciliation and transfer-decision element references."""
-from dataclasses import replace
+import unittest
 
 from cme.brain import build_source_transfer_context, request_atoms, validate_transfer_decision
-from cme.offer import load_offer
-from tests.test_target_fit_gate import EX, target_offer
+from tests.test_target_fit_gate import target_offer
 
 
 RADAR = {
@@ -47,43 +46,51 @@ def response(suffix, include_result=True, include_reserved_qa=True):
     }
 
 
-def test_retry_replaces_old_role_ids_and_ignores_system_owned_branding_qa():
-    calls = []
-    def call(request):
-        calls.append(request)
-        return response("01", include_result=False) if len(calls) == 1 else response("1")
+class BrainRetryContractTests(unittest.TestCase):
+    def test_retry_replaces_old_role_ids_and_ignores_system_owned_branding_qa(self):
+        calls = []
 
-    atoms = request_atoms(
-        target_offer(), "Show the cordless vacuum removing visible crumbs.", 1, call,
-        source_transfer=build_source_transfer_context(RADAR),
-    )
-    ids = {a.id for a in atoms}
-    image_must = [a for a in atoms if a.channel == "image" and a.priority == "MUST"]
-    assert len(calls) == 2  # only the genuinely missing mechanism result caused a retry
-    assert "keep_hook_1" in ids and "keep_hook_01" not in ids
-    assert "keep_mechanism_1" in ids and "keep_mechanism_01" not in ids
-    assert "mech_problem_1" in ids and "mech_problem_01" not in ids
-    assert "mech_intervention_1" in ids and "mech_intervention_01" not in ids
-    assert "mech_result_1" in ids and "mech_result_01" not in ids
-    assert "comp_1" in ids and "comp_01" not in ids
-    assert not any(a.kind == "qa_check" for a in atoms)
-    assert len(image_must) <= 7
+        def call(request):
+            calls.append(request)
+            return response("01", include_result=False) if len(calls) == 1 else response("1")
 
+        atoms = request_atoms(
+            target_offer(), "Show the cordless vacuum removing visible crumbs.", 1, call,
+            source_transfer=build_source_transfer_context(RADAR),
+        )
+        ids = {a.id for a in atoms}
+        image_must = [a for a in atoms if a.channel == "image" and a.priority == "MUST"]
+        self.assertEqual(len(calls), 2)  # only the genuinely missing mechanism result caused a retry
+        self.assertIn("keep_hook_1", ids)
+        self.assertNotIn("keep_hook_01", ids)
+        self.assertIn("keep_mechanism_1", ids)
+        self.assertNotIn("keep_mechanism_01", ids)
+        self.assertIn("mech_problem_1", ids)
+        self.assertNotIn("mech_problem_01", ids)
+        self.assertIn("mech_intervention_1", ids)
+        self.assertNotIn("mech_intervention_01", ids)
+        self.assertIn("mech_result_1", ids)
+        self.assertNotIn("mech_result_01", ids)
+        self.assertIn("comp_1", ids)
+        self.assertNotIn("comp_01", ids)
+        self.assertFalse(any(a.kind == "qa_check" for a in atoms))
+        self.assertLessEqual(len(image_must), 7)
 
-def test_canonical_gate_element_property_requires_matching_keep_atom():
-    atoms = [
-        atom("keep_hook_1", "Target vacuum shown in a car interior."),
-        atom("keep_mechanism_1", "Cordless suction removes crumbs from tight spaces.", "action"),
-    ]
-    valid = {
-        "transferable": True,
-        "abstract_mechanism": "Cordless suction removes debris from tight spaces",
-        "preserved": [
-            {"property": "hook", "atom_id": "keep_hook_1"},
-            {"property": "mechanism", "atom_id": "keep_mechanism_1"},
-        ],
-        "reason": "The target product visibly demonstrates the same mechanism.",
-    }
-    assert validate_transfer_decision(valid, atoms) == []
-    invalid = {**valid, "preserved": [{"property": "mechanism", "atom_id": "keep_hook_1"}]}
-    assert any("keep_mechanism_ prefix" in error for error in validate_transfer_decision(invalid, atoms))
+    def test_canonical_gate_element_property_requires_matching_keep_atom(self):
+        atoms = [
+            atom("keep_hook_1", "Target vacuum shown in a car interior."),
+            atom("keep_mechanism_1", "Cordless suction removes crumbs from tight spaces.", "action"),
+        ]
+        valid = {
+            "transferable": True,
+            "abstract_mechanism": "Cordless suction removes debris from tight spaces",
+            "preserved": [
+                {"property": "hook", "atom_id": "keep_hook_1"},
+                {"property": "mechanism", "atom_id": "keep_mechanism_1"},
+            ],
+            "reason": "The target product visibly demonstrates the same mechanism.",
+        }
+        self.assertEqual(validate_transfer_decision(valid, atoms), [])
+        invalid = {**valid, "preserved": [{"property": "mechanism", "atom_id": "keep_hook_1"}]}
+        self.assertTrue(any("keep_mechanism_ prefix" in error
+                            for error in validate_transfer_decision(invalid, atoms)))
