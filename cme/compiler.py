@@ -51,11 +51,20 @@ FRAME_FORM_INSTRUCTION = (
 
 
 def compile_image_prompt(atoms, shot: int, limit: int = IMAGE_LIMIT, reserve: int = 0,
-                        branding_policy=None, approved_brand_marks=()) -> Compiled:
+                        branding_policy=None, approved_brand_marks=(), retry_feedback=()) -> Compiled:
     pool = [a for a in atoms if a.shot == shot and a.channel == "image"]
     instruction = branding_prompt_instruction(branding_policy, approved_brand_marks) if branding_policy is not None else ""
     if instruction:
         instruction = instruction + " " + FRAME_FORM_INSTRUCTION
+    corrections = [str(item).strip() for item in retry_feedback if str(item).strip()]
+    if corrections:
+        retry_instruction = (
+            "QA RETRY CORRECTIONS — mandatory corrections from the previous rejected frame. "
+            "Fix every listed defect while preserving all original MUST elements and system-owned policies; "
+            "do not weaken, omit, or reinterpret any contract requirement. "
+            + " ".join(f"[{index}] {item}" for index, item in enumerate(corrections, 1))
+        )
+        instruction = (instruction + "\n" if instruction else "") + retry_instruction
     def render(selected):
         rows = ([instruction] if instruction else []) + [a.text for a in selected]
         return "\n".join(rows)

@@ -5,7 +5,7 @@
  "fallback_adapter": "",
  "allow_free": true,
  "allow_unverified": true,
- "max_attempts_per_shot": 2,
+ "max_attempts_per_shot": 3,
  "analyst_adapter": "openrouter_free_analyst",
  "transient_retries": 1,
  "retry_delay_seconds": 3,

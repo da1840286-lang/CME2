@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 from .compiler import BudgetError, compile_image_prompt
 from .branding import NO_BRANDING, prepare_unbranded_reference, resolved_brand_marks
-from .qa import check_reference_unbranded
+from .qa import check_reference_unbranded, PRODUCT_IDENTITY_CHECK_ID, SYSTEM_NO_TEXT_ID
 from .atoms import check_claims, check_language
 from .receipt import assert_exact_payload, attach_qa, build_receipt, overall
 from .state import accept_shot, record_attempt
@@ -36,6 +36,58 @@ def _file_sha256(path):
         return hashlib.sha256(Path(path).read_bytes()).hexdigest()
     except OSError:
         return None
+
+
+def qa_retry_feedback(state, receipts_dir, shot: int) -> tuple[str, ...]:
+    """Build correction directives only from the immediately preceding failed frame's required QA checks."""
+    previous = next((
+        item for item in reversed(getattr(state, "attempts", []))
+        if item.get("shot") == shot and item.get("receipt_id")
+    ), None)
+    if not previous or str(previous.get("status", "")).upper() != "FAILED_QA":
+        return ()
+
+    receipt_id = str(previous.get("receipt_id") or "").strip()
+    if (not receipt_id.startswith("drec_") or len(receipt_id) != 29
+            or any(char not in "0123456789abcdef" for char in receipt_id[5:])):
+        return ()
+    try:
+        receipt = json.loads((Path(receipts_dir) / f"{receipt_id}.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ()
+    if receipt.get("receipt_id") != receipt_id or receipt.get("overall") != "FAILED_QA":
+        return ()
+
+    failed = [
+        check for check in receipt.get("checks", [])
+        if isinstance(check, dict) and check.get("required") is True
+        and str(check.get("status", "")).upper() == "FAIL"
+    ][:4]
+    feedback = []
+    for check in failed:
+        check_id = str(check.get("check_id") or "required_qa_check")
+        detail = " ".join(str(check.get("detail") or "").split())[:240]
+        evidence = f"Previous QA finding: {detail}. " if detail else "Previous required QA check failed. "
+        if check_id == SYSTEM_NO_TEXT_ID:
+            correction = (
+                "Render all product surfaces as plain, unmarked material. No logos, lettering, wordmarks, "
+                "badges, icons, logo-like colored symbols, or pseudo-text on the product or anywhere in the frame; "
+                "do not replace a removed mark with another symbol."
+            )
+        elif check_id == PRODUCT_IDENTITY_CHECK_ID:
+            correction = (
+                "Treat the supplied target-product reference as the controlling specification. Match its exact "
+                "silhouette, proportions, materials, colors, and visible functional parts; do not substitute a generic "
+                "product or redesign the body. Preserve any missing parts identified in the QA finding, while keeping "
+                "all markings blank when the no-branding policy applies."
+            )
+        else:
+            correction = (
+                "Correct the visible defect described by this required QA finding while preserving all other "
+                "passing MUST elements and system-owned policies."
+            )
+        feedback.append(f"{check_id}. {evidence}Required correction: {correction}")
+    return tuple(feedback)
 
 
 def _image_input_manifest(previous_refs, product_photos, generation_product_photos=None,
@@ -109,11 +161,15 @@ def produce_shot(*, offer, atoms, shot, contract_id, state, out_dir, image_provi
             _blocked(state, out, shot, attempt, "BLOCKED_GATE", "; ".join(reasons))
             raise GateError(reasons)
         ad_requirements = gate.requirements
+    retry_feedback = qa_retry_feedback(state, out / "receipts", shot)
+    if retry_feedback:
+        print(f"QA retry feedback: correcting {len(retry_feedback)} required failure(s) from the previous attempt.")
     try:
         compiled = compile_image_prompt(
             atoms, shot, reserve=reserve, branding_policy=offer.branding_policy,
             approved_brand_marks=resolved_brand_marks(offer.branding_policy, offer.approved_brand_marks,
                                                       offer.name, offer.product_type),
+            retry_feedback=retry_feedback,
         )
     except BudgetError as e:
         _blocked(state, out, shot, attempt, "BLOCKED_BUDGET", str(e))
@@ -170,6 +226,7 @@ def produce_shot(*, offer, atoms, shot, contract_id, state, out_dir, image_provi
     base = {"lost": compiled.lost_line(), "ad_requirements": list(ad_requirements),
             "provider": {}, "commercial_status": "TEST_ONLY",
             "branding_policy": offer.branding_policy,
+            "qa_retry_feedback": list(retry_feedback),
             "reference_preparation": [_preparation_record(item) for item in preparation_reports],
             "image_inputs": _image_input_manifest(
                 refs, offer.photos, provider_product_refs, preparation_reports, offer.branding_policy
