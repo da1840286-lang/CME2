@@ -929,6 +929,35 @@ class ProductionHandoff(RadarAppFixture):
         self.assertEqual(result["provider_calls_made"], 0)
         run.assert_not_called()
 
+    def test_transfer_rejection_keeps_its_own_status_not_atom_contract_failed(self):
+        calls = []
+        app, cid = self.make_app(calls)
+        self.assertEqual(app.do_analyze(cid)["status"], "OK")
+        app.store.decide(cid, "shortlist", "audit transfer rejection classification")
+        photo = Path(self.tmp.name) / "target-product.png"
+        photo.write_bytes(png_bytes(patch=((0, 0, 32, 48), (240, 15, 70))))
+        offer_path = Path(self.tmp.name) / "offer.json"
+        offer_path.write_text(json.dumps({
+            "offer_id": "target-vacuum-test", "name": "Cordless car vacuum",
+            "product_type": "car-cleaning vacuum", "verified_claims": ["Cordless"],
+            "forbidden_claims": ["guaranteed"], "photos": [str(photo)], "geo": "US"
+        }), encoding="utf-8")
+        app.offer_path = offer_path
+
+        def fake_run(cmd, **kwargs):
+            out = Path(cmd[cmd.index("--out") + 1])
+            (out / "run_result.json").write_text(json.dumps({
+                "exit_code": 4, "failure_class": "TRANSFER_REJECTED",
+                "message": "The source mechanism cannot be honestly transferred."
+            }), encoding="utf-8")
+            return subprocess.CompletedProcess(cmd, 4, stdout="TRANSFER_REJECTED", stderr="")
+
+        with mock.patch("cme.radar.server.subprocess.run", side_effect=fake_run):
+            report = app.do_produce(cid)
+        self.assertEqual(report["exit_code"], 4)
+        self.assertEqual(report["failure_class"], "TRANSFER_REJECTED")
+        self.assertEqual(report["status"], "TRANSFER_REJECTED")
+
     def test_shortlisted_analyzed_source_hands_off_to_existing_atom_cli_and_keeps_artifact_preview(self):
         calls = []
         app, cid = self.make_app(calls)

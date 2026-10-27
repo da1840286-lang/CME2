@@ -261,6 +261,10 @@ class RadarApp:
                     run_result = json.loads(run_result_path.read_text(encoding="utf-8"))
                     report["failure_class"] = str(run_result.get("failure_class") or "")
                     report["failure_detail"] = str(run_result.get("message") or "")[:1000]
+                    # Exit code 4 is shared by Target-Fit rejection and atom-contract errors.
+                    # The structured run_result is authoritative; keep the UI/API status precise.
+                    if report["failure_class"] == "TRANSFER_REJECTED":
+                        report["status"] = "TRANSFER_REJECTED"
                 except (OSError, ValueError):
                     report["failure_class"] = "RUN_RESULT_UNREADABLE"
             report["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())

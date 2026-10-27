@@ -142,6 +142,13 @@ class SourceLoopTests(unittest.TestCase):
         self.assertIn('allow_transfer_fallback=(selection_mode != "manual_from_prior_find")', workflow)
 
 
+    def test_workflow_rejects_conflicting_all_stage_handoffs_and_mechanism_performance_order(self):
+        workflow = (Path(__file__).resolve().parents[1] / ".github" / "workflows" / "live-smoke.yml").read_text(encoding="utf-8")
+        self.assertIn('if stage == "all" and selected_candidate and (raw_source or source_run_id):', workflow)
+        self.assertIn('if [[ "$FIND_SELECTION_MODE" == "mechanism" && "$FIND_PERFORMANCE_ORDER" != "default" ]]; then', workflow)
+        self.assertIn("which creates a source contract", workflow)
+
+
 if __name__ == "__main__":
     unittest.main()
 

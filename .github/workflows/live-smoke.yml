@@ -262,6 +262,11 @@ jobs:
               raise SystemExit("Brain-only stage requires source_contract_json or source_contract_run_id from a successful analyze run.")
           if stage == "all" and selected_candidate and not os.environ.get("FIND_RUN_ID", "").strip():
               raise SystemExit("A manually selected candidate_id requires find_run_id from the FIND stage.")
+          if stage == "all" and selected_candidate and (raw_source or source_run_id):
+              raise SystemExit(
+                  "Conflicting stage=all inputs: choose either candidate_id from FIND (which creates a source contract "
+                  "from that candidate's analysis) or source_contract_json/source_contract_run_id, not both."
+              )
 
           # Prefer fetching the canonical source_contract.json from the Analyze artifact to avoid manual copy/paste.
           if source_run_id:
@@ -413,6 +418,10 @@ jobs:
               [[ "$FIND_PERIOD" =~ ^(7|30|180)$ ]] || { echo "::error::period must be 7, 30, or 180."; exit 1; }
               [[ "$FIND_REQUESTS" =~ ^([1-9]|10)$ ]] || { echo "::error::find_requests must be 1..10."; exit 1; }
               [[ "$FIND_MAX_ADS" =~ ^([1-9]|[1-4][0-9]|50)$ ]] || { echo "::error::find_max_ads must be 1..50."; exit 1; }
+              if [[ "$FIND_SELECTION_MODE" == "mechanism" && "$FIND_PERFORMANCE_ORDER" != "default" ]]; then
+                echo "::error::Mechanism mode uses Sponsored Search only; choose find_performance_order=default."
+                exit 1
+              fi
               ;;
             analyze)
               [[ -n "${OPENROUTER_API_KEY:-}" ]] || { echo "::error::Add OPENROUTER_API_KEY in Actions secrets."; exit 1; }
@@ -446,6 +455,10 @@ jobs:
                 [[ "$FIND_PERIOD" =~ ^(7|30|180)$ ]] || { echo "::error::period must be 7, 30, or 180."; exit 1; }
                 [[ "$FIND_REQUESTS" =~ ^([1-9]|10)$ ]] || { echo "::error::find_requests must be 1..10."; exit 1; }
                 [[ "$FIND_MAX_ADS" =~ ^([1-9]|[1-4][0-9]|50)$ ]] || { echo "::error::find_max_ads must be 1..50."; exit 1; }
+                if [[ "$FIND_SELECTION_MODE" == "mechanism" && "$FIND_PERFORMANCE_ORDER" != "default" ]]; then
+                  echo "::error::Mechanism mode uses Sponsored Search only; choose find_performance_order=default."
+                  exit 1
+                fi
               fi
               ;;
             *) echo "::error::Unknown stage: $CME_STAGE"; exit 1 ;;
