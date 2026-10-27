@@ -13,7 +13,7 @@ from pathlib import Path
 
 from .evidence import classify_commercial_evidence
 from .attention import attention_absolute_v1, attention_rank, MECHANISM_ATTENTION_FLOOR, MECHANISM_MIN_COVERAGE
-from .fit import ADJACENT_MECHANISM, classify_source_role
+from .fit import ADJACENT_MECHANISM, classify_source_role, match_source_to_product_query
 from .seen import SeenLedger, build_scope
 
 DATA_DIR = Path(__file__).resolve().parent / "data"
@@ -414,6 +414,10 @@ def _run_mechanism_find(*, request: dict, offer: dict, keywords: list[str], clie
             product_category=offer.get("product_category") or "",
             target_offer=offer.get("target_offer") or "",
         )
+        query_product_match = match_source_to_product_query(
+            record, str(record.get("discovery_query") or "")
+        )
+        record["query_product_match"] = query_product_match
         attention = attention_rank(record, period_days=period, now=parsed_now)
         record["source_role_info"], record["attention_score"] = role, attention
         video = record.get("video_url_540p") or record.get("video_url") or record.get("video_url_360p")
@@ -424,6 +428,8 @@ def _run_mechanism_find(*, request: dict, offer: dict, keywords: list[str], clie
             reason = "HARD_EXCLUDED_BY_SOURCE_CHECK"
         elif not video:
             reason = "NO_PLAYABLE_VIDEO"
+        elif not query_product_match.get("matches"):
+            reason = str(query_product_match.get("reason") or "QUERY_PRODUCT_UNVERIFIED")
         elif role.get("role") != ADJACENT_MECHANISM:
             reason = str(role.get("role") or "OFF_TOPIC")
         elif not role.get("promotion_evidence"):
@@ -438,7 +444,9 @@ def _run_mechanism_find(*, request: dict, offer: dict, keywords: list[str], clie
             rejected.append({
                 "ad_id": str(record.get("ad_id") or record.get("video_id") or ""),
                 "title": str(record.get("title") or "")[:160], "reason": reason,
-                "role": role.get("role"), "attention_score": attention.get("score"),
+                "role": role.get("role"), "query_product_anchor": query_product_match.get("query_anchor"),
+                "query_product_reason": query_product_match.get("reason"),
+                "attention_score": attention.get("score"),
                 "attention_coverage": attention.get("coverage"),
             })
             record["selection_decision"], record["selection_reason"] = "REJECTED", reason

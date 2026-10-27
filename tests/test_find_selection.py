@@ -6,8 +6,9 @@ from pathlib import Path
 from unittest import mock
 
 from cme.radar.attention import attention_absolute_v1, attention_rank
-from cme.radar.fit import ADJACENT_MECHANISM, OFF_TOPIC, TARGET_PRODUCT, classify_source_role
+from cme.radar.fit import ADJACENT_MECHANISM, OFF_TOPIC, TARGET_PRODUCT, classify_source_role, match_source_to_product_query
 from cme.radar.find import run_find
+from cme.radar.legacy import discover as legacy_discover
 from cme.radar.select import pattern_source_reason
 from cme.radar.seen import SeenLedger, build_scope
 
@@ -254,3 +255,221 @@ class MechanismAttentionRankRegressionTests(unittest.TestCase):
         recent_window = attention_rank(record, period_days=7, now=now)
         broad_window = attention_rank(record, period_days=180, now=now)
         self.assertGreater(broad_window["score"], recent_window["score"])
+
+
+class RestoredArchiveCoverageTests(unittest.TestCase):
+    """Ported FIND selection checks adapted to this branch's current contracts."""
+
+    def setUp(self):
+        self.target = {"name": "Fanttik car vacuum", "product_type": "cordless handheld car vacuum",
+                       "product_category": "vacuum"}
+
+    def record(self, text, **extra):
+        return {
+            "title": text,
+            "raw": {"post": {"content": {"text": text}, "ext": {"hashtags": []}}},
+            **extra,
+        }
+
+    def test_legacy_match_rejects_target_mention_when_other_product_is_sold(self):
+        text = "My car vacuum sits on the shelf. This portable pump inflates a flat tire in seconds. Order now!"
+        result = legacy_discover._product_type_relevance(
+            self.record(text), "cordless handheld car vacuum"
+        )
+        self.assertEqual(result["status"], "NO_MATCH")
+        self.assertIn("same sentence", result["reason"])
+
+    def test_legacy_match_does_not_attach_standalone_cta_to_target_mention(self):
+        result = legacy_discover._product_type_relevance(
+            self.record("My car vacuum sits on the shelf. Order now!"),
+            "cordless handheld car vacuum",
+        )
+        self.assertEqual(result["status"], "NO_MATCH")
+
+    def test_legacy_match_accepts_target_product_pitch_in_same_sentence(self):
+        text = "My cordless car vacuum removes crumbs in seconds. Get yours today."
+        result = legacy_discover._product_type_relevance(
+            self.record(text), "cordless handheld car vacuum"
+        )
+        self.assertEqual(result["status"], "MATCH")
+
+    def test_legacy_match_does_not_treat_query_as_source_evidence(self):
+        result = legacy_discover._product_type_relevance(
+            {"title": "Watch until the end", "discovery_query": "cordless car vacuum",
+             "discovery_keywords": ["cordless car vacuum"]},
+            "cordless handheld car vacuum",
+        )
+        self.assertEqual(result["status"], "NO_MATCH")
+
+    def test_legacy_match_requires_product_pitch(self):
+        result = legacy_discover._product_type_relevance(
+            self.record("A car vacuum on my shelf."),
+            "cordless handheld car vacuum",
+        )
+        self.assertEqual(result["status"], "NO_MATCH")
+
+    def test_legacy_match_rejects_verb_vacuuming(self):
+        result = legacy_discover._product_type_relevance(
+            self.record("Vacuuming my car today, shop now"),
+            "cordless handheld car vacuum",
+        )
+        self.assertEqual(result["status"], "NO_MATCH")
+
+    def test_legacy_match_rejects_verb_only_vacuum_hashtag(self):
+        result = legacy_discover._product_type_relevance(
+            self.record("Cleaning dusty seats. Get yours today. #vacuuming"),
+            "cordless handheld car vacuum",
+        )
+        self.assertEqual(result["status"], "NO_MATCH")
+
+    def test_legacy_match_allows_compound_product_hashtag_with_independent_pitch(self):
+        result = legacy_discover._product_type_relevance(
+            self.record("Quick cleaning for your car. Get yours today. #carvacuum"),
+            "cordless handheld car vacuum",
+        )
+        self.assertEqual(result["status"], "MATCH")
+        self.assertEqual(result["product_anchor"], "vacuum")
+
+    def test_legacy_match_keeps_product_family_when_context_is_missing(self):
+        result = legacy_discover._product_type_relevance(
+            self.record("This vacuum removes crumbs in seconds. Get yours today."),
+            "cordless handheld car vacuum",
+        )
+        self.assertEqual(result["status"], "MATCH")
+        self.assertEqual(result["confidence"], "LOW")
+        self.assertFalse(result["context_verified"])
+
+    def test_target_context_improves_role_confidence(self):
+        contextual = classify_source_role(
+            self.record("This car vacuum removes crumbs in seconds. Get yours today."),
+            product_type="cordless handheld car vacuum",
+        )
+        uncontextual = classify_source_role(
+            self.record("This vacuum removes crumbs in seconds. Get yours today."),
+            product_type="cordless handheld car vacuum",
+        )
+        self.assertTrue(contextual["context_verified"])
+        self.assertFalse(uncontextual["context_verified"])
+        self.assertEqual(contextual["confidence"], "MEDIUM")
+        self.assertEqual(uncontextual["confidence"], "LOW")
+
+    def test_promoted_non_target_product_is_classified_as_adjacent(self):
+        result = classify_source_role(
+            self.record("Portable tire inflator inflates a flat tire in seconds. Get yours today."),
+            product_type="cordless handheld car vacuum",
+        )
+        self.assertEqual(result["role"], ADJACENT_MECHANISM)
+
+    def test_query_match_accepts_advertised_query_product(self):
+        result = match_source_to_product_query(
+            self.record("Portable air duster blows dust from vents in seconds. Get yours today."),
+            "air duster",
+        )
+        self.assertTrue(result["matches"])
+        self.assertEqual(result["query_anchor"], "duster")
+
+    def test_query_match_rejects_mismatched_advertised_product(self):
+        result = match_source_to_product_query(
+            self.record("Portable air compressor inflates tires in seconds. Get yours today."),
+            "air duster",
+        )
+        self.assertFalse(result["matches"])
+        self.assertEqual(result["reason"], "QUERY_PRODUCT_MISMATCH")
+
+    def test_query_match_rejects_incidental_product_mention_without_promotion(self):
+        result = match_source_to_product_query(
+            self.record("The air duster sits on a shelf. This tire inflator inflates tires in seconds."),
+            "air duster",
+        )
+        self.assertFalse(result["matches"])
+        self.assertEqual(result["reason"], "QUERY_PRODUCT_NOT_PROMOTED")
+
+    def test_mechanism_find_rejects_compressor_returned_for_air_duster_query(self):
+        text = "Portable air compressor inflates tires in seconds. Get yours today."
+        item = {
+            "ad_id": "compressor-for-duster-query", "video_id": "compressor-video",
+            "source_url": "https://www.tiktok.com/@brand/video/compressor-for-duster-query",
+            "video_url": "https://cdn.example.test/compressor.mp4",
+            "title": text, "views": 600_000, "likes": 20_000, "comments": 400, "shares": 600,
+            "published_at": "2025-12-20T00:00:00Z",
+            "raw": {"post": {"content": {"text": text}, "ext": {"ad": {"title": text}}}},
+        }
+        client = FakeClient([item])
+        params = {"selection_mode": "mechanism", "country": "US", "period": 30,
+                  "max_requests": 1, "max_ads": 5, "keywords": ["air duster"], "offer": self.target}
+        with tempfile.TemporaryDirectory() as temp:
+            with mock.patch.dict("os.environ", {"CME_FIND_SEEN_PATH": str(Path(temp) / "seen.json")}):
+                result = run_find(params, client=client, now="2026-01-01T00:00:00Z")
+        self.assertEqual(result["candidates"], [])
+        self.assertEqual(
+            result["diagnostics"]["source_selection_diagnostics"]["rejected_by_reason"].get("QUERY_PRODUCT_MISMATCH"),
+            1,
+        )
+
+    def test_unknown_selection_mode_fails_before_provider_call(self):
+        client = FakeClient([])
+        with self.assertRaisesRegex(ValueError, "selection_mode"):
+            run_find({"selection_mode": "everything", "keywords": ["air duster"], "offer": self.target}, client=client)
+        self.assertEqual(client.calls, [])
+
+    def test_attention_rank_is_deterministic_for_same_source(self):
+        now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        post = {"views": 220_000, "likes": 530, "shares": 120, "saves": 270,
+                "author_followers": 18_000, "published_at": now.isoformat()}
+        self.assertEqual(attention_rank(post, now=now), attention_rank(dict(post), now=now))
+
+    def test_attention_reach_component_increases_with_views(self):
+        now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        small = attention_rank({"views": 1_000}, now=now)
+        large = attention_rank({"views": 1_000_000}, now=now)
+        self.assertGreater(large["components"]["reach"], small["components"]["reach"])
+        self.assertGreater(large["score"], small["score"])
+
+    def test_attention_rank_is_unknown_without_usable_views(self):
+        result = attention_rank({"likes": 100_000}, now=datetime(2026, 1, 1, tzinfo=timezone.utc))
+        self.assertIsNone(result["score"])
+        self.assertEqual(result["coverage"], 0.0)
+        self.assertFalse(result["is_commercial_proof"])
+
+    def test_seen_ledger_canonicalizes_source_urls(self):
+        with tempfile.TemporaryDirectory() as temp:
+            ledger = SeenLedger(Path(temp) / "seen.json")
+            scope = build_scope(country="US", offer={"product_type": "car vacuum"}, selection_mode="product")
+            ledger.remember(scope, [{"source_url": "https://EXAMPLE.com/video/123?campaign=x#top"}])
+            self.assertIn("url:https://example.com/video/123", ledger.seen_keys(scope))
+
+    def test_seen_ledger_isolates_product_mode_from_mechanism_mode(self):
+        with tempfile.TemporaryDirectory() as temp:
+            ledger = SeenLedger(Path(temp) / "seen.json")
+            offer = {"product_type": "car vacuum"}
+            product = build_scope(country="US", offer=offer, selection_mode="product")
+            mechanism = build_scope(country="US", offer=offer, selection_mode="mechanism")
+            ledger.remember(product, [{"ad_id": "same-ad"}])
+            self.assertIn("ad:same-ad", ledger.seen_keys(product))
+            self.assertEqual(ledger.seen_keys(mechanism), set())
+
+    def test_seen_ledger_refreshes_query_use_timestamp(self):
+        now = [1000.0]
+        with tempfile.TemporaryDirectory() as temp:
+            ledger = SeenLedger(Path(temp) / "seen.json", clock=lambda: now[0])
+            scope = build_scope(country="US", offer={"product_type": "car vacuum"}, selection_mode="mechanism")
+            ledger.remember(scope, queries=["air duster", "portable blower"])
+            now[0] += 5
+            ledger.remember(scope, queries=["air duster"])
+            self.assertEqual(ledger.recent_queries(scope), ["portable blower", "air duster"])
+
+    def test_failed_provider_call_does_not_record_query_or_source(self):
+        class BrokenClient(FakeClient):
+            def fetch_sponsored_search(self, **kwargs):
+                self.calls.append(("sponsored_search", kwargs))
+                raise OSError("synthetic offline fixture")
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "seen.json"
+            client = BrokenClient([])
+            params = {"selection_mode": "mechanism", "country": "US", "period": 30,
+                      "max_requests": 1, "max_ads": 5, "keywords": ["air duster"], "offer": self.target}
+            with mock.patch.dict("os.environ", {"CME_FIND_SEEN_PATH": str(path)}):
+                with self.assertRaises(Exception):
+                    run_find(params, client=client, now="2026-01-01T00:00:00Z")
+            self.assertFalse(path.exists())
+            self.assertEqual(len(client.calls), 1)

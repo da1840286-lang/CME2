@@ -601,6 +601,26 @@ _PRODUCT_AD_EVIDENCE = re.compile(
 _PERFORMANCE_BOARD_ORDER = {"ctr", "cvr", "play_6s_rate", "play_2s_rate"}
 
 
+
+def _target_product_pitch_in_same_sentence(body: str, anchor: str) -> bool:
+    """Do not let promotion of another item validate a passing mention of the target product."""
+    if not anchor:
+        return False
+    anchor_forms = {anchor, anchor + "s", anchor + "es"}
+    product_spec = re.compile(
+        r"\\b\\d+(?:\\.\\d+)?\\s?(?:psi|v|w|kpa|pa|mah|mm|cm|oz|ml|l|rpm|lm|gb)\\b",
+        re.IGNORECASE,
+    )
+    for sentence in re.split(r"[\\n.!?;]+", str(body or "")):
+        tokens = re.findall(r"[a-z0-9]+", sentence)
+        if not any(token in anchor_forms for token in tokens):
+            continue
+        if _PRODUCT_AD_EVIDENCE.search(sentence) or product_spec.search(sentence):
+            return True
+    return False
+
+
+
 def _product_type_relevance(record: dict[str, Any], product_type: str = "") -> dict[str, Any]:
     """Require source-body evidence for the advertised product; context terms are not product heads."""
     product_type = " ".join(str(product_type or "").lower().split())
@@ -707,6 +727,15 @@ def _product_type_relevance(record: dict[str, Any], product_type: str = "") -> d
         )
         return {
             "status": "NO_MATCH", "confidence": "NONE", "score": 0.0, "reason": reason,
+            "context_verified": context_verified, "product_anchor": anchor,
+        }
+
+    # A pitch elsewhere in the post is not evidence that the target product is being sold.
+    # Hashtags remain a separate identity form because they do not have sentence boundaries.
+    if anchor_in_body and not _target_product_pitch_in_same_sentence(body, anchor):
+        return {
+            "status": "NO_MATCH", "confidence": "NONE", "score": 0.0,
+            "reason": "target product noun is not linked to product/promotion evidence in the same sentence",
             "context_verified": context_verified, "product_anchor": anchor,
         }
 

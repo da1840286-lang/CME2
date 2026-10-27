@@ -190,6 +190,42 @@ def _target_is_promoted(body: str, anchor: str) -> bool:
     return False
 
 
+
+def match_source_to_product_query(record: dict, query: str) -> dict:
+    """Require the product returned by Sponsored Search to match its own query.
+
+    Query terms define the expected product; they never count as evidence that
+    the source itself promotes that product.
+    """
+    view = _record_source_view(record)
+    anchor = _product_anchor(query)
+    if not anchor:
+        return {
+            "matches": False, "query_anchor": None,
+            "reason": "QUERY_PRODUCT_UNVERIFIED",
+        }
+    mention_source = _anchor_present(anchor, view)
+    if not mention_source:
+        return {
+            "matches": False, "query_anchor": anchor,
+            "reason": "QUERY_PRODUCT_MISMATCH",
+        }
+    linked = _target_is_promoted(view["body"], anchor)
+    if mention_source == "hashtag" and _promo_signals(record, view):
+        linked = True
+    if not linked:
+        return {
+            "matches": False, "query_anchor": anchor,
+            "mention_source": mention_source,
+            "reason": "QUERY_PRODUCT_NOT_PROMOTED",
+        }
+    return {
+        "matches": True, "query_anchor": anchor,
+        "mention_source": mention_source, "reason": "",
+    }
+
+
+
 def classify_source_role(record: dict, *, product_type: str = "", product_category: str = "", target_offer: str = "") -> dict:
     """Classify the promoted product from source content; no query metadata, mechanism or Target-Fit inference."""
     view = _record_source_view(record)
