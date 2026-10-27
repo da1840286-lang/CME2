@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -111,7 +112,7 @@ def validate_atoms_manifest(atoms_path, manifest_path, atoms_json, offer, shot=N
                 errors["#target_fit_gate"] = gate_errors
 
             if isinstance(decision, dict):
-                normalize = lambda value: re.sub(r"[^\\w]+", " ", str(value or "").casefold(), flags=re.UNICODE).strip()
+                normalize = lambda value: re.sub(r"[^\w]+", " ", str(value or "").casefold(), flags=re.UNICODE).strip()
                 if normalize(fit_gate.get("abstract_mechanism")) != normalize(decision.get("abstract_mechanism")):
                     errors["#target_fit_gate"] = list(errors.get("#target_fit_gate", [])) + [
                         "target_fit_gate.abstract_mechanism must match transfer_decision.abstract_mechanism in the saved Brain contract"

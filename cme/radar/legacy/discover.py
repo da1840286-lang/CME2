@@ -608,10 +608,10 @@ def _target_product_pitch_in_same_sentence(body: str, anchor: str) -> bool:
         return False
     anchor_forms = {anchor, anchor + "s", anchor + "es"}
     product_spec = re.compile(
-        r"\\b\\d+(?:\\.\\d+)?\\s?(?:psi|v|w|kpa|pa|mah|mm|cm|oz|ml|l|rpm|lm|gb)\\b",
+        r"\b\d+(?:\.\d+)?\s?(?:psi|v|w|kpa|pa|mah|mm|cm|oz|ml|l|rpm|lm|gb)\b",
         re.IGNORECASE,
     )
-    for sentence in re.split(r"[\\n.!?;]+", str(body or "")):
+    for sentence in re.split(r"[\n.!?;]+", str(body or "")):
         tokens = re.findall(r"[a-z0-9]+", sentence)
         if not any(token in anchor_forms for token in tokens):
             continue
