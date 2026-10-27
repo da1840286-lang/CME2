@@ -1,7 +1,7 @@
 """Regressions for Brain retry reconciliation and transfer-decision element references."""
 import unittest
 
-from cme.brain import build_source_transfer_context, request_atoms, validate_transfer_decision
+from cme.brain import build_request, build_source_transfer_context, request_atoms, validate_transfer_decision
 from tests.test_target_fit_gate import target_offer
 
 
@@ -47,6 +47,20 @@ def response(suffix, include_result=True, include_reserved_qa=True):
 
 
 class BrainRetryContractTests(unittest.TestCase):
+    def test_transfer_atoms_require_visible_physical_intervention_not_nearby_product_placement(self):
+        from cme.offer import load_offer
+        from tests.test_target_fit_gate import EX
+
+        req = build_request(
+            load_offer(EX), "Show the product actively solving the visible problem.", 1,
+            source_transfer=build_source_transfer_context(RADAR),
+        )
+        rules = " ".join(req["rules"])
+        self.assertIn("ACTIVE INTERVENTION EVIDENCE", rules)
+        self.assertIn("physically engaging the exact problem material", rules)
+        self.assertIn("Do not describe the product as merely resting beside", rules)
+        self.assertIn("visible contact point linking the action to the change", rules)
+
     def test_retry_replaces_old_role_ids_and_ignores_system_owned_branding_qa(self):
         calls = []
 
