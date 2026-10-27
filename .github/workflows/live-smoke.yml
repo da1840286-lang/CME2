@@ -123,7 +123,7 @@ on:
         required: true
         default: "Create target-native vertical 9:16 product-ad frames. Preserve the source's causal commercial mechanism, but replace its product, brand, creator, props, scene, wording and composition. Show the configured target product clearly and use only verified OfferCard facts."
       brain_run_id:
-        description: "Required for frame; numeric run ID of a successful Brain stage from this exact branch commit"
+        description: "Required for frame; numeric run ID of a successful Brain stage from this branch. The atom manifest is revalidated before generation."
         type: string
         required: false
         default: ""
@@ -499,10 +499,16 @@ jobs:
                   raise SystemExit(f"Run {run_id} has no unexpired {artifact_name} artifact")
 
           if os.environ["CME_STAGE"] == "frame":
-              check_run(os.environ["BRAIN_RUN_ID"], "cme-brain-out", True)
+              # A frame consumes a compiled atom contract, not the Brain implementation itself.
+              # Permit a previous successful Brain run on this same branch; the downloaded
+              # manifest is validated against the current code and OfferCard before generation.
+              check_run(os.environ["BRAIN_RUN_ID"], "cme-brain-out", True, allow_prior_commit=True)
               prior = os.environ.get("PREVIOUS_FRAME_RUN_ID", "").strip()
               if prior:
-                  check_run(prior, "cme-frame-out", int(os.environ.get("CME_SHOT", "1")) > 1)
+                  # Controlled retries may reuse frame state from an earlier commit, but only
+                  # when the contract fingerprints match exactly in the restore/preflight steps.
+                  check_run(prior, "cme-frame-out", int(os.environ.get("CME_SHOT", "1")) > 1,
+                            allow_prior_commit=True)
           elif os.environ["CME_STAGE"] == "analyze":
               # FIND is data input, not a compiled contract: permit an earlier commit on
               # the same branch so the current run can analyse an already-paid-for search.
