@@ -118,6 +118,19 @@ class TargetFitGateTests(unittest.TestCase):
         self.assertTrue(any("not present in authoritative OfferCard" in x
                             for x in validate_transfer_fit_decision(offer, invalid)))
 
+    def test_short_target_evidence_accepts_an_exact_short_offer_field(self):
+        offer = replace(target_offer(), product_type="Vacuum", product_category="", verified_claims=())
+        valid = decision(True, ["Vacuum"])
+        self.assertEqual(TRANSFER_FIT_SCHEMA["properties"]["transfer_decision"]["properties"]
+                         ["target_evidence"]["items"]["minLength"], 1)
+        self.assertEqual(validate_transfer_fit_decision(offer, valid), [])
+
+    def test_short_target_evidence_rejects_a_fragment_of_a_longer_field(self):
+        offer = target_offer()
+        invalid = decision(True, ["Vacuum"])
+        errors = validate_transfer_fit_decision(offer, invalid)
+        self.assertTrue(any("shorter than 8 characters and must exactly match" in error for error in errors))
+
     def test_invalid_target_fit_response_gets_one_correction_attempt(self):
         calls = []
         trace = []

@@ -425,7 +425,7 @@ TRANSFER_FIT_SCHEMA = {
                 "transferable": {"type": "boolean"},
                 "abstract_mechanism": {"type": "string", "minLength": 10, "maxLength": 200},
                 "target_native_mapping": {"type": "string", "minLength": 10, "maxLength": 240},
-                "target_evidence": {"type": "array", "maxItems": 3, "items": {"type": "string", "minLength": 8, "maxLength": 120}},
+                "target_evidence": {"type": "array", "maxItems": 3, "items": {"type": "string", "minLength": 1, "maxLength": 120}},
                 "reason": {"type": "string", "minLength": 10, "maxLength": 240},
                 "demo_form_source": {"type": "string", "enum": list(DEMO_FORMS)},
                 "demo_form_target": {"type": "string", "enum": list(DEMO_FORMS)},
@@ -642,9 +642,12 @@ def validate_transfer_fit_decision(offer, decision, source_transfer=None) -> lis
             errors.append(f"transfer_decision.{key} must be in English")
     evidence = decision.get("target_evidence")
     if not isinstance(evidence, list) or len(evidence) > 3 or any(
-        not isinstance(item, str) or not 8 <= len(item.strip()) <= 120 for item in (evidence or [])
+        not isinstance(item, str) or not 1 <= len(item.strip()) <= 120 for item in (evidence or [])
     ):
-        errors.append("transfer_decision.target_evidence must be a list of 0-3 evidence excerpts, each 8-120 characters")
+        errors.append(
+            "transfer_decision.target_evidence must be a list of 0-3 evidence excerpts, each 1-120 characters; "
+            "excerpts shorter than 8 characters must exactly match a complete authoritative OfferCard field"
+        )
         evidence = []
     if decision.get("transferable") is True and not evidence:
         errors.append("a transferable decision requires target_evidence copied from the OfferCard")
@@ -653,12 +656,18 @@ def validate_transfer_fit_decision(offer, decision, source_transfer=None) -> lis
                getattr(offer, "product_category", ""), *getattr(offer, "verified_claims", ()),
                *getattr(offer, "confirmations", ())]
     allowed_normalized = [_normalized_evidence(item) for item in allowed if str(item or "").strip()]
+    allowed_exact = set(allowed_normalized)
     for index, item in enumerate(evidence):
         if not isinstance(item, str):
             continue
         needle = _normalized_evidence(item)
         if not needle or not any(needle in haystack for haystack in allowed_normalized):
             errors.append(f"transfer_decision.target_evidence[{index}] is not present in authoritative OfferCard fields")
+        elif len(item.strip()) < 8 and needle not in allowed_exact:
+            errors.append(
+                f"transfer_decision.target_evidence[{index}] is shorter than 8 characters and must exactly match "
+                "a complete authoritative OfferCard field"
+            )
     errors.extend(validate_gate_elements(decision, source_transfer))
     return errors
 
@@ -705,6 +714,7 @@ def request_transfer_fit(offer, brief: str, source_transfer: dict, call, trace_o
             "ORDINARY DEMO IS NOT A DEFAULT ANSWER: a plain demonstration of the target product is a valid transfer only when the source mechanism itself is a plain demonstration. If the source hook or mechanism is a comparison (old vs new, A vs B, rival method, before vs after), replacing it with a single-product demo is a substitution, not a transfer. Map the comparison onto a target-native comparison (for example this product against the old way of doing the same task) or choose transferable=false.",
             "Do not invent or imply unverified specifications, runtime, accessories, container design, special features, or performance outcomes. An ordinary visible action may transfer without those claims; a mechanism that depends on an unverified unique feature must be rejected.",
             "For transferable=true, target_evidence must contain 1-3 verbatim excerpts copied from OfferCard name, product_type, product_category, verified_claims, or confirmations. No source-ad text and no invented target facts.",
+            "A target_evidence excerpt shorter than 8 characters is allowed only when it exactly matches a complete OfferCard field; do not use a short fragment from a longer field.",
             "A shared generic desire (easy, fast, fewer cables, convenient) is not sufficient. Map the core causal action and observable result the target can plausibly demonstrate; do not reject it merely because optional specs or supporting shots are unverified. Choose transferable=false only when an essential target capability is unsupported, the core intervention cannot be demonstrated, or material uncertainty remains about that essential capability.",
             "ELEMENT ACCOUNT (required): account for EVERY name in required_source_elements exactly once, either in source_elements_preserved (element, source_form = what it is in the source, target_form = how it appears with the target product, evidence_t_sec = timestamps selected from source_evidence_refs) or in source_elements_dropped (element, why). Do not list an element as preserved when its target_form is only a generic demo of the target product. If source_evidence_refs are supplied, every preserved element must cite 1-3 exact supplied timestamps that support the source observation; do not invent timestamps.",
             "MECHANISM IS NON-NEGOTIABLE: transferable=true is impossible unless the source element 'mechanism' is in source_elements_preserved. Preserving only the hook, visual style, result, or product action is not a mechanism transfer. If the causal mechanism cannot be carried to the target honestly, set transferable=false.",
