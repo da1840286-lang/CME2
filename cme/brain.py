@@ -896,10 +896,19 @@ def validate_transfer_decision(decision, atoms) -> list:
                     errors.append(f"transfer_decision.preserved[{index}] must be an object")
                     continue
                 prop = item.get("property")
-                if not isinstance(prop, str) or len(prop.strip()) < 8:
+                prop_key = prop.strip().lower() if isinstance(prop, str) else ""
+                # The gate's canonical element IDs (hook/problem/mechanism/intervention/result)
+                # are meaningful property identifiers, not malformed short descriptions.
+                if not isinstance(prop, str) or (len(prop_key) < 8 and prop_key not in GATE_ELEMENTS):
                     errors.append(f"transfer_decision.preserved[{index}].property must describe the preserved property")
                     continue
-                carrier = by_id.get(str(item.get("atom_id") or ""))
+                atom_id = str(item.get("atom_id") or "")
+                carrier = by_id.get(atom_id)
+                if prop_key in GATE_ELEMENTS and not atom_id.startswith(f"keep_{prop_key}_"):
+                    errors.append(
+                        f"transfer_decision.preserved[{index}].atom_id must use the keep_{prop_key}_ prefix "
+                        f"for the preserved source element")
+                    continue
                 if carrier is None or carrier[0] != "MUST" or carrier[1] != "image" or carrier[2] == "claim":
                     errors.append(
                         f"transfer_decision.preserved[{index}].atom_id must name an existing MUST image atom "
@@ -1026,15 +1035,39 @@ def request_atoms(offer, brief: str, shots: int, call, max_retries: int = 2, ver
             round_errs.setdefault(aid, []).extend(errs)
         for aid, errs in check_language(parsed.atoms).items():
             round_errs.setdefault(aid, []).extend(errs)
+        # Branding/no-added-text QA is injected by campaign policy. Ignore duplicate Brain-authored
+        # checks instead of spending correction rounds asking the model to remove them repeatedly.
         reserved_no_text = reserved_system_atom_errors(parsed.atoms)
-        for aid, errs in reserved_no_text.items():
-            round_errs.setdefault("#system_owned_qa", []).extend(f"{aid}: {error}" for error in errs)
+        reserved_no_text_ids = set(reserved_no_text)
         if vertical is not None:
             for aid, errs in check_vertical(parsed.atoms, offer, vertical).items():
                 round_errs.setdefault(aid, []).extend(errs)
-        reserved_no_text_ids = set(reserved_no_text)
+        # A retry may regenerate the same logical atom with a new numeric suffix
+        # (keep_mechanism_01 -> keep_mechanism_1). Replace the stale version by role;
+        # otherwise retries accumulate duplicate MUST atoms and falsely exhaust the frame budget.
+        def retry_family(atom_id):
+            match = re.match(r"^(keep_[a-z]+_|mech_[a-z]+_|comp_)", str(atom_id or ""))
+            return match.group(1) if match else None
+
+        valid_incoming = [
+            a for a in parsed.atoms
+            if a.id not in round_errs and a.id not in reserved_no_text_ids
+        ]
+        incoming_families = {family for family in (retry_family(a.id) for a in valid_incoming) if family}
+        for old_id in list(by_id):
+            if retry_family(old_id) in incoming_families:
+                by_id.pop(old_id, None)
+        # Clear stale per-atom errors when a valid replacement arrives under a new suffix.
+        for old_id in list(pending):
+            if not old_id.startswith("#") and retry_family(old_id) in incoming_families:
+                pending.pop(old_id, None)
+
         for a in parsed.atoms:
-            if a.id in round_errs or a.id in reserved_no_text_ids:
+            if a.id in reserved_no_text_ids:
+                by_id.pop(a.id, None)
+                pending.pop(a.id, None)
+                continue
+            if a.id in round_errs:
                 by_id.pop(a.id, None)
             else:
                 by_id[a.id] = a
