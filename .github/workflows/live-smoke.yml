@@ -196,7 +196,9 @@ jobs:
         shell: bash
         run: |
           mkdir -p "${RUNNER_TEMP}/cme-find-state"
+          echo "CME_FIND_STATE_DIR=${RUNNER_TEMP}/cme-find-state" >> "$GITHUB_ENV"
           echo "CME_FIND_SEEN_PATH=${RUNNER_TEMP}/cme-find-state/seen.json" >> "$GITHUB_ENV"
+          rm -f "${RUNNER_TEMP}/cme-find-state/find-completed"
           if [[ ! -s "${RUNNER_TEMP}/cme-find-state/seen.json" ]]; then
             printf '{"version":1,"entries":{}}\n' > "${RUNNER_TEMP}/cme-find-state/seen.json"
           fi
@@ -634,6 +636,23 @@ jobs:
                     "selection_mode": os.environ.get("FIND_SELECTION_MODE", "product"),
                     "performance_order_bys": performance_order_bys}
           result = run_find(params)
+          def mark_find_state_if_executed(result):
+              stats = result.get("stats") or {}
+              diagnostics = result.get("diagnostics") or {}
+              try:
+                  request_count = int(diagnostics.get("requests_executed") or stats.get("executed_requests") or 0)
+              except (TypeError, ValueError):
+                  request_count = 0
+              calls = stats.get("calls") or []
+              if request_count <= 0 and not calls:
+                  return
+              state_dir = os.environ.get("CME_FIND_STATE_DIR", "").strip()
+              if not state_dir:
+                  return
+              marker = Path(state_dir) / "find-completed"
+              marker.parent.mkdir(parents=True, exist_ok=True)
+              marker.write_text("requests=" + str(request_count) + "\n", encoding="utf-8")
+          mark_find_state_if_executed(result)
           out = Path("out")
           (out / "candidates.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
           rows = []
@@ -862,6 +881,23 @@ jobs:
                             "selection_mode": os.environ.get("FIND_SELECTION_MODE", "product"),
                             "performance_order_bys": performance_order_options[order_mode]}
                   find_result = run_find(params)
+                  def mark_find_state_if_executed(result):
+                      stats = result.get("stats") or {}
+                      diagnostics = result.get("diagnostics") or {}
+                      try:
+                          request_count = int(diagnostics.get("requests_executed") or stats.get("executed_requests") or 0)
+                      except (TypeError, ValueError):
+                          request_count = 0
+                      calls = stats.get("calls") or []
+                      if request_count <= 0 and not calls:
+                          return
+                      state_dir = os.environ.get("CME_FIND_STATE_DIR", "").strip()
+                      if not state_dir:
+                          return
+                      marker = Path(state_dir) / "find-completed"
+                      marker.parent.mkdir(parents=True, exist_ok=True)
+                      marker.write_text("requests=" + str(request_count) + "\n", encoding="utf-8")
+                  mark_find_state_if_executed(find_result)
                   candidates_file.write_text(json.dumps(find_result, ensure_ascii=False, indent=2), encoding="utf-8")
                   rows = []
                   for c in find_result.get("candidates", []):
@@ -1067,10 +1103,14 @@ jobs:
                               {"status": initial_status, "analysis": initial_analysis, "saved": initial_saved})
                   app.store.ingest([source], "github-find-" + find_reference, "found")
                   app.store.decide(source_id, "shortlist", "Next ranked source after TRANSFER_REJECTED")
-                  try:
-                      status_next = app.do_analyze(source_id)
-                  except Exception as exc:
-                      status_next = {"status": "INTERNAL_ERROR", "detail": f"{type(exc).__name__}: {exc}"}
+                  def analyze_once_next():
+                      try:
+                          return app.do_analyze(source_id)
+                      except Exception as exc:
+                          return {"status": "INTERNAL_ERROR", "detail": f"{type(exc).__name__}: {exc}"}
+                  next_analysis_attempts = analyze_with_invalid_output_retry(analyze_once_next, max_retries=1)
+                  status_next = next_analysis_attempts[-1] if next_analysis_attempts else {
+                      "status": "UNKNOWN", "detail": "no fallback analysis attempt returned"}
                   rows_next = app.store.analyses(source_id)
                   saved_next = rows_next[0] if rows_next else {}
                   score_next = source.get("source_score") or {}
@@ -1088,10 +1128,17 @@ jobs:
                                    "source_evidence_scope": "six sampled video frames only; mechanism and transferability remain hypotheses",
                                    "result": saved_next.get("result"), "warnings": status_next.get("warnings", []),
                                    "detail": status_next.get("detail", "")}
+                  for next_index, next_status in enumerate(next_analysis_attempts, start=1):
+                      attempt_row = {"candidate_id": source_id,
+                                     "status": str(next_status.get("status") or "UNKNOWN").upper(),
+                                     "detail": str(next_status.get("detail") or "")[:500]}
+                      if next_index > 1:
+                          attempt_row["same_candidate_retry"] = True
+                      attempts.append(attempt_row)
+                      print(f"Transfer fallback analysis: candidate={source_id} attempt={next_index} status={attempt_row['status']} detail={attempt_row['detail']}")
                   attempt_next = {"candidate_id": source_id, "status": str(status_next.get("status") or "UNKNOWN").upper(),
-                                  "detail": str(status_next.get("detail") or "")[:500]}
-                  attempts.append(attempt_next)
-                  print(f"Transfer fallback analysis: candidate={source_id} status={attempt_next['status']} detail={attempt_next['detail']}")
+                                  "detail": str(status_next.get("detail") or "")[:500],
+                                  "analysis_attempts": len(next_analysis_attempts)}
                   return attempt_next, {"status": status_next, "analysis": analysis_next, "saved": saved_next}
 
               def produce_for_transfer(source, _payload):
@@ -1101,6 +1148,71 @@ jobs:
                   loop_pool, limit=remaining_limit, analyze=analyze_for_transfer, produce=produce_for_transfer,
                   skip_reason=pattern_source_reason,
                   allow_transfer_fallback=(selection_mode != "manual_from_prior_find"), skipped=skipped)
+
+              # Refresh attempt diagnostics after fallback candidates have run. A later analysis failure
+              # must not be represented by the previous candidate's production rejection.
+              attempt_artifact = {
+                  "selection_mode": selection_mode,
+                  "max_candidates": analysis_limit,
+                  "attempts": attempts,
+                  "skipped": skipped,
+                  "selected_candidate_id": (
+                      str(loop_result.selected.get("id") or "")
+                      if loop_result.last_event == "production" and loop_result.selected else None),
+                  "last_analysis_failure": loop_result.last_analysis_failure,
+              }
+              (out / "source_analysis_attempts.json").write_text(
+                  json.dumps(attempt_artifact, ensure_ascii=False, indent=2), encoding="utf-8")
+
+              if loop_result.last_event == "analysis_failure":
+                  last_failure = loop_result.last_analysis_failure or {
+                      "candidate_id": "", "status": "UNKNOWN", "detail": "analysis failed without status"}
+                  failed_payload = loop_result.last_payload if isinstance(loop_result.last_payload, dict) else {}
+                  failed_analysis = failed_payload.get("analysis")
+                  if isinstance(failed_analysis, dict):
+                      (out / "source_analysis.json").write_text(
+                          json.dumps(failed_analysis, ensure_ascii=False, indent=2), encoding="utf-8")
+                  prior_report = loop_result.last_production_report or loop_result.report
+                  prior_candidate = loop_result.selected or {}
+                  failure_status = str(last_failure.get("status") or "UNKNOWN").upper()
+                  failure_code = 5 if failure_status in {"API_ERROR", "INVALID_OUTPUT"} else 4
+                  failure = {
+                      "status": "SOURCE_ANALYSIS_FAILED",
+                      "failure_class": "SOURCE_ANALYSIS_FAILED",
+                      "exit_code": failure_code,
+                      "candidate_id": last_failure.get("candidate_id"),
+                      "analysis_status": failure_status,
+                      "analysis_detail": last_failure.get("detail", ""),
+                      "analysis_attempts": attempts,
+                      "skipped_candidates": skipped,
+                      "transfer_rejections": loop_result.rejections,
+                      "last_production_candidate_id": prior_candidate.get("id"),
+                      "last_production_report": prior_report,
+                      "detail": ("Fallback source analysis failed after prior transfer rejection: "
+                                 + failure_status + " - " + str(last_failure.get("detail") or ""))[:1500],
+                  }
+                  write_ledger(candidates, attempts=attempts, rejections=loop_result.rejections,
+                               failure_class="SOURCE_ANALYSIS_FAILED")
+                  (out / "source_transfer_attempts.json").write_text(
+                      json.dumps({
+                          "selection_mode": selection_mode,
+                          "rejections": loop_result.rejections,
+                          "selected_candidate_id": None,
+                          "last_failure_class": "SOURCE_ANALYSIS_FAILED",
+                          "last_analysis_failure": last_failure,
+                          "last_production_candidate_id": prior_candidate.get("id"),
+                          "last_production_failure_class": (prior_report or {}).get("failure_class", ""),
+                      }, ensure_ascii=False, indent=2), encoding="utf-8")
+                  (out / "live_result.json").write_text(
+                      json.dumps(failure, ensure_ascii=False, indent=2), encoding="utf-8")
+                  with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+                      summary.write("## Source analysis failed after fallback\n\n")
+                      summary.write(f"- Failed candidate: {last_failure.get('candidate_id')}\n")
+                      summary.write(f"- Analysis status: {failure_status} - {last_failure.get('detail') or '(no detail)'}\n")
+                      summary.write(f"- Prior production outcome: {(prior_report or {}).get('failure_class', 'unknown')}\n")
+                      summary.write("- Previous transfer rejections remain listed separately in live_result.json and source_transfer_attempts.json.\n\n")
+                  raise SystemExit(failure_code)
+
               if loop_result.selected is None or loop_result.report is None:
                   details = "; ".join(loop_result.skipped[-5:]) or "no eligible candidate completed analysis"
                   raise SystemExit("No candidate reached production: " + details)
@@ -1234,8 +1346,22 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           exit 0
 
-      - name: Save FIND source history
+      - name: Check whether this run executed FIND before saving source history
+        id: find_state_persist
         if: always() && (inputs.stage == 'find' || inputs.stage == 'all')
+        shell: bash
+        run: |
+          state_dir="${RUNNER_TEMP}/cme-find-state"
+          should_save=false
+          if [[ -f "$state_dir/find-completed" && -s "$state_dir/seen.json" ]]; then
+            should_save=true
+          fi
+          rm -f "$state_dir/find-completed"
+          echo "should_save=$should_save" >> "$GITHUB_OUTPUT"
+          echo "FIND source-history persistence: $should_save"
+
+      - name: Save FIND source history
+        if: always() && (inputs.stage == 'find' || inputs.stage == 'all') && steps.find_state_persist.outputs.should_save == 'true'
         uses: actions/cache/save@v4
         with:
           path: ${{ runner.temp }}/cme-find-state

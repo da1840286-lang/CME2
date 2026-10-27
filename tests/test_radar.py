@@ -1108,6 +1108,15 @@ if __name__ == "__main__":
 
 
 class ProductHeadContextAuditRegressionTests(unittest.TestCase):
+    def test_combo_vacuum_blower_is_retained_when_target_product_is_actually_promoted(self):
+        text = "This 3-in-1 car vacuum with blower mode blows dust from vents and vacuums it away. Order now."
+        result = legacy_discover._product_type_relevance(
+            {"title": text, "raw": {"post": {"content": {"text": text}}}},
+            "cordless handheld car vacuum",
+        )
+        self.assertEqual(result["status"], "MATCH")
+        self.assertEqual(result["product_anchor"], "vacuum")
+
     def test_trailing_use_context_is_not_mistaken_for_product_head(self):
         text = "Tire inflator inflates a flat tire in seconds. Get yours today."
         result = legacy_discover._product_type_relevance(

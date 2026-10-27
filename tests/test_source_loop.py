@@ -103,6 +103,18 @@ class SourceLoopTests(unittest.TestCase):
         self.assertEqual(result.report["failure_class"], "TRANSFER_REJECTED")
         self.assertEqual(len(result.rejections), 3)
 
+    def test_analysis_failure_after_transfer_rejection_is_recorded_separately(self):
+        result, _ = self.run_loop(
+            ["a", "b"],
+            statuses={"b": "API_ERROR"},
+            reports={"a": {"failure_class": "TRANSFER_REJECTED", "failure_detail": "mechanism mismatch"}},
+        )
+        self.assertEqual(result.report["failure_class"], "TRANSFER_REJECTED")
+        self.assertEqual(result.last_production_report["failure_class"], "TRANSFER_REJECTED")
+        self.assertEqual(result.last_event, "analysis_failure")
+        self.assertEqual(result.last_analysis_failure["candidate_id"], "b")
+        self.assertEqual(result.last_analysis_failure["status"], "API_ERROR")
+
     def test_manual_choice_is_never_replaced(self):
         result, order = self.run_loop(
             ["a", "b"], reports={"a": {"failure_class": "TRANSFER_REJECTED"}, "b": {"failure_class": "DELIVERED_PASS"}},
@@ -148,6 +160,14 @@ class SourceLoopTests(unittest.TestCase):
         self.assertIn('if [[ "$FIND_SELECTION_MODE" == "mechanism" && "$FIND_PERFORMANCE_ORDER" != "default" ]]; then', workflow)
         self.assertIn("which creates a source contract", workflow)
 
+    def test_find_history_cache_saves_only_after_current_run_executed_find(self):
+        workflow = (Path(__file__).resolve().parents[1] / ".github" / "workflows" / "live-smoke.yml").read_text(encoding="utf-8")
+        self.assertIn("id: find_state_persist", workflow)
+        self.assertIn("steps.find_state_persist.outputs.should_save == 'true'", workflow)
+        self.assertIn("find-completed", workflow)
+        self.assertIn("mark_find_state_if_executed(result)", workflow)
+        self.assertIn("mark_find_state_if_executed(find_result)", workflow)
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -190,8 +210,16 @@ class FakeApp:
         self.work = Path(work)
         self.store = Store()
         self.calls = 0
+        self.analysis_calls = {}
     def do_analyze(self, cid):
-        return {"status": PLAN.get("analysis", {}).get(cid, "OK"), "analysis_id": 1}
+        self.analysis_calls[cid] = self.analysis_calls.get(cid, 0) + 1
+        outcome = PLAN.get("analysis", {}).get(cid, "OK")
+        if isinstance(outcome, list):
+            outcome = outcome[min(self.analysis_calls[cid] - 1, len(outcome) - 1)]
+        if isinstance(outcome, dict):
+            return {"analysis_id": 1, **outcome}
+        return {"status": outcome, "analysis_id": 1,
+                "detail": "" if outcome == "OK" else f"synthetic {outcome}"}
     def do_produce(self, cid):
         self.calls += 1
         spec = PLAN["produce"][cid]
@@ -257,6 +285,30 @@ class WorkflowFallbackIntegrationTests(unittest.TestCase):
         self.assertEqual(live["failure_class"], "DELIVERED_PASS")
         self.assertEqual([row["candidate_id"] for row in live["transfer_rejections"]], ["a"])
         self.assertEqual(attempts["selected_candidate_id"], "b")
+
+    def test_fallback_retries_invalid_output_on_the_same_candidate(self):
+        completed, live, attempts = self.run_workflow({
+            "analysis": {"a": "OK", "b": ["INVALID_OUTPUT", "OK"]},
+            "produce": {"a": self.REJECT, "b": self.OK}})
+        self.assertEqual(completed.returncode, 0, completed.stderr[-1000:])
+        self.assertEqual(live["candidate_id"], "b")
+        b_attempts = [row for row in attempts["attempts"] if row["candidate_id"] == "b"]
+        self.assertEqual([row["status"] for row in b_attempts], ["INVALID_OUTPUT", "OK"])
+        self.assertFalse(b_attempts[0].get("same_candidate_retry", False))
+        self.assertTrue(b_attempts[1].get("same_candidate_retry", False))
+
+    def test_fallback_analysis_error_does_not_masquerade_as_transfer_rejection(self):
+        completed, live, attempts = self.run_workflow(
+            {"analysis": {"a": "OK", "b": "API_ERROR"},
+             "produce": {"a": self.REJECT}},
+            ids=("a", "b"))
+        self.assertEqual(completed.returncode, 5)
+        self.assertEqual(live["failure_class"], "SOURCE_ANALYSIS_FAILED")
+        self.assertEqual(live["analysis_status"], "API_ERROR")
+        self.assertEqual(live["last_production_report"]["failure_class"], "TRANSFER_REJECTED")
+        self.assertEqual(live["last_production_candidate_id"], "a")
+        self.assertEqual([row["candidate_id"] for row in live["transfer_rejections"]], ["a"])
+        self.assertEqual(attempts["last_analysis_failure"]["candidate_id"], "b")
 
     def test_all_rejected_returns_transfer_rejected_not_a_fake_pass(self):
         completed, live, _ = self.run_workflow({

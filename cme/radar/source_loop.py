@@ -20,6 +20,9 @@ class LoopResult:
     rejections: list = field(default_factory=list)
     skipped: list = field(default_factory=list)
     last_payload: object = None
+    last_event: str = ""
+    last_analysis_failure: dict | None = None
+    last_production_report: dict | None = None
 
 
 def analyze_with_invalid_output_retry(analyze, *, max_retries=1) -> list:
@@ -69,12 +72,21 @@ def run_source_loop(pool, *, limit, analyze, produce, skip_reason=None,
         result.attempts.append(attempt)
         result.last_payload = payload
         if attempt.get("status") != "OK":
+            result.last_event = "analysis_failure"
+            result.last_analysis_failure = {
+                "candidate_id": candidate_id,
+                "status": str(attempt.get("status") or "UNKNOWN").upper(),
+                "detail": str(attempt.get("detail") or "")[:500],
+            }
             if attempt.get("status") not in retryable:
                 break
             continue
         report = produce(source, payload)
         report = report if isinstance(report, dict) else {"failure_class": "INVALID_PRODUCTION_REPORT"}
         result.selected, result.payload, result.report = source, payload, report
+        result.last_production_report = report
+        result.last_event = "production"
+        result.last_analysis_failure = None
         if report.get("failure_class") == TRANSFER_REJECTED:
             result.rejections.append({
                 "candidate_id": candidate_id,
