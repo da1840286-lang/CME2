@@ -3,6 +3,7 @@ from pathlib import Path
 from cme.adapters.fal_http import make_fal_image
 from cme.adapters.http import check_status
 from cme.adapters.hf_space import extract_image_path, make_hf_space_image
+from cme.adapters.openrouter import ANALYST_SYSTEM
 from cme.providers import (CallLog, InfraError, ModelRef, ProviderCallError, ProviderPolicyError,
                            call_with_policy, check_model)
 from cme.qa import file_check
@@ -15,6 +16,12 @@ from cme.offer import load_offer
 
 ROOT = Path(__file__).resolve().parent.parent
 PNG = png_bytes()
+
+
+class AnalystPromptTests(unittest.TestCase):
+    def test_radar_analysis_writes_english_for_downstream_transfer_gate(self):
+        self.assertIn("Write all text values in English.", ANALYST_SYSTEM)
+        self.assertNotIn("Write all text values in Russian.", ANALYST_SYSTEM)
 
 
 class HTTPStatusDiagnosticTests(unittest.TestCase):

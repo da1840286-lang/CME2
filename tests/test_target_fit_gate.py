@@ -51,7 +51,11 @@ def source_context():
 
 
 def decision(transferable, evidence=None, account=None):
-    return {**(account if account is not None else gate_account()), **{
+    if account is None:
+        account = (gate_account() if transferable else
+                   gate_account(preserved=("hook", "problem", "intervention", "result"),
+                                dropped=("mechanism",)))
+    return {**account, **{
         "transferable": transferable,
         "abstract_mechanism": "Magnetic coupling connects portable storage directly to a phone",
         "target_native_mapping": "The target must demonstrate the same causal intervention, not just general convenience",
@@ -130,6 +134,124 @@ class TargetFitGateTests(unittest.TestCase):
         invalid = decision(True, ["Vacuum"])
         errors = validate_transfer_fit_decision(offer, invalid)
         self.assertTrue(any("shorter than 8 characters and must exactly match" in error for error in errors))
+
+    def test_gate_reconsiders_negative_verdict_that_preserves_its_mechanism(self):
+        source = {
+            "format": "radar_analysis_hypothesis",
+            "hook": "Compact 4-in-1 vacuum and blower for car interiors",
+            "buyer_problem": "Crumbs and dust remain in tight car interior spaces",
+            "product_intervention": "A cordless handheld vacuum removes visible debris",
+            "result_demo": "Crumbs are removed from the car carpet",
+            "mechanism_hypothesis": "A cordless vacuum removes debris from tight places",
+            "evidence": [
+                {"t_sec": 3.75, "observation": "Compact 4-in-1 vacuum shown for car cleaning."},
+                {"t_sec": 11.25, "observation": "Crumbs and dust are visible in tight car interior spaces."},
+                {"t_sec": 18.75, "observation": "A cordless handheld vacuum is positioned over a dirty car mat."},
+                {"t_sec": 26.25, "observation": "Прибор всасывает крошки с ковра салона автомобиля."},
+                {"t_sec": 33.75, "observation": "A narrow nozzle removes crumbs from the car carpet."},
+            ],
+        }
+        account = gate_account()
+        timestamps = {"hook": 3.75, "problem": 11.25, "mechanism": 18.75,
+                      "intervention": 26.25, "result": 33.75}
+        for item in account["source_elements_preserved"]:
+            item["evidence_t_sec"] = [timestamps[item["element"]]]
+
+        rejected_but_contradictory = {
+            **decision(False, ["cordless handheld car vacuum"], account=account),
+            "abstract_mechanism": "A cordless vacuum removes crumbs from tight car interior spaces",
+            "target_native_mapping": "Show the cordless target vacuum removing visible crumbs from a car mat",
+            "reason": (
+                "The source mechanism maps directly to this target product class, and ordinary "
+                "vacuuming can be demonstrated without unsupported 4-in-1 claims"
+            ),
+        }
+        corrected = {
+            **decision(True, ["cordless handheld car vacuum"], account=account),
+            "abstract_mechanism": "A cordless vacuum removes crumbs from tight car interior spaces",
+            "target_native_mapping": "Show the cordless target vacuum removing visible crumbs from a car mat",
+            "reason": (
+                "The target is a cordless handheld vacuum, so a visible dry-debris demo preserves "
+                "the source mechanism without claiming the unsupported blower feature"
+            ),
+        }
+        responses = [rejected_but_contradictory, corrected]
+        calls, trace = [], []
+
+        def call(request):
+            calls.append(request)
+            return {"atoms": [], "transfer_decision": responses[len(calls) - 1]}
+
+        result = request_transfer_fit(
+            target_offer(), "Show a practical car-interior cleaning result",
+            source, call, trace_out=trace,
+        )
+
+        self.assertTrue(result["transferable"])
+        self.assertEqual(len(calls), 2)
+        self.assertIn("NEGATIVE_TRANSFER_MECHANISM_CONTRADICTION",
+                      " ".join(calls[1]["previous_errors"]))
+        self.assertTrue(trace[0]["validation_errors"])
+        self.assertFalse(trace[1].get("validation_errors"))
+
+    def test_gate_reconsiders_denial_contradicted_by_explicit_russian_suction_evidence(self):
+        source = {
+            "format": "radar_analysis_hypothesis",
+            "hook": "Compact 4-in-1 car vacuum and blower",
+            "buyer_problem": "Crumbs and dust remain in tight car interior spaces",
+            "product_intervention": "A compact cordless vacuum/blower",
+            "result_demo": "The device removes crumbs from car carpet",
+            "mechanism_hypothesis": "A portable vacuum removes debris from tight places",
+            "transferability_hypothesis": "Test the visible cleaning mechanism on another cordless car vacuum",
+            "evidence": [
+                {"t_sec": 18.75, "observation": "A device with a transparent dust container is held above a dirty car mat."},
+                {"t_sec": 26.25, "observation": "Прибор всасывает крошки с ковра салона автомобиля."},
+                {"t_sec": 33.75, "observation": "A narrow nozzle cleans the metal door sill."},
+            ],
+        }
+        rejected_account = gate_account(preserved=(), dropped=("hook", "problem", "mechanism", "intervention", "result"))
+        rejected = {
+            **decision(False, account=rejected_account),
+            "reason": "The source evidence lacks any observation of the actual vacuum device or its suction action.",
+            "source_elements_dropped": [
+                {"element": element, "why": (
+                    "No source evidence frame shows the vacuum device or its suction action."
+                    if element == "mechanism" else
+                    "The source-specific 4-in-1 blower feature is not verified for the target."
+                    if element == "intervention" else
+                    f"The source {element} cannot be preserved without target support."
+                )}
+                for element in ("hook", "problem", "mechanism", "intervention", "result")
+            ],
+        }
+        corrected_account = gate_account(
+            preserved=("problem", "mechanism", "intervention", "result"),
+            dropped=("hook",),
+        )
+        for item in corrected_account["source_elements_preserved"]:
+            item["evidence_t_sec"] = [18.75] if item["element"] == "problem" else [26.25]
+        corrected = decision(True, ["Cordless car vacuum"], account=corrected_account)
+        responses = [
+            {"atoms": [], "transfer_decision": rejected},
+            {"atoms": [], "transfer_decision": corrected},
+        ]
+        calls, trace = [], []
+
+        def call(request):
+            calls.append(request)
+            return responses[len(calls) - 1]
+
+        result = request_transfer_fit(
+            target_offer(), "Create a target-native dry-debris demo", source, call, trace_out=trace,
+        )
+
+        self.assertTrue(result["transferable"])
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(any("SOURCE_EVIDENCE_CONTRADICTION" in e for e in trace[0]["validation_errors"]))
+        self.assertTrue(any("SOURCE_EVIDENCE_CONTRADICTION" in e for e in calls[1]["previous_errors"]))
+        rules = " ".join(calls[0]["rules"])
+        self.assertIn("source fields and observations may be Russian", rules)
+        self.assertIn("do not claim that action was never observed", rules)
 
     def test_invalid_target_fit_response_gets_one_correction_attempt(self):
         calls = []
