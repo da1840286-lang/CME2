@@ -744,6 +744,24 @@ def _source_evidence_contradiction(decision, source_transfer) -> str:
     )
 
 
+
+def _negative_gate_mechanism_contradiction(decision) -> str:
+    """A rejected transfer cannot simultaneously claim its core mechanism is preserved."""
+    if not isinstance(decision, dict) or decision.get("transferable") is not False:
+        return ""
+    preserved = decision.get("source_elements_preserved")
+    if not isinstance(preserved, list):
+        return ""
+    if not any(isinstance(item, dict) and item.get("element") == "mechanism" for item in preserved):
+        return ""
+    return (
+        "NEGATIVE_TRANSFER_MECHANISM_CONTRADICTION: transferable=false conflicts with "
+        "source_elements_preserved, which still marks the core mechanism as preserved. "
+        "If a separate essential incompatibility prevents transfer, drop the mechanism with "
+        "a specific explanation; otherwise reconsider the negative verdict. Do not reject a "
+        "compatible target merely because optional source features are unsupported."
+    )
+
 def request_transfer_fit(offer, brief: str, source_transfer: dict, call, trace_out=None, max_rounds: int = 2) -> dict:
     """Run the pre-generation fit gate, allowing one correction for invalid model output.
 
@@ -820,9 +838,12 @@ def request_transfer_fit(offer, brief: str, source_transfer: dict, call, trace_o
         else:
             decision = response.get("transfer_decision")
             errors = validate_transfer_fit_decision(offer, decision, source_transfer)
-            contradiction = _source_evidence_contradiction(decision, source_transfer)
-            if contradiction:
-                errors.append(contradiction)
+            for contradiction in (
+                _source_evidence_contradiction(decision, source_transfer),
+                _negative_gate_mechanism_contradiction(decision),
+            ):
+                if contradiction:
+                    errors.append(contradiction)
 
         if errors:
             record["validation_errors"] = errors
