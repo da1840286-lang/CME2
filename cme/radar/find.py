@@ -31,13 +31,13 @@ PERIODS = (7, 30, 180)
 
 LEGACY_ERROR = ""
 try:
-    from .legacy.discover import canonical_source_identity_keys, discover_and_rank
+    from .legacy.discover import _ordered_supply_queries, canonical_source_identity_keys, discover_and_rank
     from .legacy.discovery.tiktok_socialcrawl import SocialCrawlError, SocialCrawlTikTokTopAds
     from .socialcrawl_client import RetryingSocialCrawlTikTokTopAds
     from .legacy.verticals import classify_vertical
 except Exception as e:  # e.g. the 'requests' package is missing
     LEGACY_ERROR = f"{type(e).__name__}: {e}"
-    discover_and_rank = canonical_source_identity_keys = SocialCrawlTikTokTopAds = RetryingSocialCrawlTikTokTopAds = classify_vertical = None
+    discover_and_rank = canonical_source_identity_keys = _ordered_supply_queries = SocialCrawlTikTokTopAds = RetryingSocialCrawlTikTokTopAds = classify_vertical = None
 
     class SocialCrawlError(Exception):
         pass
@@ -88,10 +88,10 @@ def _retention_execution_plan(
             "targeted_board_calls_are_keyword_filtered": True,
             "retention_call_is_unfiltered": True,
             "rationale": (
-                "Reserve budget for up to two Sponsored Search target queries, one keyword-filtered Ads Top request for each "
-                "playback ranking, and one unfiltered include=retention request. Early stopping is preserved when "
-                "the eligible source queue fills; the retention response is "
-                "merged only by source identity; product relevance and source-quality gates remain unchanged."
+                "Complete up to two target Sponsored Search queries, one keyword-filtered Ads Top request for each requested "
+                "playback ranking, and one unfiltered include=retention request. The bounded request plan does not substitute "
+                "unrequested boards; the retention response is merged only by source identity; product relevance and "
+                "source-quality gates remain unchanged."
             ),
             "interpretation": (
                 "Retention points are not the exact play_2s_rate/play_6s_rate values used to sort Ads Top "
@@ -110,6 +110,7 @@ class _DiscoveryEvidenceTracker:
         "retention_order_by", "offer_context", "enforce_product_role",
         "product_role_gate", "candidate_provider_ids",
         "unfiltered_retention_identity_tokens", "unfiltered_retention_ad_ids",
+        "multi_sponsored_search_queries", "restricted_order_bys", "_sponsored_search_batch_consumed",
     })
     PERFORMANCE_FIELDS = (
         "ctr", "cvr", "play_2s_rate", "play_6s_rate", "views", "likes",
@@ -117,7 +118,9 @@ class _DiscoveryEvidenceTracker:
     )
     RETENTION_FIELDS = ("retention_2s", "retention_6s", "retention_curve")
 
-    def __init__(self, client, *, offer=None):
+    def __init__(
+        self, client, *, offer=None, multi_sponsored_search_queries=None, restrict_order_bys=None,
+    ):
         offer = offer if isinstance(offer, dict) else {}
         context = {
             "target_offer": str(offer.get("target_offer") or offer.get("name") or "").strip(),
@@ -125,6 +128,13 @@ class _DiscoveryEvidenceTracker:
             "product_category": str(offer.get("product_category") or "").strip(),
         }
         object.__setattr__(self, "_client", client)
+        object.__setattr__(self, "multi_sponsored_search_queries", list(dict.fromkeys(
+            str(query).strip() for query in (multi_sponsored_search_queries or []) if str(query).strip()
+        )))
+        object.__setattr__(self, "restricted_order_bys", list(dict.fromkeys(
+            str(value).strip() for value in (restrict_order_bys or []) if str(value).strip()
+        )))
+        object.__setattr__(self, "_sponsored_search_batch_consumed", False)
         object.__setattr__(self, "offer_context", context)
         object.__setattr__(self, "enforce_product_role", bool(
             context["product_type"] or context["product_category"] or context["target_offer"]))
@@ -143,6 +153,19 @@ class _DiscoveryEvidenceTracker:
             "raw_rows": 0, "accepted_rows": 0, "rejected_rows": 0,
             "rejected_by_reason": {}, "rejected_examples": [],
         })
+
+    @property
+    def ORDER_BY(self):
+        """Limit the legacy scheduler to requested performance boards for a dual-board run."""
+        available = set(getattr(self._client, "ORDER_BY", set()) or set())
+        restricted = set(self.restricted_order_bys or [])
+        if not restricted:
+            return available
+        # The legacy loop builds a general order list before its performance list.
+        # Keep its default token valid, but never advertise unrequested metrics.
+        if "for_you" in available:
+            restricted.add("for_you")
+        return restricted
 
     def __getattr__(self, name):
         return getattr(self._client, name)
@@ -313,6 +336,8 @@ class _DiscoveryEvidenceTracker:
             "credits_used": result.get("credits_used"), "request_id": result.get("request_id"),
             "provider_params": result.get("params") or {},
             "returned_ad_ids": [str(row.get("ad_id") or row.get("video_id") or "") for row in raw_rows[:12]],
+            "provider_ad_ids": [str(row.get("ad_id") or row.get("video_id") or "") for row in raw_rows
+                                if row.get("ad_id") or row.get("video_id")],
             "playback_metrics_returned": {
                 field: self._nonempty_count(raw_rows, field) for field in ("play_2s_rate", "play_6s_rate")
             },
@@ -343,11 +368,52 @@ class _DiscoveryEvidenceTracker:
         return bool(ad_id and ad_id in self.unfiltered_retention_ad_ids)
 
     def fetch_sponsored_search(self, **kwargs):
-        result = self._client.fetch_sponsored_search(**kwargs)
-        return self._remember(
-            result, source="sponsored_search", order_by="sponsored_search",
-            keyword=str(kwargs.get("query") or ""),
-        )
+        """Fetch the scheduled target queries as one legacy discovery batch.
+
+        The legacy controller stops its Sponsored Search lane as soon as any source
+        looks analysis-ready. For the dual-playback/retention plan that is too early:
+        final product-role and requested-metric gates have not run yet. Batch the two
+        bounded target queries before handing rows into the unchanged legacy ranker.
+        """
+        queries = list(self.multi_sponsored_search_queries or [])
+        if not queries or self._sponsored_search_batch_consumed:
+            result = self._client.fetch_sponsored_search(**kwargs)
+            return self._remember(
+                result, source="sponsored_search", order_by="sponsored_search",
+                keyword=str(kwargs.get("query") or ""),
+            )
+
+        self._sponsored_search_batch_consumed = True
+        combined_items, responses = [], []
+        total_credits = 0
+        for query in queries:
+            provider_kwargs = dict(kwargs)
+            provider_kwargs["query"] = query
+            response = self._client.fetch_sponsored_search(**provider_kwargs)
+            response = response if isinstance(response, dict) else {}
+            remembered = self._remember(
+                response, source="sponsored_search", order_by="sponsored_search", keyword=query,
+            )
+            for item in remembered.get("items") or []:
+                if isinstance(item, dict):
+                    item.setdefault("discovery_query", query)
+                    combined_items.append(item)
+            responses.append(response)
+            credits = response.get("credits_used")
+            if isinstance(credits, (int, float)):
+                total_credits += int(credits)
+
+        return {
+            "items": combined_items,
+            "credits_used": total_credits,
+            "request_id": next((row.get("request_id") for row in reversed(responses) if row.get("request_id")), None),
+            "params": {
+                "batched_queries": queries,
+                "provider_requests": len(responses),
+                "request_ids": [row.get("request_id") for row in responses if row.get("request_id")],
+            },
+            "raw_playback_field_diagnostics": {},
+        }
 
     def fetch_board(self, **kwargs):
         result = self._client.fetch_board(**kwargs)
@@ -1247,13 +1313,36 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
     search_terms = _rotate_query_terms(search_terms, prior_query_history)
     request["search_terms"] = list(search_terms)
     dual_playback_retention = retention_strategy.get("mode") == "targeted_playback_boards_plus_retention"
-    evidence_tracker = _DiscoveryEvidenceTracker(client, offer=offer)
+    targeted_search_queries = (
+        _ordered_supply_queries(
+            VERTICAL, search_terms, max_count=2, search_tags_dir=PRODUCT_SEARCH_TAGS_DIR,
+        )
+        if dual_playback_retention and _ordered_supply_queries else []
+    )
+    if dual_playback_retention:
+        request["targeted_sponsored_search_queries"] = list(targeted_search_queries)
+        request["provider_request_plan"] = {
+            "target_sponsored_search_queries": len(targeted_search_queries),
+            "targeted_playback_boards": list(performance_order_bys),
+            "unfiltered_retention_calls": 1,
+            "unrequested_performance_fallbacks": False,
+        }
+    evidence_tracker = _DiscoveryEvidenceTracker(
+        client, offer=offer,
+        multi_sponsored_search_queries=targeted_search_queries if dual_playback_retention else None,
+        restrict_order_bys=performance_order_bys if dual_playback_retention else None,
+    )
     try:
         ranked = discover_and_rank(
             client=evidence_tracker, country=country, period=period, keywords=search_terms, order_bys=order_bys,
             limit_per_board=limit_per_board, max_ads=max_ads,
-            max_requests=(max_requests - 1 if dual_playback_retention else max_requests),
-            keyword_boards=(2 if dual_playback_retention else max_requests),
+            # One internal Sponsored Search slot represents the two provider queries
+            # batched above; reserve exactly one internal call for each requested board.
+            max_requests=(3 if dual_playback_retention else max_requests),
+            keyword_boards=(1 if dual_playback_retention else max_requests),
+            # Keep the legacy scheduler from ending the bounded batch early merely
+            # because pre-gate scoring marks enough raw sources as analysis-ready.
+            source_queue_size=(500 if dual_playback_retention else None),
             vertical=VERTICAL, target_offer=offer["target_offer"],
             product_type=offer["product_type"] or offer["product_category"],
             prelander=offer["prelander"], landing_page=offer["landing_page"],
@@ -1299,7 +1388,65 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
         ) from exc
     stats = getattr(client, "last_discovery_stats", {}) or {}
     if dual_playback_retention:
-        calls = list(stats.get("calls") or [])
+        # Replace the legacy controller's internal-call view with the actual provider
+        # request ledger: the batched search call above represents multiple real requests.
+        observed_calls = [call for call in evidence_tracker.calls if call.get("candidate_lane")]
+        if observed_calls:
+            provider_calls, seen_provider_ids = [], set()
+            for observed in observed_calls:
+                provider_ids = list(observed.get("provider_ad_ids") or [])
+                new_unique = len(set(provider_ids) - seen_provider_ids)
+                seen_provider_ids.update(provider_ids)
+                provider_calls.append({
+                    "call": len(provider_calls) + 1,
+                    "source": observed.get("source"),
+                    "order_by": observed.get("order_by"),
+                    "keyword": observed.get("keyword") or "",
+                    "returned": int(observed.get("provider_rows_returned") or 0),
+                    "new_unique": new_unique,
+                    "unique_after": len(seen_provider_ids),
+                    "credits_used": observed.get("credits_used"),
+                    "request_id": observed.get("request_id"),
+                    "provider_params": observed.get("provider_params") or {},
+                    "returned_ad_ids": list(observed.get("returned_ad_ids") or []),
+                    "playback_metrics_returned": dict(observed.get("playback_metrics_returned") or {}),
+                    "retention_requested": bool(observed.get("retention_requested")),
+                    "retention_returned": dict(observed.get("retention_returned") or {}),
+                    "raw_playback_field_diagnostics": observed.get("raw_playback_field_diagnostics") or {},
+                })
+            stats["calls"] = provider_calls
+            calls = list(stats.get("calls") or [])
+            stats["planned_requests"] = len(provider_calls)
+            stats["executed_requests"] = len(provider_calls)
+            stats["request_budget"] = requested_max_requests
+            stats["search_queries_executed"] = [
+                call.get("keyword", "") for call in observed_calls if call.get("source") == "sponsored_search"
+            ]
+            stats["request_sources"] = [call.get("source") for call in observed_calls]
+            stats["total_credits_reported"] = sum(
+                int(call.get("credits_used") or 0) for call in observed_calls
+                if isinstance(call.get("credits_used"), (int, float))
+            )
+            strategy = stats.setdefault("discovery_strategy", {})
+            strategy.update({
+                "supply_search_budget": len(targeted_search_queries),
+                "target_keyword_budget": len(targeted_search_queries),
+                "keyword_boards": len(targeted_search_queries),
+                "supply_queries_planned": list(targeted_search_queries),
+                "supply_queries_executed": [
+                    call.get("keyword", "") for call in observed_calls if call.get("source") == "sponsored_search"
+                ],
+                "performance_budget": len(performance_order_bys),
+                "reserved_performance_budget": len(performance_order_bys),
+                "fallback_broad_budget": 0,
+                "performance_calls_used": sum(1 for call in observed_calls if call.get("source") == "ads_top"),
+                "query_failover_policy": (
+                    "complete bounded target search batch, then exactly the requested performance boards; "
+                    "no unrequested CTR/CVR or engagement fallback boards"
+                ),
+            })
+        else:
+            calls = list(stats.get("calls") or [])
         enrichment_calls = [
             call for call in evidence_tracker.calls
             if not call.get("candidate_lane") and call.get("retention_requested")
@@ -1320,14 +1467,23 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
     _enrich_selection_diagnostics(stats, evidence_tracker)
     candidates_before_final_gates = [to_candidate(item, request, stamp, "found") for item in ranked]
     candidates, final_gates = _apply_product_selection_gates(candidates_before_final_gates, request)
+    if dual_playback_retention:
+        accepted_before_output_limit = len(candidates)
+        candidates = candidates[:max_ads]
+        final_gates["product_selection"]["accepted_before_output_limit"] = accepted_before_output_limit
+        final_gates["product_selection"]["output_limit"] = max_ads
+        final_gates["product_selection"]["returned_candidates"] = len(candidates)
+        final_gates["product_selection"]["trimmed_after_gates"] = max(
+            0, accepted_before_output_limit - len(candidates)
+        )
     stats["product_selection_gate"] = final_gates["product_selection"]
     stats["requested_performance_evidence_gate"] = final_gates["requested_performance"]
     strategy = stats.setdefault("discovery_strategy", {})
     executed_calls = stats.get("calls") or []
     if retention_strategy.get("mode") == "targeted_playback_boards_plus_retention":
         strategy["request_policy"] = (
-            "Bounded target Sponsored Search plus keyword-filtered playback-board discovery, followed by one separate "
-            "unfiltered include=retention request. Early stopping when the eligible source queue fills is preserved; "
+            "Complete the bounded target Sponsored Search batch, then run exactly the requested keyword-filtered playback boards, "
+            "followed by one separate unfiltered include=retention request. No unrequested performance board is substituted; "
             "retention adds evidence only to shortlisted matching identities and does not relax selection or Target-Fit gates."
         )
     else:
@@ -1339,7 +1495,10 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
     strategy["supply_lane"] = "tiktok_sponsored_search_plus_ads_top_performance"
     strategy["selection_mode"] = "product"
     strategy["supply_search_calls_used"] = sum(1 for call in executed_calls if call.get("source") == "sponsored_search")
-    strategy["performance_calls_used"] = sum(1 for call in executed_calls if call.get("source") == "ads_top")
+    strategy["performance_calls_used"] = sum(
+        1 for call in executed_calls
+        if call.get("source") == "ads_top" and not call.get("retention_requested")
+    )
     diagnostics = _find_diagnostics(stats, len(candidates))
     diagnostics["product_source_role_gate"] = stats.get("product_source_role_gate") or {}
     diagnostics["product_selection_gate"] = stats.get("product_selection_gate") or {}

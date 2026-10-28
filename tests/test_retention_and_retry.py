@@ -323,8 +323,9 @@ class FetchPlanRetentionTests(unittest.TestCase):
                 "include_retention": True,
             }, client=client, now="2026-10-28T00:00:00Z")
         kwargs = discover_mock.call_args.kwargs
-        self.assertEqual(kwargs["max_requests"], 4)
-        self.assertEqual(kwargs["keyword_boards"], 2)
+        self.assertEqual(kwargs["max_requests"], 3)
+        self.assertEqual(kwargs["keyword_boards"], 1)
+        self.assertEqual(kwargs["source_queue_size"], 500)
         self.assertFalse(kwargs["include_retention"])
         self.assertEqual(len(client.calls), 1)
         self.assertEqual(client.calls[0]["order_by"], "play_6s_rate")

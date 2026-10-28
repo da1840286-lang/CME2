@@ -180,6 +180,66 @@ class VendoredCodeIsTheRealOne(Env):
             self.assertIn("play_6s_rate", matched_paths)
             self.assertTrue(call["provider_params"].get("order_by") in {"play_6s_rate", "play_2s_rate"})
 
+    def test_dual_playback_retention_runs_both_target_searches_and_only_requested_boards(self):
+        calls = []
+        item = synthetic_post(
+            "dual-board-target", brand="UNKNOWN",
+            title="Shop now: cordless car vacuum removes crumbs",
+            ctr=None, cvr=None, views=311000, duration=28,
+        )
+        item["post"]["author"]["username"] = "UNKNOWN"
+        item["post"]["author"]["display_name"] = ""
+        item["post"]["ext"]["ad"].update({
+            "ctr": None, "cvr": None, "objective": "", "landing_page_url": "",
+        })
+        item["post"]["content"]["text"] = "Shop now: cordless car vacuum removes crumbs"
+
+        with self.fake_find([item], calls):
+            result = F.run_find(
+                {"country": "US", "period": 30, "max_requests": 5, "max_ads": 10,
+                 "keywords": ["car vacuum"],
+                 "performance_order_bys": ["play_6s_rate", "play_2s_rate"],
+                 "include_retention": True,
+                 "offer": {"name": "Fanttik V8 Mate Cordless Car Vacuum",
+                           "product_type": "cordless handheld car vacuum"}},
+                client=T.SocialCrawlTikTokTopAds(api_key="TESTKEY"),
+            )
+
+        search_calls = [(url, params) for url, params in calls if url == T.SocialCrawlTikTokTopAds.SEARCH_URL]
+        top_calls = [(url, params) for url, params in calls if url == T.SocialCrawlTikTokTopAds.BASE_URL]
+        self.assertEqual(len(search_calls), 2)
+        self.assertEqual(len({params.get("query") for _, params in search_calls}), 2)
+        self.assertEqual(
+            [params.get("order_by") for _, params in top_calls],
+            ["play_6s_rate", "play_2s_rate", "play_6s_rate"],
+        )
+        self.assertNotIn("ctr", [params.get("order_by") for _, params in top_calls])
+        self.assertNotIn("cvr", [params.get("order_by") for _, params in top_calls])
+        self.assertTrue(top_calls[0][1].get("keyword"))
+        self.assertTrue(top_calls[1][1].get("keyword"))
+        self.assertEqual(top_calls[2][1].get("include"), "retention")
+        self.assertNotIn("keyword", top_calls[2][1])
+        self.assertNotIn("industry", top_calls[2][1])
+
+        self.assertEqual(result["stats"]["executed_requests"], 5)
+        self.assertEqual(
+            [call["source"] for call in result["stats"]["calls"]],
+            ["sponsored_search", "sponsored_search", "ads_top", "ads_top", "ads_top"],
+        )
+        self.assertEqual(
+            [call["order_by"] for call in result["stats"]["calls"] if call["source"] == "ads_top"],
+            ["play_6s_rate", "play_2s_rate", "play_6s_rate"],
+        )
+        strategy = result["stats"]["discovery_strategy"]
+        self.assertEqual(strategy["supply_search_budget"], 2)
+        self.assertEqual(strategy["performance_budget"], 2)
+        self.assertEqual(
+            strategy["supply_queries_executed"],
+            [params["query"] for _, params in search_calls],
+        )
+        self.assertFalse(result["request"]["provider_request_plan"]["unrequested_performance_fallbacks"])
+
+
     def test_find_uses_product_terms_and_reports_raw_rows_rejected_by_source_gate(self):
         calls = []
         def fake_get(url, params=None, headers=None, timeout=None):
