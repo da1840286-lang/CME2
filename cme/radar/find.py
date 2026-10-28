@@ -87,8 +87,9 @@ def _retention_execution_plan(
             "targeted_board_calls_are_keyword_filtered": True,
             "retention_call_is_unfiltered": True,
             "rationale": (
-                "Reserve two Sponsored Search target queries, one keyword-filtered Ads Top request for each "
-                "playback ranking, and one unfiltered include=retention request. The retention response is "
+                "Reserve budget for up to two Sponsored Search target queries, one keyword-filtered Ads Top request for each "
+                "playback ranking, and one unfiltered include=retention request. Early stopping is preserved when "
+                "the eligible source queue fills; the retention response is "
                 "merged only by source identity; product relevance and source-quality gates remain unchanged."
             ),
             "interpretation": (
@@ -173,6 +174,9 @@ class _DiscoveryEvidenceTracker:
         for position, row in enumerate(rows, start=1):
             tokens = self._identity_tokens(row)
             values = self._row_values(row)
+            if not retention_requested:
+                for field in self.RETENTION_FIELDS + ("retention_curve_invalid_points",):
+                    values.pop(field, None)
             ad_id = str(row.get("ad_id") or row.get("video_id") or "").strip()
             for token in tokens:
                 bucket = self.values_by_identity.setdefault(token, {})
@@ -188,7 +192,7 @@ class _DiscoveryEvidenceTracker:
                         position_key = str(order_by)
                     positions.setdefault(position_key, position)
                 provenance = row.get("retention_provenance")
-                if isinstance(provenance, dict) and provenance:
+                if retention_requested and isinstance(provenance, dict) and provenance:
                     provenance_bucket = self.provenance_by_identity.setdefault(token, {})
                     for field, value in provenance.items():
                         if value:
@@ -286,7 +290,12 @@ def _merge_discovery_evidence(ranked, tracker):
         current_provenance = record.get("retention_provenance")
         current_provenance = dict(current_provenance) if isinstance(current_provenance, dict) else {}
         for field, value in provenance.items():
-            if value:
+            if not value:
+                continue
+            if values.get(field) not in (None, "", []):
+                # A validated value from this retention request supersedes stale/invalid provenance.
+                current_provenance[field] = value
+            else:
                 current_provenance.setdefault(field, value)
         if current_provenance:
             record["retention_provenance"] = current_provenance
@@ -364,7 +373,7 @@ def to_candidate(item: dict, request: dict, collected_at: str, origin: str, sour
         if value is not None and value != "":
             field_source = "socialcrawl:tiktok_ads_top" if name in retention_metric_names else src
             field_boards = (
-                retention_boards or retention_collection_source or boards
+                retention_collection_source or retention_boards or boards
             ) if name in retention_metric_names else boards
             metrics[name] = {"value": value, "source": field_source, "boards": field_boards, "collected_at": collected_at}
             if name in retention_provenance:
@@ -1056,9 +1065,11 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
         ],
         "returned_rows_with_retention": retention_returned,
         "selected_candidates_with_retention": selected_with_retention,
-        "selected_candidates_from_retention_board": sum(
-            1 for candidate in candidates
-            if any(board in {"play_2s_rate", "play_6s_rate"} for board in ((candidate.get("why") or {}).get("boards") or []))
+        "selected_candidates_from_retention_board": (
+            0 if retention_strategy.get("mode") == "targeted_playback_boards_plus_retention" else sum(
+                1 for candidate in candidates
+                if any(board in {"play_2s_rate", "play_6s_rate"} for board in ((candidate.get("why") or {}).get("boards") or []))
+            )
         ),
         "curve_schema": [
             ((call.get("raw_playback_field_diagnostics") or {}).get("retention_curve_schema") or {})

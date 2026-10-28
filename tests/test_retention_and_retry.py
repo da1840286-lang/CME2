@@ -250,6 +250,7 @@ class FetchPlanRetentionTests(unittest.TestCase):
             "discovery_source": "tiktok_sponsored_search",
             "discovery_boards": ["sponsored_search", "play_6s_rate", "play_2s_rate"],
             "discovery_keywords": ["car vacuum"],
+            "retention_provenance": {"retention_2s": "post.ext.ad.retention_2s:invalid"},
             "vertical_relevance": {"status": "DIRECT", "classification": "DIRECT", "reason": "synthetic"},
             "product_relevance": {"status": "MATCH", "confidence": "HIGH", "score": 95, "reason": "synthetic"},
         }
@@ -336,6 +337,12 @@ class FetchPlanRetentionTests(unittest.TestCase):
         self.assertEqual(result["stats"]["retention_selection"]["retention_calls"], 1)
         self.assertEqual(result["candidates"][0]["retention_evidence"]["status"], "AVAILABLE")
         self.assertEqual(result["candidates"][0]["metrics"]["retention_2s"]["value"], 0.74)
+        self.assertEqual(
+            result["candidates"][0]["metrics"]["retention_2s"]["provenance"], "post.ext.ad.retention_2s"
+        )
+        self.assertEqual(
+            result["candidates"][0]["metrics"]["retention_2s"]["boards"], ["include=retention"]
+        )
         self.assertEqual(
             result["candidates"][0]["why"]["discovery_board_positions"]["play_6s_rate|retention"], 1
         )

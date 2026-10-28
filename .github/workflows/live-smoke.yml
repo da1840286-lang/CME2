@@ -30,7 +30,7 @@ on:
         required: true
         default: "30"
       find_requests:
-        description: "Hard cap on SocialCrawl requests. With playback_both plus retention, set 5 to reserve two Sponsored Search queries, two keyword-filtered Ads Top boards, and one unfiltered retention call. Source-commercial and Target-Fit remain separate downstream gates."
+        description: "Hard cap on SocialCrawl requests. With playback_both plus retention, set 5 to budget for up to two Sponsored Search queries, two keyword-filtered Ads Top boards, and one unfiltered retention call. Source-commercial and Target-Fit remain separate downstream gates."
         type: number
         required: true
         default: 4
