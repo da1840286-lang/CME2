@@ -101,6 +101,58 @@ def _retention_execution_plan(
     return effective, effective_max_requests, strategy
 
 
+def _target_board_keyword(offer: dict, fallback: str = "") -> str:
+    """Prefer distinctive target brand/model tokens over generic product-type words."""
+    offer = offer if isinstance(offer, dict) else {}
+    target = " ".join(str(offer.get("target_offer") or offer.get("name") or "").split())
+    product_type = " ".join(str(offer.get("product_type") or offer.get("product_category") or "").split())
+    product_tokens = {token.casefold() for token in re.findall(r"[a-z0-9]+", product_type, flags=re.IGNORECASE)}
+    target_tokens = re.findall(r"[a-z0-9]+", target, flags=re.IGNORECASE)
+    specific_tokens = [token for token in target_tokens if token.casefold() not in product_tokens]
+    if specific_tokens:
+        return " ".join(specific_tokens)
+    return target or product_type or " ".join(str(fallback or "").split())
+
+
+def _retention_enrichment_policy(calls: list[dict]) -> dict:
+    """Only buy unfiltered retention data if targeted boards found target-product ads."""
+    target_calls = [
+        call for call in (calls or [])
+        if isinstance(call, dict)
+        and call.get("candidate_lane")
+        and call.get("source") == "ads_top"
+        and call.get("order_by") in {"play_2s_rate", "play_6s_rate"}
+        and bool(str(call.get("keyword") or "").strip())
+        and not call.get("retention_requested")
+    ]
+    if not target_calls:
+        return {
+            "should_run": False,
+            "reason": "NO_TARGETED_PLAYBACK_BOARD_CALLS",
+            "targeted_board_calls": 0,
+            "target_role_match_count": 0,
+        }
+    matched = 0
+    for call in target_calls:
+        try:
+            matched += max(0, int(call.get("target_role_match_count", call.get("eligible_rows_returned", 0)) or 0))
+        except (TypeError, ValueError):
+            continue
+    if matched == 0:
+        return {
+            "should_run": False,
+            "reason": "NO_TARGET_PRODUCT_ROWS_ON_TARGETED_PLAYBACK_BOARDS",
+            "targeted_board_calls": len(target_calls),
+            "target_role_match_count": 0,
+        }
+    return {
+        "should_run": True,
+        "reason": "TARGET_PRODUCT_ROWS_FOUND",
+        "targeted_board_calls": len(target_calls),
+        "target_role_match_count": matched,
+    }
+
+
 class _DiscoveryEvidenceTracker:
     """Observe provider rows without changing the vendored discovery contract or its gates."""
 
@@ -212,8 +264,8 @@ class _DiscoveryEvidenceTracker:
         return sum(1 for row in rows if isinstance(row, dict) and row.get(field) not in (None, "", []))
 
     def _remember(
-        self, result, *, source, order_by="", keyword="", retention_requested=False,
-        unfiltered_retention=False, candidate_lane=True,
+        self, result, *, source, order_by="", keyword="", requested_keyword=None,
+        retention_requested=False, unfiltered_retention=False, candidate_lane=True,
     ):
         """Record raw provider evidence, filtering product discovery before the legacy selector."""
         result = result if isinstance(result, dict) else {}
@@ -327,6 +379,11 @@ class _DiscoveryEvidenceTracker:
         call = {
             "call": len(self.calls) + 1, "source": source, "order_by": order_by,
             "keyword": keyword or "",
+            "requested_keyword": (
+                str(requested_keyword or "")
+                if requested_keyword is not None and str(requested_keyword or "") != str(keyword or "")
+                else ""
+            ),
             "returned": len(raw_rows),
             "provider_rows_returned": len(raw_rows),
             "eligible_rows_returned": eligible_rows if candidate_lane else None,
@@ -349,6 +406,15 @@ class _DiscoveryEvidenceTracker:
             "raw_playback_field_diagnostics": result.get("raw_playback_field_diagnostics") or {},
             "provider_response_meta": result.get("provider_response_meta") or {},
         }
+        if source == "ads_top" and order_by in {"play_2s_rate", "play_6s_rate"} and keyword and candidate_lane and not retention_requested:
+            call["target_role_match_count"] = eligible_rows
+            call["target_role_match_status"] = (
+                "TARGET_ROLE_MATCH_FOUND" if eligible_rows else "NO_TARGET_ROLE_MATCH_IN_RESPONSE"
+            )
+            if raw_rows and not eligible_rows:
+                call["target_query_relevance_warning"] = (
+                    "The targeted playback board returned rows, but none passed the target-product source-role gate."
+                )
         self.calls.append(call)
         result = dict(result)
         result["items"] = rows_for_legacy
@@ -417,12 +483,25 @@ class _DiscoveryEvidenceTracker:
         }
 
     def fetch_board(self, **kwargs):
-        result = self._client.fetch_board(**kwargs)
+        requested_keyword = str(kwargs.get("keyword") or "")
+        provider_kwargs = dict(kwargs)
+        order_by = str(kwargs.get("order_by") or "")
         retention_requested = bool(kwargs.get("include_retention"))
-        unfiltered_retention = retention_requested and not kwargs.get("keyword") and not kwargs.get("industry")
+
+        # The legacy scheduler feeds its first generic supply term to both playback
+        # boards. Prefer the actual target brand/model so the provider filters the
+        # requested product, rather than silently repeating a broad category query.
+        if order_by in {"play_2s_rate", "play_6s_rate"} and not retention_requested:
+            target_keyword = _target_board_keyword(self.offer_context, requested_keyword)
+            if target_keyword:
+                provider_kwargs["keyword"] = target_keyword
+
+        effective_keyword = str(provider_kwargs.get("keyword") or "")
+        result = self._client.fetch_board(**provider_kwargs)
+        unfiltered_retention = retention_requested and not provider_kwargs.get("keyword") and not provider_kwargs.get("industry")
         return self._remember(
-            result, source="ads_top", order_by=str(kwargs.get("order_by") or ""),
-            keyword=str(kwargs.get("keyword") or ""),
+            result, source="ads_top", order_by=order_by,
+            keyword=effective_keyword, requested_keyword=requested_keyword,
             retention_requested=retention_requested, unfiltered_retention=unfiltered_retention,
         )
 
@@ -1325,7 +1404,10 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
         request["provider_request_plan"] = {
             "target_sponsored_search_queries": len(targeted_search_queries),
             "targeted_playback_boards": list(performance_order_bys),
+            "targeted_board_keyword": _target_board_keyword(offer, user_keywords[0] if user_keywords else ""),
+            "unfiltered_retention_calls_planned": 1,
             "unfiltered_retention_calls": 1,
+            "retention_policy": "run only if targeted playback boards contain target-product rows",
             "unrequested_performance_fallbacks": False,
         }
     evidence_tracker = _DiscoveryEvidenceTracker(
@@ -1333,6 +1415,11 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
         multi_sponsored_search_queries=targeted_search_queries if dual_playback_retention else None,
         restrict_order_bys=performance_order_bys if dual_playback_retention else None,
     )
+    retention_enrichment_execution = {
+        "requested": bool(dual_playback_retention),
+        "executed": False,
+        "reason": "NOT_REQUESTED" if not dual_playback_retention else "PENDING_TARGET_BOARD_RESULTS",
+    }
     try:
         ranked = discover_and_rank(
             client=evidence_tracker, country=country, period=period, keywords=search_terms, order_bys=order_bys,
@@ -1353,18 +1440,37 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
             performance_order_bys=performance_order_bys,
             include_retention=(False if dual_playback_retention else include_retention))
         if dual_playback_retention:
-            # This is a separate, unfiltered data-enrichment request. Its rows can add
-            # retention only to identities already shortlisted by the gated discovery pass.
-            evidence_tracker.fetch_retention_enrichment(
-                country=country,
-                period=period,
-                order_by=retention_strategy["retention_request_order_by"],
-                keyword=None,
-                industry=None,
-                ad_language="en",
-                limit=limit_per_board,
-                include_retention=True,
-            )
+            # Retention is enrichment only; don't spend the extra 20+ credits when the
+            # targeted performance boards returned no target-product ads to enrich.
+            retention_policy = _retention_enrichment_policy(evidence_tracker.calls)
+            retention_strategy["retention_calls_planned"] = int(retention_strategy.get("retention_calls") or 0)
+            retention_strategy["retention_calls_executed"] = int(bool(retention_policy["should_run"]))
+            request_plan = request.get("provider_request_plan") or {}
+            request_plan["unfiltered_retention_calls_planned"] = retention_strategy["retention_calls_planned"]
+            request_plan["unfiltered_retention_calls"] = int(bool(retention_policy["should_run"]))
+            request_plan["retention_execution"] = dict(retention_policy)
+            if retention_policy["should_run"]:
+                evidence_tracker.fetch_retention_enrichment(
+                    country=country,
+                    period=period,
+                    order_by=retention_strategy["retention_request_order_by"],
+                    keyword=None,
+                    industry=None,
+                    ad_language="en",
+                    limit=limit_per_board,
+                    include_retention=True,
+                )
+                retention_strategy["retention_calls"] = 1
+                retention_strategy["retention_call_skipped_reason"] = ""
+                retention_enrichment_execution = {
+                    **retention_policy, "requested": True, "executed": True,
+                }
+            else:
+                retention_strategy["retention_calls"] = 0
+                retention_strategy["retention_call_skipped_reason"] = retention_policy["reason"]
+                retention_enrichment_execution = {
+                    **retention_policy, "requested": True, "executed": False,
+                }
     except SocialCrawlError as exc:
         raise FindUnavailable(
             "UNAVAILABLE",
@@ -1403,6 +1509,10 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
                     "source": observed.get("source"),
                     "order_by": observed.get("order_by"),
                     "keyword": observed.get("keyword") or "",
+                    "requested_keyword": observed.get("requested_keyword") or "",
+                    "target_role_match_count": observed.get("target_role_match_count"),
+                    "target_role_match_status": observed.get("target_role_match_status") or "",
+                    "target_query_relevance_warning": observed.get("target_query_relevance_warning") or "",
                     "returned": int(observed.get("provider_rows_returned") or 0),
                     "new_unique": new_unique,
                     "unique_after": len(seen_provider_ids),
@@ -1465,6 +1575,7 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
             if isinstance(credits, (int, float)):
                 stats["total_credits_reported"] = int(stats.get("total_credits_reported") or 0) + int(credits)
     stats = _attach_tracker_diagnostics(stats, evidence_tracker)
+    stats["retention_enrichment"] = dict(retention_enrichment_execution)
     _merge_discovery_evidence(ranked, evidence_tracker)
     _enrich_selection_diagnostics(stats, evidence_tracker)
     candidates_before_final_gates = [to_candidate(item, request, stamp, "found") for item in ranked]
@@ -1483,11 +1594,18 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
     strategy = stats.setdefault("discovery_strategy", {})
     executed_calls = stats.get("calls") or []
     if retention_strategy.get("mode") == "targeted_playback_boards_plus_retention":
-        strategy["request_policy"] = (
-            "Complete the bounded target Sponsored Search batch, then run exactly the requested keyword-filtered playback boards, "
-            "followed by one separate unfiltered include=retention request. No unrequested performance board is substituted; "
-            "retention adds evidence only to shortlisted matching identities and does not relax selection or Target-Fit gates."
-        )
+        if retention_enrichment_execution.get("executed"):
+            strategy["request_policy"] = (
+                "Complete the bounded target Sponsored Search batch and requested target-product playback boards, then "
+                "run one separate unfiltered retention enrichment request only because target-product rows were found. "
+                "Retention does not replace playback-rate evidence or relax Selection/Target-Fit gates."
+            )
+        else:
+            strategy["request_policy"] = (
+                "Complete the bounded target Sponsored Search batch and requested target-product playback boards. "
+                "Skip the paid unfiltered retention request when no target-product rows pass the targeted board role gate; "
+                "do not substitute engagement proxies or relax Selection/Target-Fit gates."
+            )
     else:
         strategy["request_policy"] = (
             "Bounded Sponsored Search plus reserved Ads Top performance queries. FIND shortlists by product-type match "
@@ -1538,6 +1656,7 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
     diagnostics["product_source_role_gate"] = stats.get("product_source_role_gate") or {}
     diagnostics["product_selection_gate"] = stats.get("product_selection_gate") or {}
     diagnostics["requested_performance_evidence_gate"] = stats.get("requested_performance_evidence_gate") or {}
+    diagnostics["retention_enrichment"] = stats.get("retention_enrichment") or {}
     diagnostics["performance_metric_availability"] = stats.get("performance_metric_availability") or {}
     diagnostics["provider_query_diagnostics"] = [
         {
@@ -1545,6 +1664,10 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
             "source": call.get("source"),
             "order_by": call.get("order_by"),
             "keyword": call.get("keyword") or "",
+            "requested_keyword": call.get("requested_keyword") or "",
+            "target_role_match_count": call.get("target_role_match_count"),
+            "target_role_match_status": call.get("target_role_match_status") or "",
+            "target_query_relevance_warning": call.get("target_query_relevance_warning") or "",
             "returned": call.get("returned", 0),
             "credits_used": call.get("credits_used"),
             "request_id": call.get("request_id"),
