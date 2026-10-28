@@ -233,6 +233,9 @@ class RetryingSocialCrawlTikTokTopAds(SocialCrawlTikTokTopAds):
         retention_requested = str(params.get("include") or "").strip().lower() == "retention"
         if not retention_requested:
             return super()._request_json(url, params)
+        # Retention uses its own request path, so it must not inherit the cache
+        # policy from the preceding keyword-filtered playback-board request.
+        self.last_cache_control_requested = None
         if not self.api_key:
             raise SocialCrawlError("SOCIALCRAWL_API_KEY is not configured")
 

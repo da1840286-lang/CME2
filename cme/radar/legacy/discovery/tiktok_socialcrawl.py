@@ -72,6 +72,7 @@ class SocialCrawlTikTokTopAds:
         self.api_key = api_key or os.getenv("SOCIALCRAWL_API_KEY", "")
         self.timeout = timeout
         self.last_discovery_stats: dict[str, Any] = {}
+        self.last_cache_control_requested: str | None = None
 
     @property
     def enabled(self) -> bool:
@@ -81,10 +82,23 @@ class SocialCrawlTikTokTopAds:
         if not self.api_key:
             raise SocialCrawlError("SOCIALCRAWL_API_KEY is not configured")
         idem = str(uuid.uuid4())
+        headers = {"x-api-key": self.api_key, "Idempotency-Key": idem}
+        # Targeted playback-board queries gate the product shortlist. Bypass the
+        # shared cache so a cached or stale unfiltered board cannot masquerade as a
+        # successful response to a requested keyword.
+        force_fresh = (
+            url.rstrip("/") == self.BASE_URL
+            and params.get("order_by") in RETENTION_BOARDS
+            and bool(str(params.get("keyword") or "").strip())
+            and not params.get("include")
+        )
+        if force_fresh:
+            headers["Cache-Control"] = "no-cache"
+        self.last_cache_control_requested = headers.get("Cache-Control")
         r = requests.get(
             url,
             params=params,
-            headers={"x-api-key": self.api_key, "Idempotency-Key": idem},
+            headers=headers,
             timeout=self.timeout,
         )
         try:
@@ -169,6 +183,86 @@ class SocialCrawlTikTokTopAds:
             "matched_field_occurrences": sum(path_counts.values()),
             "examples": examples,
             "key_shapes": key_shapes[:3],
+        }
+
+    @staticmethod
+    def _provider_response_diagnostics(
+        payload: dict[str, Any], raw_items: list[dict[str, Any]], *,
+        request_cache_control: str | None = None,
+    ) -> dict[str, Any]:
+        """Keep bounded provider metadata needed to diagnose filters, cache and partial rows."""
+        payload = payload if isinstance(payload, dict) else {}
+        data = payload.get("data")
+        data = data if isinstance(data, dict) else {}
+
+        def bounded(value: Any, depth: int = 0) -> Any:
+            if value is None or isinstance(value, (bool, int, float)):
+                return value
+            if isinstance(value, str):
+                return value[:500]
+            if depth >= 3:
+                return f"<{type(value).__name__}>"
+            if isinstance(value, dict):
+                return {
+                    str(key)[:80]: bounded(child, depth + 1)
+                    for key, child in list(value.items())[:12]
+                }
+            if isinstance(value, (list, tuple)):
+                return [bounded(child, depth + 1) for child in list(value)[:10]]
+            return str(value)[:300]
+
+        warnings = data.get("_warnings")
+        warning_path = "data._warnings" if warnings is not None else ""
+        if warnings is None and payload.get("_warnings") is not None:
+            warnings = payload.get("_warnings")
+            warning_path = "_warnings"
+        if warnings is None:
+            warnings = []
+        elif not isinstance(warnings, list):
+            warnings = [warnings]
+
+        pagination = payload.get("pagination")
+        pagination = pagination if isinstance(pagination, dict) else {}
+        pagination_fields = ("has_more", "page_size", "typical_page_size", "next_page_credits")
+        meta = payload.get("meta")
+        meta_hint = meta.get("hint") if isinstance(meta, dict) else None
+
+        samples = []
+        for item in (raw_items if isinstance(raw_items, list) else [])[:5]:
+            if not isinstance(item, dict):
+                continue
+            post = item.get("post") if isinstance(item.get("post"), dict) else item
+            ext = post.get("ext") if isinstance(post.get("ext"), dict) else {}
+            ad = ext.get("ad") if isinstance(ext.get("ad"), dict) else {}
+            content = post.get("content") if isinstance(post.get("content"), dict) else {}
+            author = post.get("author") if isinstance(post.get("author"), dict) else {}
+            samples.append({
+                "ad_id": str(post.get("id") or ad.get("id") or ad.get("video_id") or item.get("id") or "")[:100],
+                "title": str(content.get("text") or ad.get("title") or item.get("title") or "")[:160],
+                "brand": str(ad.get("brand_name") or author.get("display_name") or author.get("username") or "")[:100],
+                "industry": str(ad.get("industry") or "")[:80],
+                "objective": str(ad.get("objective") or "")[:80],
+            })
+
+        return {
+            "success": payload.get("success"),
+            "platform": payload.get("platform"),
+            "endpoint": payload.get("endpoint"),
+            "cached": payload.get("cached"),
+            "idempotent_replay": payload.get("idempotent_replay"),
+            "request_cache_control": request_cache_control,
+            "credits_used": payload.get("credits_used"),
+            "credits_remaining": payload.get("credits_remaining"),
+            "data_dropped": data.get("dropped"),
+            "data_empty_reason": data.get("empty_reason"),
+            "data_empty_reason_note": str(data.get("empty_reason_note") or "")[:500],
+            "data_warnings_path": warning_path or None,
+            "data_warnings": [bounded(value) for value in warnings[:10]],
+            "pagination": {key: pagination[key] for key in pagination_fields if key in pagination},
+            "meta_hint": bounded(meta_hint) if meta_hint is not None else None,
+            "data_keys": sorted(str(key) for key in data.keys())[:80],
+            "raw_item_count": len(raw_items) if isinstance(raw_items, list) else 0,
+            "item_samples": samples,
         }
 
     @staticmethod
@@ -327,6 +421,9 @@ class SocialCrawlTikTokTopAds:
         data = payload.get("data") or {}
         raw_items = data.get("items") or []
         items = [self._unwrap_item(x) for x in raw_items if isinstance(x, dict)]
+        provider_response_meta = self._provider_response_diagnostics(
+            payload, raw_items, request_cache_control=self.last_cache_control_requested,
+        )
         for item in items:
             item["discovery_source"] = "tiktok_sponsored_search"
             item["discovery_query"] = q
@@ -340,6 +437,7 @@ class SocialCrawlTikTokTopAds:
             "request_id": payload.get("request_id"),
             "params": params,
             "walk": data.get("walk") or {},
+            "provider_response_meta": provider_response_meta,
         }
 
     def fetch_board(
@@ -387,6 +485,9 @@ class SocialCrawlTikTokTopAds:
         data = payload.get("data") or {}
         raw_items = data.get("items") or data.get("commercial_contents") or []
         raw_playback_field_diagnostics = self._raw_playback_field_diagnostics(raw_items)
+        provider_response_meta = self._provider_response_diagnostics(
+            payload, raw_items, request_cache_control=self.last_cache_control_requested,
+        )
         items = [self._unwrap_item(x) for x in raw_items if isinstance(x, dict)]
         for item in items:
             item["discovery_query"] = keyword or ""
@@ -400,6 +501,7 @@ class SocialCrawlTikTokTopAds:
             "request_id": payload.get("request_id"),
             "params": params,
             "raw_playback_field_diagnostics": raw_playback_field_diagnostics,
+            "provider_response_meta": provider_response_meta,
         }
 
     def discover(

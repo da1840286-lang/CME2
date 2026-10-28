@@ -180,6 +180,60 @@ class VendoredCodeIsTheRealOne(Env):
             self.assertIn("play_6s_rate", matched_paths)
             self.assertTrue(call["provider_params"].get("order_by") in {"play_6s_rate", "play_2s_rate"})
 
+    def test_requested_playback_board_without_native_metrics_does_not_erase_target_candidate(self):
+        calls = []
+        target = synthetic_post(
+            "target-no-native-playback-metric", brand="UNKNOWN",
+            title="This cordless car vacuum picks up crumbs from car seats. Get yours today.",
+            ctr=None, cvr=None, views=230000, duration=28,
+        )
+        target["post"]["author"]["username"] = "UNKNOWN"
+        target["post"]["author"]["display_name"] = ""
+        target["post"]["engagement"].update({"views": 8000000, "likes": 180000, "comments": 2400, "shares": 1200})
+        target["post"]["ext"]["ad"].update({
+            "ctr": None, "cvr": None, "objective": "", "landing_page_url": "",
+        })
+        target["post"]["content"]["text"] = "This cordless car vacuum picks up crumbs from car seats. Get yours today."
+        unrelated = synthetic_post(
+            "unrelated-game-board-row", brand="UNKNOWN",
+            title="The next big game update is here. Download now.",
+            ctr=None, cvr=None, views=1500000, duration=28,
+        )
+        unrelated["post"]["author"]["username"] = "UNKNOWN"
+        unrelated["post"]["author"]["display_name"] = ""
+        unrelated["post"]["ext"]["ad"].update({
+            "ctr": None, "cvr": None, "objective": "", "landing_page_url": "",
+        })
+
+        def fake_get(url, params=None, headers=None, timeout=None):
+            params = dict(params or {})
+            calls.append((url, params))
+            rows = [target] if url == T.SocialCrawlTikTokTopAds.SEARCH_URL else [unrelated]
+            return FakeResp(synthetic_response(rows))
+
+        with mock.patch.object(T.requests, "get", fake_get):
+            result = F.run_find(
+                {"country": "US", "max_requests": 4, "max_ads": 3, "keywords": ["car vacuum"],
+                 "performance_order_bys": ["play_6s_rate", "play_2s_rate"],
+                 "offer": {"name": "Fanttik V8 Mate Cordless Car Vacuum",
+                           "product_type": "cordless handheld car vacuum"}},
+                client=T.SocialCrawlTikTokTopAds(api_key="TESTKEY"),
+            )
+
+        self.assertEqual(len([c for c in calls if c[0] == T.SocialCrawlTikTokTopAds.SEARCH_URL]), 2)
+        self.assertEqual(len([c for c in calls if c[0] == T.SocialCrawlTikTokTopAds.BASE_URL]), 2)
+        self.assertEqual(len(result["candidates"]), 1)
+        candidate = result["candidates"][0]
+        self.assertEqual(candidate["id"], "tiktok:ad:target-no-native-playback-metric")
+        self.assertEqual(candidate["requested_performance_evidence"]["status"], "MISSING")
+        self.assertFalse(candidate["requested_performance_evidence"]["affects_eligibility"])
+        self.assertEqual(candidate["performance_evidence"]["basis"], "ENGAGEMENT_PROXY")
+        self.assertFalse(candidate["performance_evidence"]["commercial_result_confirmed"])
+        self.assertEqual(result["diagnostics"]["outcome"], "CANDIDATES_FOUND")
+        gate = result["diagnostics"]["requested_performance_evidence_gate"]
+        self.assertEqual(gate["candidates_missing_requested_evidence"], 1)
+        self.assertEqual(gate["rejected_candidates"], 0)
+
     def test_dual_playback_retention_runs_both_target_searches_and_only_requested_boards(self):
         calls = []
         item = synthetic_post(

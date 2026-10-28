@@ -716,6 +716,7 @@ jobs:
                            "final_score": score.get("final_score") if isinstance(score, dict) else None,
                            "source_check": c.get("source_check"), "stage": c.get("stage"), "source_gate_eligible": c.get("source_gate_eligible"), "target_fit_status": c.get("target_fit_status"), "source_selection": c.get("source_selection") or {},
                            "performance_evidence": c.get("performance_evidence") or {},
+                           "requested_performance_evidence": c.get("requested_performance_evidence") or {},
                            "commercial_evidence": c.get("commercial_evidence") or {},
                            "playback_metrics": {k: (c.get("metrics") or {}).get(k, {}).get("value")
                                                 for k in ("ctr", "cvr", "play_2s_rate", "play_6s_rate")
@@ -770,12 +771,12 @@ jobs:
                   title = str(c.get("title") or "(no title)").replace("\n", " ")[:160]
                   brand = str(c.get("brand") or "unknown brand")[:80]
                   url = c.get("source_url") if isinstance(c.get("source_url"), str) and str(c.get("source_url")).startswith("https://") else ""
-                  s.write(f"- `candidate_id: {c['id']}` — {brand}: {title}; score={c.get('final_score')}; video={'yes' if c.get('video_url_present') else 'no'}; performance={(c.get('performance_evidence') or {}).get('basis', 'unknown')}; commercial_evidence={(c.get('commercial_evidence') or {}).get('level', 'unknown')}; playback={c.get('playback_metrics') or {}}; [open ad]({url})\n")
+                  s.write(f"- `candidate_id: {c['id']}` — {brand}: {title}; score={c.get('final_score')}; video={'yes' if c.get('video_url_present') else 'no'}; performance={(c.get('performance_evidence') or {}).get('basis', 'unknown')}; requested_playback={(c.get('requested_performance_evidence') or {}).get('status', 'NOT_REQUESTED')}; commercial_evidence={(c.get('commercial_evidence') or {}).get('level', 'unknown')}; playback={c.get('playback_metrics') or {}}; [open ad]({url})\n")
               if mode == "find":
                   if params.get("selection_mode") == "mechanism":
                       s.write("\nMechanism results are PATTERN_CANDIDATE records, not commercial approval; attention is a proxy only and Target-Fit remains NOT_EVALUATED. Use this run ID plus an explicit candidate_id for stage=analyze.\n")
                   else:
-                      s.write("\nManual choice: run stage=all with this run ID and the selected candidate_id.\n")
+                      s.write("\nRequested play-rate order selects a TikTok Ads Top board; SocialCrawl does not publish those rate values per ad. Missing numeric values are shown as MISSING and do not erase a relevant source. Use the run ID and candidate_id with stage=analyze to inspect the source; stage=all still requires the strict source-commercial/mechanism and Target-Fit gates.\n")
               else:
                   s.write("\nPlayback metrics are shown only when SocialCrawl returned them. commercial_evidence is descriptive, not a profitability prediction. Automatic stage=all applies the strict source-commercial/mechanism eligibility gate before analysis, then the independent Target-Fit gate before transfer. Playback metrics are shown only when SocialCrawl returned them; commercial_evidence is descriptive, not a profitability prediction. A manually supplied candidate_id allows source inspection, not a commercial-success claim.\n")
           print(f"FIND finished: {len(rows)} candidate(s).")
@@ -979,6 +980,7 @@ jobs:
                                    "final_score": score.get("final_score") if isinstance(score, dict) else None,
                                    "source_check": c.get("source_check"), "stage": c.get("stage"), "source_gate_eligible": c.get("source_gate_eligible"), "target_fit_status": c.get("target_fit_status"), "source_selection": c.get("source_selection") or {},
                            "performance_evidence": c.get("performance_evidence") or {},
+                           "requested_performance_evidence": c.get("requested_performance_evidence") or {},
                            "commercial_evidence": c.get("commercial_evidence") or {},
                            "playback_metrics": {k: (c.get("metrics") or {}).get(k, {}).get("value")
                                                 for k in ("ctr", "cvr", "play_2s_rate", "play_6s_rate")
@@ -991,8 +993,8 @@ jobs:
                           title = str(c.get("title") or "(no title)").replace("\n", " ")[:160]
                           brand = str(c.get("brand") or "unknown brand")[:80]
                           url = c.get("source_url") if isinstance(c.get("source_url"), str) and str(c.get("source_url")).startswith("https://") else ""
-                          summary.write(f"- candidate_id: {c['id']} — {brand}: {title}; score={c.get('final_score')}; video={'yes' if c.get('video_url_present') else 'no'}; performance={(c.get('performance_evidence') or {}).get('basis', 'unknown')}; commercial_evidence={(c.get('commercial_evidence') or {}).get('level', 'unknown')}; playback={ {k: (c.get('metrics') or {}).get(k, {}).get('value') for k in ('ctr', 'cvr', 'play_2s_rate', 'play_6s_rate') if k in (c.get('metrics') or {})} }; {url}\n")
-                      summary.write("\nFIND shortlist admission uses product-type relevance and the strongest available performance evidence. Playback rates remain optional; commercial_evidence describes observed signals and is not a profitability forecast. Automatic stage=all still enforces source-commercial/mechanism and Target-Fit transfer gates; an explicit candidate_id permits source inspection, not a commercial-success claim.\n")
+                          summary.write(f"- candidate_id: {c['id']} — {brand}: {title}; score={c.get('final_score')}; video={'yes' if c.get('video_url_present') else 'no'}; performance={(c.get('performance_evidence') or {}).get('basis', 'unknown')}; requested_playback={(c.get('requested_performance_evidence') or {}).get('status', 'NOT_REQUESTED')}; commercial_evidence={(c.get('commercial_evidence') or {}).get('level', 'unknown')}; playback={ {k: (c.get('metrics') or {}).get(k, {}).get('value') for k in ('ctr', 'cvr', 'play_2s_rate', 'play_6s_rate') if k in (c.get('metrics') or {})} }; {url}\n")
+                      summary.write("\nFIND shortlist admission uses product-type relevance and the available source-readiness signal. SocialCrawl ranks Ads Top by play_2s_rate/play_6s_rate but does not publish those numeric rates per ad; requested playback evidence is informational when no board position/value is available, and views/likes remain an engagement proxy. Commercial evidence is not a profitability forecast. Automatic stage=all still enforces source-commercial/mechanism and Target-Fit gates.\n")
               candidates = json.loads(candidates_file.read_text(encoding="utf-8")).get("candidates", [])
               candidate, skipped = select_transfer_candidate(candidates, threshold)
               candidate_pool, ranked_skipped = rank_transfer_candidates(candidates, threshold)

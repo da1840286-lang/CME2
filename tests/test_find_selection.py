@@ -22,6 +22,18 @@ class FitTests(unittest.TestCase):
         self.assertEqual(result["role"], TARGET_PRODUCT)
         self.assertTrue(result["promotion_evidence"])
 
+    def test_real_car_vacuum_sponsored_copy_is_not_lost_on_plural_or_compound_hashtags(self):
+        examples = [
+            "my car been so messy ngl new vacuum here we go #car #carvacuumcleaner #vacuumcleaner",
+            "It Blows AND Vacuums and it's on Black Friday Sale #carvacuumcleaner",
+        ]
+        for text in examples:
+            with self.subTest(text=text):
+                result = classify_source_role({"title": text}, product_type="cordless handheld car vacuum")
+                self.assertEqual(result["role"], TARGET_PRODUCT)
+                self.assertTrue(result["promotion_evidence"])
+                self.assertTrue(result["target_promotion_evidence"])
+
     def test_adjacent_product_is_not_accepted_from_query_alone(self):
         text = "Rechargeable air duster blows dust from car vents in seconds. Get yours today."
         record = {"title": text, "raw": {"post": {"content": {"text": text}}},
@@ -40,6 +52,12 @@ class FitTests(unittest.TestCase):
 
     def test_product_noun_without_promotion_is_not_a_match(self):
         record = {"title": "An air duster on a desk", "raw": {"post": {"content": {"text": "An air duster on a desk"}}}}
+        result = classify_source_role(record, product_type="cordless handheld car vacuum")
+        self.assertEqual(result["role"], OFF_TOPIC)
+        self.assertFalse(result["promotion_evidence"])
+
+    def test_store_account_name_is_not_promotion_evidence_by_itself(self):
+        record = {"title": "A vacuum on a desk @Home Store"}
         result = classify_source_role(record, product_type="cordless handheld car vacuum")
         self.assertEqual(result["role"], OFF_TOPIC)
         self.assertFalse(result["promotion_evidence"])
@@ -338,6 +356,16 @@ class RestoredArchiveCoverageTests(unittest.TestCase):
         self.assertEqual(result["status"], "MATCH")
         self.assertEqual(result["confidence"], "LOW")
         self.assertFalse(result["context_verified"])
+
+    def test_carvacuum_hashtag_does_not_verify_car_use_context_for_household_vacuum_copy(self):
+        text = "This cordless stick vacuum cleans carpets and pet hair. Get yours today. #carvacuum"
+        result = legacy_discover._product_type_relevance(
+            self.record(text), "cordless handheld car vacuum"
+        )
+        self.assertEqual(result["status"], "MATCH")
+        self.assertFalse(result["context_verified"])
+        self.assertEqual(result["confidence"], "LOW")
+        self.assertIn("context-like hashtag is not accepted as proof", result["reason"])
 
     def test_target_context_improves_role_confidence(self):
         contextual = classify_source_role(

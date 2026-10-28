@@ -73,17 +73,33 @@ class IntegratedFindGateTests(unittest.TestCase):
         self.assertEqual([row["legacy_record"]["ad_id"] for row in selected], ["target-vacuum-1"])
         self.assertEqual(diagnostics["product_selection"]["rejected_by_reason"].get("OFF_TOPIC"), 1)
 
-    def test_requested_playback_board_does_not_fall_back_to_engagement_only(self):
+    def test_missing_numeric_playback_rate_does_not_erase_real_live_find_candidate(self):
+        # Frozen from live FIND run 40698933977; the provider returned views/likes,
+        # but no numeric play_6s_rate or play_2s_rate field for this ad.
+        live_ad = {
+            "ad_id": "7692830050688847117",
+            "video_id": "7692830050688847117",
+            "title": "Needed one for my husband’s car and love this one much that I waited for it to come back in stock. #carvacuum #cleancar #handheldvacuum #tiktokshopdealsforyou @SEESE Store",
+            "source_url": "https://www.tiktok.com/@tiktok.savvy/video/7692830050688847117",
+            "views": 230282,
+            "likes": 431,
+            "comments": 14,
+            "shares": 81,
+        }
+        candidate = self.candidate(live_ad)
+        candidate["metrics"] = {"views": {"value": 230282}, "likes": {"value": 431}}
+        candidate["performance_evidence"] = {"basis": "ENGAGEMENT_PROXY", "performance_boards": []}
         selected, diagnostics = _apply_product_selection_gates(
-            [self.candidate(TARGET_AD)],
-            {**TARGET, "requested_performance_order_bys": ["play_6s_rate"]},
+            [candidate],
+            {**TARGET, "requested_performance_order_bys": ["play_6s_rate", "play_2s_rate"]},
         )
-        self.assertEqual(selected, [])
-        self.assertEqual(diagnostics["requested_performance"]["rejected_candidates"], 1)
-        self.assertEqual(
-            diagnostics["requested_performance"]["rejected_examples"][0]["reason"],
-            "REQUESTED_PERFORMANCE_EVIDENCE_MISSING",
-        )
+        self.assertEqual(len(selected), 1)
+        self.assertEqual(selected[0]["legacy_record"]["ad_id"], "7692830050688847117")
+        self.assertEqual(selected[0]["requested_performance_evidence"]["status"], "MISSING")
+        self.assertFalse(selected[0]["requested_performance_evidence"]["affects_eligibility"])
+        self.assertEqual(diagnostics["requested_performance"]["mode"], "EVIDENCE_ONLY_NON_GATING")
+        self.assertEqual(diagnostics["requested_performance"]["candidates_missing_requested_evidence"], 1)
+        self.assertEqual(diagnostics["requested_performance"]["rejected_candidates"], 0)
 
     def test_real_position_on_requested_board_is_sufficient_when_rate_is_not_returned(self):
         record = {**TARGET_AD, "discovery_board_positions": {"play_6s_rate|keyword:car vacuum": 2}}
@@ -92,6 +108,7 @@ class IntegratedFindGateTests(unittest.TestCase):
             {**TARGET, "requested_performance_order_bys": ["play_6s_rate"]},
         )
         self.assertEqual(len(selected), 1)
+        self.assertEqual(selected[0]["requested_performance_evidence"]["status"], "AVAILABLE")
         self.assertEqual(diagnostics["requested_performance"]["accepted_candidates"], 1)
 
 
