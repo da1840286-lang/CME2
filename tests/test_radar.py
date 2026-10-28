@@ -120,10 +120,10 @@ class VendoredCodeIsTheRealOne(Env):
 
     def test_run_find_calls_the_real_client_and_ranker(self):
         calls = []
-        item = synthetic_post("1001")
+        item = synthetic_post("1001", title="Shop now: cordless car vacuum removes crumbs")
         item["post"]["ext"]["ad"]["play_2s_rate"] = 0.67
         item["computed"]["play_6s_rate"] = 0.32
-        comparison = synthetic_post("1002")
+        comparison = synthetic_post("1002", title="Shop now: handheld car vacuum cleans seat crevices")
         comparison["post"]["ext"]["ad"]["play_2s_rate"] = 0.31
         comparison["computed"]["play_6s_rate"] = 0.18
         with self.fake_find([item, comparison], calls):
@@ -150,7 +150,7 @@ class VendoredCodeIsTheRealOne(Env):
 
     def test_find_can_target_playback_boards_and_report_provider_metric_presence(self):
         calls = []
-        item = synthetic_post("playback-board-probe", ctr=None, cvr=None, views=1000)
+        item = synthetic_post("playback-board-probe", title="Shop now: cordless car vacuum removes crumbs", ctr=None, cvr=None, views=1000)
         item["post"]["ext"]["ad"]["play_2s_rate"] = 0.67
         item["computed"]["play_6s_rate"] = "0.32"
         offer = {"name": "Fanttik V8 Mate Cordless Car Vacuum",
@@ -427,14 +427,12 @@ class VendoredCodeIsTheRealOne(Env):
                 client=T.SocialCrawlTikTokTopAds(api_key="TESTKEY"),
             )
 
-        self.assertEqual(len(result["candidates"]), 1)
-        candidate = result["candidates"][0]
-        self.assertEqual(candidate["ad_id"], "car-vacuum-hit")
-        self.assertEqual(candidate["product_relevance"]["status"], "MATCH")
-        self.assertEqual(candidate["performance_evidence"]["basis"], "ENGAGEMENT_PROXY")
-        self.assertFalse(candidate["performance_evidence"]["commercial_result_confirmed"])
-        self.assertFalse(candidate["source_score"]["components"]["money_signal_gate"]["pass"])
-        self.assertEqual(result["diagnostics"]["outcome"], "CANDIDATES_FOUND")
+        # High engagement and a product-related hashtag cannot turn use-context into an advertised target product.
+        self.assertEqual(result["candidates"], [])
+        self.assertEqual(result["diagnostics"]["outcome"], "NO_TARGET_PRODUCT_AD")
+        gate = result["diagnostics"]["product_selection_gate"]
+        self.assertGreater(gate["rejected_candidates"], 0)
+        self.assertIn("OFF_TOPIC", gate["rejected_by_reason"])
 
 
     def test_auto_rejects_ambient_car_wash_vacuum_mention(self):
@@ -656,7 +654,7 @@ class FindStates(Env):
         calls = []
         app = RadarApp(self.data, settings_path=ROOT / "settings.example.json", catalog_path=ROOT / "adapters.json",
                        offer_path=offer_path, find_client=T.SocialCrawlTikTokTopAds(api_key="K"))
-        with self.fake_find([synthetic_post("8101")], calls):
+        with self.fake_find([synthetic_post("8101", title="Shop now: cordless car vacuum removes crumbs")], calls):
             result = app.do_find({"country": "US", "max_requests": 1, "max_ads": 3, "discovery_mode": "strict"})
         self.addCleanup(app.store.close)
         self.assertEqual(result["status"], "OK")
@@ -805,7 +803,13 @@ def analyst_transport(calls, content=None, status=200):
     good = {k: {"text": f"текст {k}", "kind": "OBSERVED"} for k in ("hook", "buyer_problem", "product_intervention", "result_demo", "cta")}
     good["mechanism_hypothesis"] = {"text": "гипотеза", "kind": "OBSERVED"}  # model overclaims: code must force INFERRED
     good["transferability"] = {"text": "перенос", "kind": "INFERRED"}
-    good["evidence"] = [{"t_sec": 3.0, "frame": 1, "observation": "виден товар"}, {"t_sec": 8.0, "frame": 3, "observation": "выдумано"}]
+    good["evidence"] = [
+        {"t_sec": 3.0, "frame": 1, "observation": "visible hook", "supports": ["hook", "product_intervention"]},
+        {"t_sec": 5.0, "frame": 2, "observation": "visible buyer problem", "supports": ["buyer_problem"]},
+        {"t_sec": 7.0, "frame": 3, "observation": "visible result state", "supports": ["result_demo"]},
+        {"t_sec": 11.0, "frame": 5, "observation": "visible CTA", "supports": ["cta"]},
+        {"t_sec": 8.0, "frame": 3, "observation": "fabricated timestamp", "supports": ["buyer_problem"]},
+    ]
     good["limits"] = {"text": "кадры, не всё видео", "missing": ["звук"]}
     good["ratings"] = {"problem_clarity": 4, "product_demo": 9, "proof_visibility": None, "sequence_quality": 3}
     def send(method, url, headers, payload):
@@ -856,7 +860,7 @@ class ManualAnalysis(RadarAppFixture):
         self.assertEqual(m["ad_id"], "6001")
         r = a["result"]
         self.assertEqual(r["mechanism_hypothesis"]["kind"], "INFERRED")           # hypothesis never becomes an observation
-        self.assertEqual([e["t_sec"] for e in r["evidence"]], [3.0])             # invented timestamp dropped
+        self.assertEqual([e["t_sec"] for e in r["evidence"]], [3.0, 5.0, 7.0, 11.0])  # invented timestamp dropped
         self.assertTrue(any("8.0" in w for w in r["warnings"]))
         self.assertIsNone(r["ratings"]["product_demo"])                           # out-of-range rating is not trusted
         self.assertEqual(len([c for c in calls[0]["messages"][1]["content"] if c["type"] == "image_url"]), 6)

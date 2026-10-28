@@ -681,49 +681,114 @@ def _trace_excerpt(value, limit: int = 3500) -> str:
     return text if len(text) <= limit else text[:limit] + f"...[+{len(text) - limit} chars]"
 
 
-def _explicit_vacuum_action_evidence(source_transfer) -> list:
-    """Return source-frame timestamps whose observations explicitly show suction/pickup.
+def _source_evidence_content_tokens(text) -> set[str]:
+    """Category-agnostic terms from a source-frame observation or a gate's denial claim."""
+    stop = {
+        "the", "and", "for", "from", "with", "without", "that", "this", "there", "their",
+        "source", "evidence", "observation", "observations", "frame", "frames", "show", "shows",
+        "shown", "display", "displays", "visible", "visibly", "clearly", "actually", "were",
+        "was", "are", "is", "not", "no", "never", "cannot", "does", "doesnt", "did", "didnt",
+        "wasnt", "werent", "into", "onto", "then", "than", "when", "where", "which", "what",
+        "have", "has", "had", "been", "being", "only", "also", "just", "product",
+        "tool", "item", "items", "object", "objects", "action", "actions", "result", "results",
+        "mechanism", "intervention", "demo", "demonstration", "happened", "happens", "happen",
+        "про", "это", "что", "как", "для", "или", "без", "при", "был", "была", "были",
+        "есть", "нет", "не", "видно", "показано", "кадр", "кадры", "источник", "действие",
+        "результат", "товар", "продукт", "инструмент",
+    }
+    tokens = re.findall(r"[a-z][a-z0-9'-]{2,}|[а-яё][а-яё0-9'-]{2,}", str(text or "").casefold())
+    out = set()
+    for token in tokens:
+        token = token.strip("'-")
+        if token in stop:
+            continue
+        roots = {token}
+        for suffix in ("ingly", "edly", "ing", "ed", "es", "s"):
+            if token.endswith(suffix) and len(token) - len(suffix) >= 4:
+                roots.add(token[:-len(suffix)])
+                if suffix == "ing" and token[:-3].endswith(("p", "v", "t", "k", "g", "l", "r")):
+                    roots.add(token[:-3] + "e")
+        out.update(root for root in roots if len(root) >= 3 and root not in stop)
+    # Normalize common source-language variants before cross-language overlap checks.
+    translated = {
+        "прибор": "device", "прибора": "device", "прибором": "device",
+        "устройство": "device", "устройства": "device", "устройством": "device",
+        "пылесос": "vacuum", "пылесоса": "vacuum", "пылесосом": "vacuum",
+        "всасывает": "suction", "всасывал": "suction", "всасывать": "suction",
+        "крошки": "crumbs", "крошек": "crumbs", "крошку": "crumbs",
+        "пыли": "dust", "пыль": "dust", "грязи": "dirt",
+        "ковра": "carpet", "ковре": "carpet", "коврик": "mat",
+    }
+    out.update(translated[token] for token in list(out) if token in translated)
+    return out
 
-    This is deliberately evidence-scoped: ad titles, inferred mechanism text, and search
-    keywords cannot trigger it. The multilingual checks prevent Russian source observations
-    from being treated as absent merely because the downstream gate writes English.
-    """
+
+_PRODUCT_ACTION_VERB = re.compile(
+    r"\b(?:vacuum\w*|suction|sucks?\s+up|picks?\s+up|clean\w*|wipe\w*|remov\w*|lift\w*|scrub\w*|"
+    r"cut\w*|slic\w*|grind\w*|sand\w*|polish\w*|inflate\w*|pump\w*|spray\w*|dispens\w*|pour\w*|"
+    r"mix\w*|stir\w*|heat\w*|cool\w*|charg\w*|connect\w*|disconnect\w*|lock\w*|unlock\w*|open\w*|"
+    r"close\w*|fold\w*|unfold\w*|press\w*|push\w*|pull\w*|tighten\w*|loosen\w*|wash\w*|dry\w*|"
+    r"filter\w*|appl\w*|repair\w*|fix\w*|measur\w*|detect\w*|organiz\w*|store\w*|fill\w*|drain\w*|"
+    r"clear\w*|flush\w*|seal\w*|protect\w*|block\w*|reduc\w*|всасыва\w*|пылесос\w*|очища\w*|чист\w*|"
+    r"протира\w*|удаля\w*|вытира\w*|реж\w*|нареза\w*|шлифу\w*|полиру\w*|накачива\w*|распыля\w*|"
+    r"налива\w*|смешива\w*|нагрева\w*|охлажда\w*|заряжа\w*|подключа\w*|отключа\w*|закрыва\w*|"
+    r"открыва\w*|складыва\w*|толка\w*|тян\w*|закручива\w*|откручива\w*|фильтру\w*|нанос\w*|"
+    r"измеря\w*|обнаружива\w*|фиксиру\w*|заполня\w*|слива\w*|устраня\w*|убира\w*)\b", re.I
+)
+
+
+def _explicit_product_action_evidence(source_transfer) -> list:
+    """Return timestamps for physical-action observations, independent of product category."""
     if not isinstance(source_transfer, dict):
         return []
     rows = source_transfer.get("evidence")
     if not isinstance(rows, list):
         return []
+    negation = re.compile(
+        r"\b(?:does\s+not|doesn't|did\s+not|didn't|cannot|can't|failed\s+to|unable\s+to|without|not)\b",
+        re.I,
+    )
     out = []
-    english_action = re.compile(r"\b(?:vacuum(?:s|ed|ing)?|suction|sucks?\s+up|picks?\s+up)\b", re.I)
-    english_object = re.compile(r"\b(?:crumbs?|dust|debris|dirt|carpet|mat)\b", re.I)
-    russian_action = re.compile(r"(?:всасыва\w*|пылесос\w*)", re.I)
-    russian_object = re.compile(r"(?:крош\w*|пыл\w*|мусор\w*|ковр\w*)", re.I)
-    for row in rows[:8]:
+    for row in rows[:12]:
         if not isinstance(row, dict):
             continue
         observation = str(row.get("observation") or "").strip()
         try:
             timestamp = float(row.get("t_sec"))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             continue
-        if timestamp < 0 or not observation:
+        if timestamp < 0 or not _PRODUCT_ACTION_VERB.search(observation):
             continue
-        english_match = english_action.search(observation) and english_object.search(observation)
-        russian_match = russian_action.search(observation) and russian_object.search(observation)
-        if (english_match or russian_match) and timestamp not in out:
+        if len(_source_evidence_content_tokens(observation)) < 2:
+            continue
+        supports = row.get("supports")
+        if isinstance(supports, list) and supports and not {
+            "product_intervention", "result_demo"
+        }.intersection(str(item) for item in supports):
+            continue
+        if negation.search(observation):
+            continue
+        if timestamp not in out:
             out.append(timestamp)
     return out
 
 
 def _source_evidence_contradiction(decision, source_transfer) -> str:
-    """Catch a negative gate verdict that says suction was not observed despite explicit evidence."""
-    timestamps = _explicit_vacuum_action_evidence(source_transfer)
+    """Catch a negative gate verdict that contradicts specific source-frame evidence."""
+    timestamps = _explicit_product_action_evidence(source_transfer)
     if not timestamps or not isinstance(decision, dict) or decision.get("transferable") is not False:
         return ""
     denial_patterns = (
-        re.compile(r"\bno\s+(?:source\s+)?(?:evidence|observation|frame)\b.{0,120}\b(?:vacuum|suction|device|action|cleaning|crumbs?)\b", re.I),
-        re.compile(r"\b(?:source\s+)?(?:evidence|observations?|frames?)\b.{0,100}\b(?:lack(?:s|ing)?|do(?:es)?\s+not|doesn't|never|cannot|can't|without|missing)\b.{0,100}\b(?:vacuum|suction|device|action|cleaning|crumbs?)\b", re.I),
-        re.compile(r"\b(?:lack(?:s|ing)?|no|without|never|cannot|can't|does\s+not|doesn't)\b.{0,100}\b(?:evidence|observation|frame)\b.{0,100}\b(?:vacuum|suction|device|action)\b", re.I),
+        re.compile(
+            r"\b(?:no|lack(?:s|ing)?|without|never|not)\b.{0,100}\b"
+            r"(?:source\s+)?(?:evidence|observation|frame|show|demonstrat|depict|record)\w*\b",
+            re.I,
+        ),
+        re.compile(
+            r"\b(?:does\s+not|doesn't|did\s+not|didn't|cannot|can't|was\s+not|wasn't)\b.{0,100}\b"
+            r"(?:shown|visible|observed|demonstrated|recorded|captured|depicted|present)\b",
+            re.I,
+        ),
     )
     claims = [str(decision.get("reason") or "")]
     dropped = decision.get("source_elements_dropped")
@@ -733,16 +798,29 @@ def _source_evidence_contradiction(decision, source_transfer) -> str:
             for item in dropped
             if isinstance(item, dict) and item.get("element") in {"mechanism", "intervention", "result"}
         )
-    if not any(pattern.search(claim) for claim in claims for pattern in denial_patterns):
-        return ""
-    marks = ", ".join(f"{t:g}s" for t in timestamps)
-    return (
-        "SOURCE_EVIDENCE_CONTRADICTION: supplied source observations at "
-        f"{marks} explicitly describe vacuum suction/pickup. Re-evaluate those observations; "
-        "do not claim the action was never shown. A negative verdict is still allowed if a "
-        "separate, specific target incompatibility supports it."
-    )
-
+    for claim in claims:
+        if not any(pattern.search(claim) for pattern in denial_patterns):
+            continue
+        claim_tokens = _source_evidence_content_tokens(claim)
+        for row in (source_transfer.get("evidence") or [])[:12]:
+            if not isinstance(row, dict):
+                continue
+            try:
+                timestamp = float(row.get("t_sec"))
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if timestamp not in timestamps:
+                continue
+            overlap = claim_tokens & _source_evidence_content_tokens(row.get("observation") or "")
+            if len(overlap) >= 2:
+                marks = ", ".join(f"{t:g}s" for t in timestamps)
+                return (
+                    "SOURCE_EVIDENCE_CONTRADICTION: the negative transfer rationale overlaps with concrete "
+                    "source-frame observation terms at " + marks + ". Reconcile the specific observation "
+                    "before rejecting the transfer; a distinct, evidenced target incompatibility may still "
+                    "justify transferable=false."
+                )
+    return ""
 
 
 def _negative_gate_mechanism_contradiction(decision) -> str:

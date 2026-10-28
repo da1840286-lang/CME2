@@ -123,6 +123,8 @@ def parse_atoms(raw) -> ParseResult:
             text = item["text"].strip()
             if len(text) > MAX_TEXT:
                 errs.append(f"text {len(text)} chars > {MAX_TEXT}: split or shorten")
+            if re.search(r"[,;:]\s*$", text):
+                errs.append("ATOM_TEXT_INCOMPLETE: text ends with a dangling separator; complete or rewrite the atom")
             if len(text) < 3:
                 errs.append("text too short")
             if counts[item["id"]] > 1:

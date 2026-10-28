@@ -22,7 +22,7 @@
    "name": "openrouter_free_judge",
    "kind": "judge",
    "provider": "openrouter",
-   "model_id": "nvidia/nemotron-3.5-super-vl:free",
+   "model_id": "google/gemma-4-31b-it:free",
    "tier": "free",
    "verified": false,
    "params": {
@@ -32,7 +32,7 @@
     "reasoning": {"enabled": false}
    },
    "price_hint": "free; rate limited",
-   "notes": "Vision judge. Evidence only: it can never grant PASS without code checks."
+   "notes": "Independent vision judge, deliberately different from the Brain/Analyst model to reduce correlated errors. Free model availability and rate limits may change; every MUST visual atom is required."
   },
   {
    "name": "openrouter_free_analyst",

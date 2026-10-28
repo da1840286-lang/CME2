@@ -153,10 +153,29 @@ def make_openrouter_judge(params: dict, api_key=None, transport=None):
         for p in refs:
             if not p.is_file() or p.stat().st_size == 0:
                 raise ProviderCallError(f"target-product reference is missing or empty: {p.name}")
-        system = ("You verify one generated image against numbered requirements. Be strict: if you cannot clearly see "
-                  "the requirement satisfied, answer false. Reply ONLY with JSON "
-                  "{\"results\": [{\"id\": \"...\", \"pass\": true|false, \"evidence\": \"<12 words\"}]}.")
-        reqs = [{"id": a.id, "requirement": a.text} for a in atoms]
+        system = """You are an independent, conservative visual QA judge. Inspect the actual image pixels; never infer that a requested result happened merely because the prompt says so, the tool is present, or the product is near the problem. If visible evidence is ambiguous, answer false.
+For mech_result_* requirements, the after-state must be plainly visible and distinguishable from the baseline; require both a recognizable starting/problem state and a visibly changed result when the atom asks for a change. An adjacent tool or untouched problem material is not proof of success.
+For mech_intervention_* requirements, require visible physical contact or an action connecting the target product to the exact problem; mere placement beside the problem is not enough. Check each atom independently.
+Reply ONLY with JSON: {"results": [{"id": "...", "pass": true|false, "evidence": "brief visible evidence"}]}."""
+        reqs = []
+        for a in atoms:
+            requirement = a.text
+            if str(a.id).startswith("mech_result_"):
+                requirement = (
+                    "RESULT-STATE GATE: prove the visible after-state and its difference from the baseline. "
+                    "FAIL if only the product/tool is visible, if the problem material appears untouched, or if "
+                    "the claimed change cannot be clearly seen. " + requirement
+                )
+            elif str(a.id).startswith("mech_intervention_"):
+                requirement = (
+                    "ACTIVE-INTERVENTION GATE: prove visible contact/action connecting the target product to the "
+                    "specific problem. FAIL if the product is merely nearby or posed beside it. " + requirement
+                )
+            reqs.append({
+                "id": a.id, "kind": getattr(a, "kind", ""),
+                "priority": getattr(a, "priority", ""), "channel": getattr(a, "channel", ""),
+                "requirement": requirement,
+            })
         if refs:
             reqs.append({"id": identity_id, "requirement": (
                 "PRODUCT IDENTITY: compare the product visible in the generated frame with the original target-product reference image(s). "
@@ -228,17 +247,19 @@ def make_openrouter_judge(params: dict, api_key=None, transport=None):
     return judge
 
 
-ANALYST_SYSTEM = (
-    "You analyse ONE short product ad from a few still frames taken at known timestamps. You did NOT see the full video. "
-    "Reply ONLY with JSON: {\"hook\":S,\"buyer_problem\":S,\"product_intervention\":S,\"result_demo\":S,"
-    "\"evidence\":[{\"t_sec\":number,\"frame\":int,\"observation\":str}],\"cta\":S,\"mechanism_hypothesis\":S,"
-    "\"transferability\":S,\"limits\":{\"text\":str,\"missing\":[str]},"
-    "\"ratings\":{\"problem_clarity\":1-5|null,\"product_demo\":1-5|null,\"proof_visibility\":1-5|null,\"sequence_quality\":1-5|null}} "
-    "where S = {\"text\": str, \"kind\": \"OBSERVED\"|\"INFERRED\"}. OBSERVED only for what is visible in the frames; "
-    "interpretations are INFERRED. mechanism_hypothesis and transferability are always INFERRED and are hypotheses, not proof "
-    "of profitability. evidence t_sec must be one of the given frame timestamps. If something cannot be known from the frames, "
-    "say so in limits.missing and use null ratings. Write all text values in English."
-)
+ANALYST_SYSTEM = """You analyse ONE short product ad from a few still frames taken at known timestamps. You did NOT see the full video.
+Reply ONLY with JSON:
+{
+  "hook": S, "buyer_problem": S, "product_intervention": S, "result_demo": S,
+  "evidence": [{"t_sec": number, "frame": int, "observation": str, "supports": [section_key, ...]}],
+  "cta": S, "mechanism_hypothesis": S, "transferability": S,
+  "limits": {"text": str, "missing": [str]},
+  "ratings": {"problem_clarity": 1-5|null, "product_demo": 1-5|null, "proof_visibility": 1-5|null, "sequence_quality": 1-5|null}
+}
+Each S is {"text": str, "kind": "OBSERVED"|"INFERRED"}. OBSERVED only for what is visible in the frames; interpretation is INFERRED.
+Each evidence row's supports must name the exact section keys it visually supports (hook, buyer_problem, product_intervention, result_demo, cta, mechanism_hypothesis, transferability). Every section marked OBSERVED must have at least one valid evidence row naming that section in supports.
+Frame is a zero-based index from the provided frame list; t_sec must equal the timestamp at that index. Do not infer support from a nearby observation.
+mechanism_hypothesis and transferability are always INFERRED and are hypotheses, not proof of profitability. If something cannot be known from the frames, say so in limits.missing and use null ratings. Write all text values in English."""
 
 
 def make_openrouter_analyst(params: dict, api_key=None, transport=None):

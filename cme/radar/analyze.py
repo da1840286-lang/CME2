@@ -118,17 +118,50 @@ def validate_analysis(data, frame_times):
             kind = "INFERRED"
         out[k] = {"text": str(sec["text"]).strip(), "kind": kind}
     evidence = []
-    for e in data.get("evidence") or []:
+    valid_sections = set(SECTIONS)
+    for row_index, e in enumerate(data.get("evidence") or []):
+        if not isinstance(e, dict):
+            warnings.append(f"evidence row {row_index} was dropped: expected an object")
+            continue
         try:
             t = float(e["t_sec"])
-        except (KeyError, TypeError, ValueError):
+        except (KeyError, TypeError, ValueError, OverflowError):
             warnings.append("evidence row without a valid t_sec was dropped")
             continue
-        if not any(abs(t - ft) <= TOLERANCE_SEC for ft in frame_times):
-            warnings.append(f"evidence at {t}s dropped: no frame was sent at that time")
+        frame = e.get("frame")
+        if type(frame) is not int or not 0 <= frame < len(frame_times):
+            warnings.append(f"evidence at {t}s dropped: frame index is invalid")
             continue
-        evidence.append({"t_sec": t, "observation": str(e.get("observation", "")).strip(), "frame": e.get("frame")})
+        if abs(t - float(frame_times[frame])) > TOLERANCE_SEC:
+            warnings.append(
+                f"evidence at {t}s dropped: timestamp does not match indexed frame {frame} "
+                f"({frame_times[frame]}s)"
+            )
+            continue
+        observation = str(e.get("observation") or "").strip()
+        if not observation:
+            warnings.append(f"evidence at {t}s dropped: observation is empty")
+            continue
+        raw_supports = e.get("supports")
+        if not isinstance(raw_supports, list):
+            warnings.append(f"evidence at {t}s has no section supports; it cannot verify OBSERVED claims")
+            raw_supports = []
+        supports = []
+        for support in raw_supports:
+            key = str(support or "").strip()
+            if key in valid_sections and key not in supports:
+                supports.append(key)
+            elif key:
+                warnings.append(f"evidence at {t}s dropped unsupported section key {key!r}")
+        evidence.append({"t_sec": t, "observation": observation, "frame": frame, "supports": supports})
     out["evidence"] = evidence
+    for section_name, section in out.items():
+        if section_name in valid_sections and isinstance(section, dict) and section.get("kind") == "OBSERVED":
+            supported = any(section_name in row.get("supports", []) for row in evidence)
+            if not supported:
+                raise ValueError(
+                    f"OBSERVED section {section_name!r} has no valid frame-linked evidence that supports it"
+                )
     lim = data.get("limits") if isinstance(data.get("limits"), dict) else {}
     out["limits"] = {"text": str(lim.get("text", "")).strip(), "missing": [str(x) for x in (lim.get("missing") or [])]}
     ratings = data.get("ratings") if isinstance(data.get("ratings"), dict) else {}

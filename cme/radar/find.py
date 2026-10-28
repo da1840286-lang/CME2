@@ -6,6 +6,7 @@ vendored legacy modules. Unknown values stay None, never zero.
 from __future__ import annotations
 import hashlib
 import json
+import math
 import os
 import re
 import time
@@ -13,7 +14,7 @@ from pathlib import Path
 
 from .evidence import classify_commercial_evidence
 from .attention import attention_absolute_v1, attention_rank, MECHANISM_ATTENTION_FLOOR, MECHANISM_MIN_COVERAGE
-from .fit import ADJACENT_MECHANISM, classify_source_role, match_source_to_product_query
+from .fit import ADJACENT_MECHANISM, TARGET_PRODUCT, classify_source_role, match_source_to_product_query
 from .seen import SeenLedger, build_scope
 
 DATA_DIR = Path(__file__).resolve().parent / "data"
@@ -106,7 +107,9 @@ class _DiscoveryEvidenceTracker:
     _LOCAL_FIELDS = frozenset({
         "_client", "calls", "values_by_identity", "positions_by_identity",
         "provenance_by_identity", "values_by_ad_id", "positions_by_ad_id",
-        "retention_order_by",
+        "retention_order_by", "offer_context", "enforce_product_role",
+        "product_role_gate", "candidate_provider_ids",
+        "unfiltered_retention_identity_tokens", "unfiltered_retention_ad_ids",
     })
     PERFORMANCE_FIELDS = (
         "ctr", "cvr", "play_2s_rate", "play_6s_rate", "views", "likes",
@@ -114,8 +117,17 @@ class _DiscoveryEvidenceTracker:
     )
     RETENTION_FIELDS = ("retention_2s", "retention_6s", "retention_curve")
 
-    def __init__(self, client):
+    def __init__(self, client, *, offer=None):
+        offer = offer if isinstance(offer, dict) else {}
+        context = {
+            "target_offer": str(offer.get("target_offer") or offer.get("name") or "").strip(),
+            "product_type": str(offer.get("product_type") or "").strip(),
+            "product_category": str(offer.get("product_category") or "").strip(),
+        }
         object.__setattr__(self, "_client", client)
+        object.__setattr__(self, "offer_context", context)
+        object.__setattr__(self, "enforce_product_role", bool(
+            context["product_type"] or context["product_category"] or context["target_offer"]))
         object.__setattr__(self, "calls", [])
         object.__setattr__(self, "values_by_identity", {})
         object.__setattr__(self, "positions_by_identity", {})
@@ -123,6 +135,14 @@ class _DiscoveryEvidenceTracker:
         object.__setattr__(self, "values_by_ad_id", {})
         object.__setattr__(self, "positions_by_ad_id", {})
         object.__setattr__(self, "retention_order_by", None)
+        object.__setattr__(self, "candidate_provider_ids", set())
+        object.__setattr__(self, "unfiltered_retention_identity_tokens", set())
+        object.__setattr__(self, "unfiltered_retention_ad_ids", set())
+        object.__setattr__(self, "product_role_gate", {
+            "applied": bool(context["product_type"] or context["product_category"] or context["target_offer"]),
+            "raw_rows": 0, "accepted_rows": 0, "rejected_rows": 0,
+            "rejected_by_reason": {}, "rejected_examples": [],
+        })
 
     def __getattr__(self, name):
         return getattr(self._client, name)
@@ -168,20 +188,34 @@ class _DiscoveryEvidenceTracker:
     def _nonempty_count(rows, field):
         return sum(1 for row in rows if isinstance(row, dict) and row.get(field) not in (None, "", []))
 
-    def _remember(self, result, *, source, order_by="", keyword="", retention_requested=False):
+    def _remember(
+        self, result, *, source, order_by="", keyword="", retention_requested=False,
+        unfiltered_retention=False, candidate_lane=True,
+    ):
+        """Record raw provider evidence, filtering product discovery before the legacy selector."""
         result = result if isinstance(result, dict) else {}
-        rows = [row for row in (result.get("items") or []) if isinstance(row, dict)]
-        for position, row in enumerate(rows, start=1):
+        raw_rows = [dict(row) for row in (result.get("items") or []) if isinstance(row, dict)]
+        rows_for_legacy, eligible_rows, rejected, role_counts = [], 0, [], {}
+        for position, row in enumerate(raw_rows, start=1):
             tokens = self._identity_tokens(row)
+            ad_id = str(row.get("ad_id") or row.get("video_id") or "").strip()
+            if candidate_lane:
+                identity = ad_id or (sorted(tokens)[0] if tokens else "")
+                if identity:
+                    self.candidate_provider_ids.add(identity)
+
             values = self._row_values(row)
             if not retention_requested:
-                for field in self.RETENTION_FIELDS + ("retention_curve_invalid_points",):
+                for field in self.RETENTION_FIELDS + ("retention_curve_invalid_points", "retention_provenance"):
                     values.pop(field, None)
-            ad_id = str(row.get("ad_id") or row.get("video_id") or "").strip()
+                    row.pop(field, None)
             for token in tokens:
                 bucket = self.values_by_identity.setdefault(token, {})
                 for field, value in values.items():
-                    bucket.setdefault(field, value)
+                    if unfiltered_retention and field in self.RETENTION_FIELDS + ("retention_curve_invalid_points",):
+                        bucket[field] = value
+                    else:
+                        bucket.setdefault(field, value)
                 positions = self.positions_by_identity.setdefault(token, {})
                 if source == "ads_top":
                     if retention_requested:
@@ -196,11 +230,18 @@ class _DiscoveryEvidenceTracker:
                     provenance_bucket = self.provenance_by_identity.setdefault(token, {})
                     for field, value in provenance.items():
                         if value:
-                            provenance_bucket.setdefault(str(field), value)
+                            if unfiltered_retention:
+                                provenance_bucket[str(field)] = value
+                            else:
+                                provenance_bucket.setdefault(str(field), value)
+
             if ad_id:
                 id_values = self.values_by_ad_id.setdefault(ad_id, {})
                 for field, value in values.items():
-                    id_values.setdefault(field, value)
+                    if unfiltered_retention and field in self.RETENTION_FIELDS + ("retention_curve_invalid_points",):
+                        id_values[field] = value
+                    else:
+                        id_values.setdefault(field, value)
                 if source == "ads_top":
                     id_positions = self.positions_by_ad_id.setdefault(ad_id, {})
                     if retention_requested:
@@ -210,31 +251,96 @@ class _DiscoveryEvidenceTracker:
                     else:
                         position_key = str(order_by)
                     id_positions.setdefault(position_key, position)
-            if retention_requested:
+
+            if retention_requested and unfiltered_retention and any(
+                row.get(field) not in (None, "", []) for field in self.RETENTION_FIELDS
+            ):
+                self.unfiltered_retention_identity_tokens.update(tokens)
+                if ad_id:
+                    self.unfiltered_retention_ad_ids.add(ad_id)
                 object.__setattr__(self, "retention_order_by", order_by)
 
-        playback_fields = ("play_2s_rate", "play_6s_rate")
+            eligible = True
+            if candidate_lane and self.enforce_product_role:
+                role = classify_source_role(
+                    row,
+                    product_type=self.offer_context.get("product_type") or self.offer_context.get("product_category") or "",
+                    product_category=self.offer_context.get("product_category") or "",
+                    target_offer=self.offer_context.get("target_offer") or "",
+                )
+                row["source_role_info"] = role
+                eligible = (
+                    role.get("role") == TARGET_PRODUCT
+                    and bool(role.get("promotion_evidence"))
+                    and bool(role.get("target_promotion_evidence"))
+                )
+                if not eligible:
+                    reason = str(role.get("role") or "OFF_TOPIC").upper()
+                    if reason == TARGET_PRODUCT and not role.get("target_promotion_evidence"):
+                        reason = "TARGET_PRODUCT_NOT_PROMOTED"
+                    elif reason == TARGET_PRODUCT and not role.get("promotion_evidence"):
+                        reason = "NO_INDEPENDENT_PROMOTION_EVIDENCE"
+                    role_counts[reason] = role_counts.get(reason, 0) + 1
+                    rejected.append({
+                        "ad_id": ad_id, "title": str(row.get("title") or "")[:180],
+                        "role": role.get("role"), "reason": reason,
+                        "source": source, "order_by": order_by, "keyword": keyword or "",
+                    })
+            if eligible:
+                eligible_rows += 1
+            # Preserve raw rows for the existing discovery engine and its rejection diagnostics.
+            # The final adapter gate removes role-ineligible candidates from the actual shortlist.
+            rows_for_legacy.append(row)
+
+        if candidate_lane:
+            gate = self.product_role_gate
+            gate["raw_rows"] += len(raw_rows)
+            gate["accepted_rows"] += eligible_rows
+            gate["rejected_rows"] += len(raw_rows) - eligible_rows
+            for reason, count in role_counts.items():
+                gate["rejected_by_reason"][reason] = gate["rejected_by_reason"].get(reason, 0) + count
+            gate["rejected_examples"].extend(rejected[:max(0, 12 - len(gate["rejected_examples"]))])
+
         call = {
-            "call": len(self.calls) + 1,
-            "source": source,
-            "order_by": order_by,
+            "call": len(self.calls) + 1, "source": source, "order_by": order_by,
             "keyword": keyword or "",
-            "returned": len(rows),
-            "credits_used": result.get("credits_used"),
-            "request_id": result.get("request_id"),
+            "returned": len(raw_rows),
+            "provider_rows_returned": len(raw_rows),
+            "eligible_rows_returned": eligible_rows if candidate_lane else None,
+            "role_rejected_rows": len(raw_rows) - eligible_rows if candidate_lane else 0,
+            "role_rejected_by_reason": role_counts,
+            "candidate_lane": bool(candidate_lane),
+            "credits_used": result.get("credits_used"), "request_id": result.get("request_id"),
             "provider_params": result.get("params") or {},
-            "returned_ad_ids": [str(row.get("ad_id") or row.get("video_id") or "") for row in rows[:12]],
+            "returned_ad_ids": [str(row.get("ad_id") or row.get("video_id") or "") for row in raw_rows[:12]],
             "playback_metrics_returned": {
-                field: self._nonempty_count(rows, field) for field in playback_fields
+                field: self._nonempty_count(raw_rows, field) for field in ("play_2s_rate", "play_6s_rate")
             },
             "retention_requested": bool(retention_requested),
+            "unfiltered_retention_request": bool(retention_requested and unfiltered_retention),
             "retention_returned": {
-                field: self._nonempty_count(rows, field) for field in self.RETENTION_FIELDS
+                field: self._nonempty_count(raw_rows, field) for field in self.RETENTION_FIELDS
             } if retention_requested else {},
             "raw_playback_field_diagnostics": result.get("raw_playback_field_diagnostics") or {},
         }
         self.calls.append(call)
+        result = dict(result)
+        result["items"] = rows_for_legacy
         return result
+
+    def role_gate_diagnostics(self):
+        gate = dict(self.product_role_gate)
+        gate["rejected_by_reason"] = dict(self.product_role_gate.get("rejected_by_reason") or {})
+        gate["rejected_examples"] = list(self.product_role_gate.get("rejected_examples") or [])
+        gate["unique_provider_ads"] = len(self.candidate_provider_ids)
+        return gate
+
+    def has_unfiltered_retention(self, record):
+        tokens = self._identity_tokens(record)
+        if tokens & self.unfiltered_retention_identity_tokens:
+            return True
+        ad_id = str((record or {}).get("ad_id") or (record or {}).get("video_id") or "").strip()
+        return bool(ad_id and ad_id in self.unfiltered_retention_ad_ids)
 
     def fetch_sponsored_search(self, **kwargs):
         result = self._client.fetch_sponsored_search(**kwargs)
@@ -245,10 +351,24 @@ class _DiscoveryEvidenceTracker:
 
     def fetch_board(self, **kwargs):
         result = self._client.fetch_board(**kwargs)
+        retention_requested = bool(kwargs.get("include_retention"))
+        unfiltered_retention = retention_requested and not kwargs.get("keyword") and not kwargs.get("industry")
         return self._remember(
             result, source="ads_top", order_by=str(kwargs.get("order_by") or ""),
             keyword=str(kwargs.get("keyword") or ""),
-            retention_requested=bool(kwargs.get("include_retention")),
+            retention_requested=retention_requested, unfiltered_retention=unfiltered_retention,
+        )
+
+    def fetch_retention_enrichment(self, **kwargs):
+        """Fetch retention separately; this sample enriches identities and never enters the shortlist."""
+        result = self._client.fetch_board(**kwargs)
+        retention_requested = bool(kwargs.get("include_retention"))
+        unfiltered_retention = retention_requested and not kwargs.get("keyword") and not kwargs.get("industry")
+        return self._remember(
+            result, source="ads_top", order_by=str(kwargs.get("order_by") or ""),
+            keyword=str(kwargs.get("keyword") or ""),
+            retention_requested=retention_requested, unfiltered_retention=unfiltered_retention,
+            candidate_lane=False,
         )
 
     def evidence_for(self, record):
@@ -278,8 +398,11 @@ def _merge_discovery_evidence(ranked, tracker):
         if not isinstance(record, dict):
             continue
         values, positions, provenance = tracker.evidence_for(record)
+        unfiltered_retention = tracker.has_unfiltered_retention(record)
         for field, value in values.items():
-            if record.get(field) in (None, ""):
+            if unfiltered_retention and field in tracker.RETENTION_FIELDS + ("retention_curve_invalid_points",):
+                record[field] = value
+            elif record.get(field) in (None, ""):
                 record[field] = value
         current_positions = record.get("discovery_board_positions")
         current_positions = dict(current_positions) if isinstance(current_positions, dict) else {}
@@ -300,8 +423,12 @@ def _merge_discovery_evidence(ranked, tracker):
         if current_provenance:
             record["retention_provenance"] = current_provenance
         if any(record.get(field) not in (None, "", []) for field in tracker.RETENTION_FIELDS):
-            record["retention_collection_order_by"] = tracker.retention_order_by
-            record["retention_collected_via_unfiltered_request"] = True
+            if unfiltered_retention:
+                record["retention_collection_order_by"] = tracker.retention_order_by
+                record["retention_collected_via_unfiltered_request"] = True
+            else:
+                record.pop("retention_collection_order_by", None)
+                record["retention_collected_via_unfiltered_request"] = False
 
 
 def _enrich_selection_diagnostics(stats, tracker):
@@ -595,10 +722,12 @@ def _query_offer_conflict(keywords: list[str], offer: dict[str, str]) -> dict | 
 
 
 def _find_diagnostics(stats: dict, candidate_count: int) -> dict:
-    """Distinguish absent inventory, unverified relevance, and no qualified auto source."""
+    """Distinguish missing inventory, irrelevant sources, and missing requested performance evidence."""
     calls = stats.get("calls") or []
     strategy = stats.get("discovery_strategy") or {}
-    raw_returned = sum(int(call.get("returned") or 0) for call in calls if isinstance(call, dict))
+    raw_returned = int(stats.get("provider_rows_returned") or 0)
+    if "provider_rows_returned" not in stats:
+        raw_returned = sum(int(call.get("returned") or 0) for call in calls if isinstance(call, dict))
     direct = int(stats.get("direct_relevant_ads") or 0)
     expanded = int(stats.get("expanded_relevant_ads") or 0)
     target_relevant = int(stats.get("target_relevant_ads") or 0)
@@ -608,12 +737,13 @@ def _find_diagnostics(stats: dict, candidate_count: int) -> dict:
     hard_excluded = int(stats.get("pre_visual_verification_hard_excluded_ads") or 0)
     selection_details = stats.get("source_selection_diagnostics") or {}
     performance_ready = int(stats.get("performance_ready_source_ads") or 0)
+    performance_gate = stats.get("requested_performance_evidence_gate") or {}
+    role_gate = stats.get("product_source_role_gate") or {}
     if candidate_count:
         outcome = "CANDIDATES_FOUND"
         explanation = (
-            "FIND shortlisted product-relevant sources using the strongest available platform-performance evidence. "
-            "Views/likes-only candidates are labeled as engagement proxies, not proof of sales. "
-            "Source-commercial/mechanism eligibility and Target-Fit remain separate downstream transfer gates."
+            "FIND shortlisted sources only after product-role and requested-performance evidence checks. "
+            "Attention metrics are not proof of sales; commercial/mechanism and Target-Fit remain downstream gates."
         )
     elif raw_returned == 0:
         outcome = "NO_API_ROWS"
@@ -621,15 +751,30 @@ def _find_diagnostics(stats: dict, candidate_count: int) -> dict:
     elif target_relevant == 0:
         outcome = "NO_TARGET_RELEVANCE"
         explanation = (
-            "Rows were returned, but no playable source had confirmed target relevance. Unknown-relevance rows are held "
-            "for a separate source check, not admitted from the query keyword alone. "
-            "commercial success is not required to extract a pattern in the manual pattern-only path."
+            "Rows were returned, but no playable source had confirmed target relevance. Unknown-relevance rows remain "
+            "held for source review; search terms alone are not evidence that the ad promotes the target product. "
+            "commercial success is not required to extract a pattern, but target relevance and source-role checks "
+            "remain separate admission requirements."
+        )
+    elif role_gate.get("applied") and int(role_gate.get("raw_rows") or 0) > 0 and int(role_gate.get("accepted_rows") or 0) == 0:
+        outcome = "NO_TARGET_PRODUCT_AD"
+        explanation = (
+            "Discovery returned relevant-looking rows, but none independently showed the target product being promoted. "
+            "Incidental mentions, use context, and adjacent products were rejected in product mode."
+        )
+    elif (performance_gate.get("applied")
+          and int(performance_gate.get("considered_candidates") or 0) > 0
+          and int(performance_gate.get("accepted_candidates") or 0) == 0):
+        outcome = "NO_REQUESTED_PERFORMANCE_EVIDENCE"
+        explanation = (
+            "Target-product sources were found, but none had a native numeric value or a real position on the requested "
+            "performance board(s). FIND did not silently substitute views/likes engagement proxies."
         )
     elif performance_ready == 0:
         outcome = "NO_PERFORMANCE_EVIDENCE"
         explanation = (
-            "Product-relevant sources were found, but none had a performance-board position or an available "
-            "performance/engagement score strong enough to justify the analysis shortlist. This is not a profitability verdict."
+            "Product-relevant sources were found, but none had a performance-board position or available performance "
+            "evidence sufficient for the requested shortlist. This is not a profitability verdict."
         )
     else:
         outcome = "NO_RANKED_CANDIDATE"
@@ -643,7 +788,7 @@ def _find_diagnostics(stats: dict, candidate_count: int) -> dict:
         "search_lane": strategy.get("supply_lane") or "unknown",
         "requests_executed": int(stats.get("executed_requests") or len(calls)),
         "raw_ads_returned": raw_returned,
-        "unique_ads": int(stats.get("unique_ads") or 0),
+        "unique_ads": int(stats.get("provider_unique_ads") or stats.get("unique_ads") or 0),
         "direct_relevant_ads": direct,
         "expanded_relevant_ads": expanded,
         "target_relevant_ads": target_relevant,
@@ -658,6 +803,166 @@ def _find_diagnostics(stats: dict, candidate_count: int) -> dict:
         "search_queries_executed": list(strategy.get("supply_queries_executed") or []),
         "request_sources": [str(call.get("source") or "unknown") for call in calls if isinstance(call, dict)],
     }
+
+
+def _numeric_signal(value) -> bool:
+    """Accept only finite numeric metrics/positions; missing and boolean values are not evidence."""
+    if isinstance(value, bool) or value in (None, "", []):
+        return False
+    try:
+        return math.isfinite(float(value))
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
+def _has_requested_performance_evidence(candidate: dict, requested_metrics: list[str]) -> bool:
+    """Require a requested native metric or a real position on a requested board."""
+    if not requested_metrics:
+        return True
+    candidate = candidate if isinstance(candidate, dict) else {}
+    record = candidate.get("legacy_record") if isinstance(candidate.get("legacy_record"), dict) else {}
+    metrics = candidate.get("metrics") if isinstance(candidate.get("metrics"), dict) else {}
+    for metric in requested_metrics:
+        value = record.get(metric)
+        metric_row = metrics.get(metric)
+        if isinstance(metric_row, dict):
+            value = metric_row.get("value", value)
+        if _numeric_signal(value):
+            return True
+    positions = record.get("discovery_board_positions")
+    positions = positions if isinstance(positions, dict) else {}
+    why = candidate.get("why") if isinstance(candidate.get("why"), dict) else {}
+    why_positions = why.get("discovery_board_positions")
+    if isinstance(why_positions, dict):
+        positions = {**positions, **why_positions}
+    for key, position in positions.items():
+        if any(str(key) == metric or str(key).startswith(metric + "|") for metric in requested_metrics):
+            if _numeric_signal(position) and float(position) >= 1:
+                return True
+    performance = candidate.get("performance_evidence")
+    performance = performance if isinstance(performance, dict) else {}
+    reported_boards = performance.get("performance_boards")
+    if isinstance(reported_boards, list) and any(str(board) in requested_metrics for board in reported_boards):
+        return True
+    return False
+
+
+def _apply_product_selection_gates(candidates: list[dict], request: dict) -> tuple[list[dict], dict]:
+    """Apply target-role and requested-performance gates after the legacy shortlist as defense-in-depth."""
+    request = request if isinstance(request, dict) else {}
+    context_present = bool(request.get("product_type") or request.get("product_category") or request.get("target_offer"))
+    known_metrics = {"ctr", "cvr", "play_2s_rate", "play_6s_rate"}
+    requested = list(dict.fromkeys(
+        str(metric) for metric in (request.get("requested_performance_order_bys") or [])
+        if str(metric) in known_metrics
+    ))
+    role_rejected, metric_rejected, accepted = [], [], []
+    role_eligible_count = 0
+    role_gate = {
+        "applied": context_present, "raw_candidates": len(candidates or []),
+        "role_eligible_candidates": 0, "rejected_candidates": 0,
+        "rejected_by_reason": {}, "rejected_examples": [],
+    }
+    performance_gate = {
+        "applied": bool(requested), "requested_metrics": requested,
+        "considered_candidates": 0, "accepted_candidates": 0,
+        "rejected_candidates": 0, "rejected_examples": [],
+        "fallback_to_engagement_proxy": False,
+    }
+    for candidate in candidates or []:
+        candidate = candidate if isinstance(candidate, dict) else {}
+        record = candidate.get("legacy_record")
+        record = record if isinstance(record, dict) else {}
+        if context_present:
+            role = classify_source_role(
+                record,
+                product_type=request.get("product_type") or request.get("product_category") or "",
+                product_category=request.get("product_category") or "",
+                target_offer=request.get("target_offer") or "",
+            )
+            record["source_role_info"] = role
+            source_selection = candidate.get("source_selection")
+            source_selection = dict(source_selection) if isinstance(source_selection, dict) else {}
+            source_selection.update({
+                "role": role.get("role") or "OFF_TOPIC", "role_reason": role.get("reason") or "",
+                "source_body_evidence": role.get("source_body_evidence") or "",
+                "target_anchor": role.get("target_anchor"),
+                "target_mention_source": role.get("target_mention_source"),
+                "matched_target_terms": role.get("matched_target_terms") or [],
+                "detected_product_nouns": role.get("detected_product_nouns") or [],
+                "promotion_evidence": bool(role.get("promotion_evidence")),
+                "target_promotion_evidence": bool(role.get("target_promotion_evidence")),
+                "promo_signals": role.get("promo_signals") or [],
+                "context_verified": role.get("context_verified"),
+                "confidence": role.get("confidence") or "UNKNOWN",
+            })
+            candidate["source_selection"] = source_selection
+            eligible_role = (
+                role.get("role") == TARGET_PRODUCT
+                and bool(role.get("promotion_evidence"))
+                and bool(role.get("target_promotion_evidence"))
+            )
+            if not eligible_role:
+                reason = str(role.get("role") or "OFF_TOPIC").upper()
+                if reason == TARGET_PRODUCT and not role.get("target_promotion_evidence"):
+                    reason = "TARGET_PRODUCT_NOT_PROMOTED"
+                elif reason == TARGET_PRODUCT and not role.get("promotion_evidence"):
+                    reason = "NO_INDEPENDENT_PROMOTION_EVIDENCE"
+                role_gate["rejected_candidates"] += 1
+                role_gate["rejected_by_reason"][reason] = role_gate["rejected_by_reason"].get(reason, 0) + 1
+                role_rejected.append({
+                    "id": candidate.get("id"), "ad_id": record.get("ad_id"),
+                    "title": str(record.get("title") or candidate.get("title") or "")[:180],
+                    "role": role.get("role"), "reason": reason,
+                })
+                continue
+        role_eligible_count += 1
+        if requested:
+            performance_gate["considered_candidates"] += 1
+            if not _has_requested_performance_evidence(candidate, requested):
+                metric_rejected.append({
+                    "id": candidate.get("id"), "ad_id": record.get("ad_id"),
+                    "title": str(record.get("title") or candidate.get("title") or "")[:180],
+                    "reason": "REQUESTED_PERFORMANCE_EVIDENCE_MISSING",
+                    "available_basis": (candidate.get("performance_evidence") or {}).get("basis"),
+                    "requested_metrics": list(requested),
+                })
+                continue
+            performance_gate["accepted_candidates"] += 1
+        accepted.append(candidate)
+    role_gate["role_eligible_candidates"] = role_eligible_count
+    role_gate["rejected_examples"] = role_rejected[:12]
+    performance_gate["rejected_candidates"] = len(metric_rejected)
+    performance_gate["rejected_examples"] = metric_rejected[:12]
+    return accepted, {"product_selection": role_gate, "requested_performance": performance_gate}
+
+
+def _attach_tracker_diagnostics(stats: dict, tracker: _DiscoveryEvidenceTracker) -> dict:
+    """Separate raw provider-return counts from the filtered candidate queue."""
+    if not isinstance(stats, dict):
+        stats = {}
+    tracked = [call for call in tracker.calls if call.get("candidate_lane")]
+    summary = tracker.role_gate_diagnostics()
+    stats["provider_rows_returned"] = int(summary.get("raw_rows") or 0)
+    stats["provider_unique_ads"] = int(summary.get("unique_provider_ads") or 0)
+    stats["product_source_role_gate"] = summary
+    calls = stats.get("calls")
+    if not isinstance(calls, list):
+        calls = []
+        stats["calls"] = calls
+    for index, observed in enumerate(tracked):
+        if index >= len(calls):
+            break
+        call = calls[index]
+        if not isinstance(call, dict):
+            continue
+        call["provider_rows_returned"] = int(observed.get("provider_rows_returned") or 0)
+        call["eligible_rows_returned"] = int(observed.get("eligible_rows_returned") or 0)
+        call["role_rejected_rows"] = int(observed.get("role_rejected_rows") or 0)
+        call["role_rejected_by_reason"] = dict(observed.get("role_rejected_by_reason") or {})
+        call["playback_metrics_returned"] = dict(observed.get("playback_metrics_returned") or {})
+        call["unfiltered_retention_request"] = bool(observed.get("unfiltered_retention_request"))
+    return stats
 
 
 def _source_seen(record: dict, keys: set[str]) -> bool:
@@ -942,10 +1247,10 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
     search_terms = _rotate_query_terms(search_terms, prior_query_history)
     request["search_terms"] = list(search_terms)
     dual_playback_retention = retention_strategy.get("mode") == "targeted_playback_boards_plus_retention"
-    evidence_tracker = _DiscoveryEvidenceTracker(client) if dual_playback_retention else None
+    evidence_tracker = _DiscoveryEvidenceTracker(client, offer=offer)
     try:
         ranked = discover_and_rank(
-            client=evidence_tracker or client, country=country, period=period, keywords=search_terms, order_bys=order_bys,
+            client=evidence_tracker, country=country, period=period, keywords=search_terms, order_bys=order_bys,
             limit_per_board=limit_per_board, max_ads=max_ads,
             max_requests=(max_requests - 1 if dual_playback_retention else max_requests),
             keyword_boards=(2 if dual_playback_retention else max_requests),
@@ -960,7 +1265,7 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
         if dual_playback_retention:
             # This is a separate, unfiltered data-enrichment request. Its rows can add
             # retention only to identities already shortlisted by the gated discovery pass.
-            evidence_tracker.fetch_board(
+            evidence_tracker.fetch_retention_enrichment(
                 country=country,
                 period=period,
                 order_by=retention_strategy["retention_request_order_by"],
@@ -970,7 +1275,6 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
                 limit=limit_per_board,
                 include_retention=True,
             )
-            _merge_discovery_evidence(ranked, evidence_tracker)
     except SocialCrawlError as exc:
         raise FindUnavailable(
             "UNAVAILABLE",
@@ -994,10 +1298,14 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
             },
         ) from exc
     stats = getattr(client, "last_discovery_stats", {}) or {}
-    if dual_playback_retention and evidence_tracker is not None:
+    if dual_playback_retention:
         calls = list(stats.get("calls") or [])
-        if evidence_tracker.calls and evidence_tracker.calls[-1].get("retention_requested"):
-            retention_call = dict(evidence_tracker.calls[-1])
+        enrichment_calls = [
+            call for call in evidence_tracker.calls
+            if not call.get("candidate_lane") and call.get("retention_requested")
+        ]
+        if enrichment_calls:
+            retention_call = dict(enrichment_calls[-1])
             retention_call["call"] = len(calls) + 1
             calls.append(retention_call)
             stats["calls"] = calls
@@ -1007,8 +1315,13 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
             credits = retention_call.get("credits_used")
             if isinstance(credits, (int, float)):
                 stats["total_credits_reported"] = int(stats.get("total_credits_reported") or 0) + int(credits)
-        _enrich_selection_diagnostics(stats, evidence_tracker)
-    candidates = [to_candidate(item, request, stamp, "found") for item in ranked]
+    stats = _attach_tracker_diagnostics(stats, evidence_tracker)
+    _merge_discovery_evidence(ranked, evidence_tracker)
+    _enrich_selection_diagnostics(stats, evidence_tracker)
+    candidates_before_final_gates = [to_candidate(item, request, stamp, "found") for item in ranked]
+    candidates, final_gates = _apply_product_selection_gates(candidates_before_final_gates, request)
+    stats["product_selection_gate"] = final_gates["product_selection"]
+    stats["requested_performance_evidence_gate"] = final_gates["requested_performance"]
     strategy = stats.setdefault("discovery_strategy", {})
     executed_calls = stats.get("calls") or []
     if retention_strategy.get("mode") == "targeted_playback_boards_plus_retention":
@@ -1028,6 +1341,9 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
     strategy["supply_search_calls_used"] = sum(1 for call in executed_calls if call.get("source") == "sponsored_search")
     strategy["performance_calls_used"] = sum(1 for call in executed_calls if call.get("source") == "ads_top")
     diagnostics = _find_diagnostics(stats, len(candidates))
+    diagnostics["product_source_role_gate"] = stats.get("product_source_role_gate") or {}
+    diagnostics["product_selection_gate"] = stats.get("product_selection_gate") or {}
+    diagnostics["requested_performance_evidence_gate"] = stats.get("requested_performance_evidence_gate") or {}
     retention_calls = [
         call for call in (stats.get("calls") or [])
         if isinstance(call, dict) and call.get("retention_requested")

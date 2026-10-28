@@ -244,7 +244,7 @@ class FetchPlanRetentionTests(unittest.TestCase):
         record = {
             "ad_id": "ad-find-1",
             "video_id": "vid-find-1",
-            "title": "Cordless car vacuum",
+            "title": "Shop now: cordless car vacuum removes crumbs",
             "source_url": "https://www.tiktok.com/@brand/video/ad-find-1",
             "video_url": "https://cdn.example/ad-find-1.mp4",
             "discovery_source": "tiktok_sponsored_search",

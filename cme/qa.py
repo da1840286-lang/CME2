@@ -204,13 +204,13 @@ def judge_batch_checks(path, atoms, judge_fn, required=False, reference_images=(
     try:
         answers = judge_fn(path, atoms, refs) if refs else judge_fn(path, atoms)
     except Exception as e:
-        out = [CheckResult(a.id, "NOT_RUN", required, "judge", f"judge unavailable: {e}") for a in atoms]
+        out = [CheckResult(a.id, "NOT_RUN", bool(required or a.priority == "MUST"), "judge", f"judge unavailable: {e}") for a in atoms]
         if refs:
             out.append(CheckResult(PRODUCT_IDENTITY_CHECK_ID, "NOT_RUN", True, "judge",
                                    f"product-reference comparison unavailable: {type(e).__name__}: {e}"))
         return out
     if not isinstance(answers, dict):
-        out = [CheckResult(a.id, "NOT_RUN", required, "judge", "malformed judge response") for a in atoms]
+        out = [CheckResult(a.id, "NOT_RUN", bool(required or a.priority == "MUST"), "judge", "malformed judge response") for a in atoms]
         if refs:
             out.append(CheckResult(PRODUCT_IDENTITY_CHECK_ID, "NOT_RUN", True, "judge", "malformed judge response"))
         return out
@@ -218,13 +218,13 @@ def judge_batch_checks(path, atoms, judge_fn, required=False, reference_images=(
     for a in atoms:
         r = answers.get(a.id)
         if not isinstance(r, dict):
-            out.append(CheckResult(a.id, "NOT_RUN", required, "judge", "no valid answer for this requirement"))
+            out.append(CheckResult(a.id, "NOT_RUN", bool(required or a.priority == "MUST"), "judge", "no valid answer for this requirement"))
             continue
         evidence = r.get("evidence")
         if type(r.get("pass")) is not bool or not isinstance(evidence, str) or not evidence.strip():
-            out.append(CheckResult(a.id, "NOT_RUN", required, "judge", "malformed answer or missing evidence"))
+            out.append(CheckResult(a.id, "NOT_RUN", bool(required or a.priority == "MUST"), "judge", "malformed answer or missing evidence"))
             continue
-        out.append(CheckResult(a.id, "PASS" if r["pass"] else "FAIL", required, "judge", evidence.strip()[:120]))
+        out.append(CheckResult(a.id, "PASS" if r["pass"] else "FAIL", bool(required or a.priority == "MUST"), "judge", evidence.strip()[:120]))
     if refs:
         r = answers.get(PRODUCT_IDENTITY_CHECK_ID)
         if not isinstance(r, dict):
