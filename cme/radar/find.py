@@ -347,6 +347,7 @@ class _DiscoveryEvidenceTracker:
                 field: self._nonempty_count(raw_rows, field) for field in self.RETENTION_FIELDS
             } if retention_requested else {},
             "raw_playback_field_diagnostics": result.get("raw_playback_field_diagnostics") or {},
+            "provider_response_meta": result.get("provider_response_meta") or {},
         }
         self.calls.append(call)
         result = dict(result)
@@ -1413,6 +1414,7 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
                     "retention_requested": bool(observed.get("retention_requested")),
                     "retention_returned": dict(observed.get("retention_returned") or {}),
                     "raw_playback_field_diagnostics": observed.get("raw_playback_field_diagnostics") or {},
+                    "provider_response_meta": observed.get("provider_response_meta") or {},
                 })
             stats["calls"] = provider_calls
             calls = list(stats.get("calls") or [])
@@ -1499,10 +1501,62 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
         1 for call in executed_calls
         if call.get("source") == "ads_top" and not call.get("retention_requested")
     )
+    if performance_order_bys:
+        playback_board_calls = [
+            call for call in (stats.get("calls") or [])
+            if isinstance(call, dict)
+            and call.get("order_by") in {"play_2s_rate", "play_6s_rate"}
+            and not call.get("retention_requested")
+        ]
+        stats["performance_metric_availability"] = {
+            "requested_metrics": list(performance_order_bys),
+            "numeric_values_returned": {
+                metric: sum(
+                    int((call.get("playback_metrics_returned") or {}).get(metric) or 0)
+                    for call in playback_board_calls if call.get("order_by") == metric
+                )
+                for metric in performance_order_bys
+            },
+            "board_rows_returned": {
+                metric: sum(
+                    int(call.get("returned") or 0)
+                    for call in playback_board_calls if call.get("order_by") == metric
+                )
+                for metric in performance_order_bys
+            },
+            "provider_contract_note": (
+                "SocialCrawl documents play_2s_rate/play_6s_rate as Ads Top sorting options, "
+                "but does not publish those numeric rate values in each ad row. Retention points "
+                "are separately returned observations and are not the exact board score."
+            ),
+            "interpretation": (
+                "A positive board row count proves only that the requested board returned rows; "
+                "it does not mean the numeric playback-rate fields were returned."
+            ),
+        }
     diagnostics = _find_diagnostics(stats, len(candidates))
     diagnostics["product_source_role_gate"] = stats.get("product_source_role_gate") or {}
     diagnostics["product_selection_gate"] = stats.get("product_selection_gate") or {}
     diagnostics["requested_performance_evidence_gate"] = stats.get("requested_performance_evidence_gate") or {}
+    diagnostics["performance_metric_availability"] = stats.get("performance_metric_availability") or {}
+    diagnostics["provider_query_diagnostics"] = [
+        {
+            "call": call.get("call"),
+            "source": call.get("source"),
+            "order_by": call.get("order_by"),
+            "keyword": call.get("keyword") or "",
+            "returned": call.get("returned", 0),
+            "credits_used": call.get("credits_used"),
+            "request_id": call.get("request_id"),
+            "provider_params": call.get("provider_params") or {},
+            "provider_response_meta": call.get("provider_response_meta") or {},
+            "playback_metrics_returned": call.get("playback_metrics_returned") or {},
+            "retention_requested": bool(call.get("retention_requested")),
+            "retention_returned": call.get("retention_returned") or {},
+            "raw_playback_field_diagnostics": call.get("raw_playback_field_diagnostics") or {},
+        }
+        for call in (stats.get("calls") or []) if isinstance(call, dict)
+    ]
     retention_calls = [
         call for call in (stats.get("calls") or [])
         if isinstance(call, dict) and call.get("retention_requested")

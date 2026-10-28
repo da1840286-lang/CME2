@@ -135,6 +135,52 @@ class ParseRetentionTests(unittest.TestCase):
 
 
 class FetchBoardRetentionTests(unittest.TestCase):
+
+    def test_targeted_playback_board_bypasses_cache_and_preserves_provider_metadata(self):
+        client = SocialCrawlTikTokTopAds(api_key="test")
+        payload = {
+            "success": True,
+            "platform": "tiktok",
+            "endpoint": "/v1/tiktok/ads/top",
+            "cached": False,
+            "idempotent_replay": False,
+            "credits_used": 10,
+            "credits_remaining": 100,
+            "request_id": "req-diagnostic",
+            "pagination": {"has_more": False, "page_size": 1},
+            "data": {
+                "items": [{
+                    "post": {
+                        "id": "ad-1",
+                        "content": {"text": "Unrelated skincare ad"},
+                        "ext": {"ad": {"ctr": 0.7, "industry": "Skincare"}},
+                    }
+                }],
+                "dropped": 2,
+                "_warnings": ["keyword filter was not applied upstream"],
+                "empty_reason": None,
+            },
+        }
+        response = Mock()
+        response.status_code = 200
+        response.ok = True
+        response.headers = {"X-Cache": "MISS"}
+        response.json.return_value = payload
+        with patch("cme.radar.legacy.discovery.tiktok_socialcrawl.requests.get", return_value=response) as get:
+            result = client.fetch_board(
+                order_by="play_6s_rate", keyword="car vacuum", ad_language=None, limit=10,
+            )
+
+        self.assertEqual(get.call_args.kwargs["headers"]["Cache-Control"], "no-cache")
+        self.assertEqual(result["provider_response_meta"]["request_cache_control"], "no-cache")
+        meta = result["provider_response_meta"]
+        self.assertFalse(meta["cached"])
+        self.assertEqual(meta["data_dropped"], 2)
+        self.assertEqual(meta["data_warnings_path"], "data._warnings")
+        self.assertEqual(meta["data_warnings"], ["keyword filter was not applied upstream"])
+        self.assertEqual(meta["item_samples"][0]["title"], "Unrelated skincare ad")
+        self.assertEqual(result["raw_playback_field_diagnostics"]["matched_field_occurrences"], 0)
+
     def test_default_request_has_no_include(self):
         client = RecordingClient()
         client.fetch_board(order_by="play_6s_rate")
@@ -348,7 +394,43 @@ class FetchPlanRetentionTests(unittest.TestCase):
             result["candidates"][0]["why"]["discovery_board_positions"]["play_6s_rate|retention"], 1
         )
         self.assertEqual(result["candidates"][0]["retention_evidence"]["collection_order_by"], "play_6s_rate")
+        availability = result["stats"]["performance_metric_availability"]
+        self.assertEqual(
+            availability["numeric_values_returned"],
+            {"play_6s_rate": 0, "play_2s_rate": 0},
+        )
+        self.assertIn("does not publish those numeric rate values", availability["provider_contract_note"])
+        self.assertEqual(len(result["diagnostics"]["provider_query_diagnostics"]), 5)
 
+
+class ProviderResponseMetadataPropagationTests(unittest.TestCase):
+
+    def test_evidence_tracker_preserves_provider_response_metadata(self):
+        metadata = {
+            "cached": False,
+            "data_dropped": 1,
+            "data_warnings": ["keyword filter warning"],
+            "request_cache_control": "no-cache",
+        }
+
+        class Client:
+            ORDER_BY = ("play_6s_rate",)
+
+            def fetch_board(self, **kwargs):
+                return {
+                    "items": [{"ad_id": "ad-1", "title": "Cordless car vacuum, shop now"}],
+                    "credits_used": 10,
+                    "request_id": "req-tracker",
+                    "params": dict(kwargs),
+                    "provider_response_meta": metadata,
+                }
+
+        tracker = _DiscoveryEvidenceTracker(
+            Client(),
+            offer={"name": "Car vacuum", "product_type": "cordless handheld car vacuum"},
+        )
+        tracker.fetch_board(order_by="play_6s_rate", keyword="car vacuum")
+        self.assertEqual(tracker.calls[0]["provider_response_meta"], metadata)
 
 class RetentionMergeTests(unittest.TestCase):
     def test_retention_fields_and_provenance_merge_after_ordinary_board(self):
