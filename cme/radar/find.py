@@ -491,7 +491,11 @@ class _DiscoveryEvidenceTracker:
         # The legacy scheduler feeds its first generic supply term to both playback
         # boards. Prefer the actual target brand/model so the provider filters the
         # requested product, rather than silently repeating a broad category query.
-        if order_by in {"play_2s_rate", "play_6s_rate"} and not retention_requested:
+        if (
+            order_by in {"play_2s_rate", "play_6s_rate"}
+            and order_by in set(self.restricted_order_bys or [])
+            and not retention_requested
+        ):
             target_keyword = _target_board_keyword(self.offer_context, requested_keyword)
             if target_keyword:
                 provider_kwargs["keyword"] = target_keyword
