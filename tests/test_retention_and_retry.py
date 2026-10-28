@@ -2,10 +2,14 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import Mock, patch
+
+import requests
 
 import cme.radar.find  # noqa: F401  sets CME_VERTICALS_DIR before the legacy import
 from cme.radar.legacy.discover import _fetch_plan, _merge_item
-from cme.radar.legacy.discovery.tiktok_socialcrawl import SocialCrawlTikTokTopAds, parse_retention
+from cme.radar.legacy.discovery.tiktok_socialcrawl import SocialCrawlError, SocialCrawlTikTokTopAds, parse_retention
+from cme.radar.socialcrawl_client import RetryingSocialCrawlTikTokTopAds
 from cme.run import qa_retry_feedback
 
 
@@ -22,6 +26,69 @@ class RecordingClient(SocialCrawlTikTokTopAds):
     def _get(self, params):
         self.sent.append(dict(params))
         return board()
+
+
+class RequestRetryTests(unittest.TestCase):
+    @staticmethod
+    def response(status=200, payload=None, headers=None):
+        response = Mock()
+        response.status_code = status
+        response.ok = 200 <= status < 400
+        response.headers = headers or {}
+        response.json.return_value = payload or {"success": True, "data": {"items": []}}
+        return response
+
+    def test_retention_timeout_retries_with_same_idempotency_key(self):
+        client = RetryingSocialCrawlTikTokTopAds(api_key="test")
+        with patch("cme.radar.socialcrawl_client.requests.get",
+                   side_effect=[requests.exceptions.ReadTimeout("slow"), self.response()]) as get, \
+             patch("cme.radar.socialcrawl_client.time.sleep"):
+            payload = client._request_json(client.BASE_URL, {"include": "retention", "order_by": "play_6s_rate"})
+        self.assertTrue(payload["success"])
+        self.assertEqual(get.call_count, 2)
+        calls = [call.kwargs for call in get.call_args_list]
+        self.assertEqual([call["timeout"] for call in calls], [112.0, 112.0])
+        self.assertEqual(calls[0]["headers"]["Idempotency-Key"], calls[1]["headers"]["Idempotency-Key"])
+        self.assertEqual(client.last_request_diagnostics["attempt_count"], 2)
+        self.assertEqual(client.last_request_diagnostics["retry_count"], 1)
+
+    def test_non_retention_request_keeps_45s_timeout_and_no_retry(self):
+        client = RetryingSocialCrawlTikTokTopAds(api_key="test")
+        with patch("cme.radar.socialcrawl_client.requests.get",
+                   side_effect=requests.exceptions.ReadTimeout("slow")) as get:
+            with self.assertRaises(requests.exceptions.ReadTimeout):
+                client._request_json(client.BASE_URL, {"order_by": "for_you"})
+        self.assertEqual(get.call_count, 1)
+        self.assertEqual(get.call_args.kwargs["timeout"], 45.0)
+
+    def test_retention_retries_transient_http_status_and_honors_retry_after(self):
+        client = RetryingSocialCrawlTikTokTopAds(api_key="test")
+        first = self.response(status=429, payload={"success": False}, headers={"Retry-After": "0"})
+        second = self.response()
+        with patch("cme.radar.socialcrawl_client.requests.get",
+                   side_effect=[first, second]) as get, \
+             patch("cme.radar.socialcrawl_client.time.sleep") as sleep:
+            client._request_json(client.BASE_URL, {"include": "retention", "order_by": "play_2s_rate"})
+        self.assertEqual(get.call_count, 2)
+        self.assertEqual(sleep.call_args.args, (0.0,))
+        self.assertEqual(
+            get.call_args_list[0].kwargs["headers"]["Idempotency-Key"],
+            get.call_args_list[1].kwargs["headers"]["Idempotency-Key"],
+        )
+
+    def test_exhausted_retention_retries_keep_attempt_diagnostics(self):
+        client = RetryingSocialCrawlTikTokTopAds(api_key="test")
+        with patch("cme.radar.socialcrawl_client.requests.get",
+                   side_effect=requests.exceptions.ReadTimeout("slow")) as get, \
+             patch("cme.radar.socialcrawl_client.time.sleep"):
+            with self.assertRaises(SocialCrawlError) as raised:
+                client._request_json(client.BASE_URL, {"include": "retention", "order_by": "play_6s_rate"})
+        self.assertEqual(get.call_count, 4)
+        diag = raised.exception.diagnostics
+        self.assertEqual(diag["attempt_count"], 4)
+        self.assertEqual(diag["retry_count"], 3)
+        self.assertTrue(diag["idempotency_key_reused_across_retries"])
+        self.assertEqual(len({call.kwargs["headers"]["Idempotency-Key"] for call in get.call_args_list}), 1)
 
 
 class ParseRetentionTests(unittest.TestCase):

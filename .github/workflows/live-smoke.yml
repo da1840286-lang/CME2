@@ -648,7 +648,46 @@ jobs:
                     "selection_mode": os.environ.get("FIND_SELECTION_MODE", "product"),
                     "performance_order_bys": performance_order_bys,
                     "include_retention": os.environ.get("FIND_INCLUDE_RETENTION", "false").lower() == "true"}
-          result = run_find(params)
+          try:
+              result = run_find(params)
+          except Exception as exc:
+              out = Path("out")
+              out.mkdir(parents=True, exist_ok=True)
+              failure_details = getattr(exc, "diagnostics", {}) or {}
+              stats = failure_details.get("discovery_stats") or {}
+              calls = stats.get("calls") or []
+              try:
+                  request_count = int(stats.get("executed_requests") or len(calls))
+              except (TypeError, ValueError):
+                  request_count = len(calls)
+              failed_call = calls[-1] if calls and calls[-1].get("request_failed") else {}
+              failure_class = "SOCIALCRAWL_REQUEST_FAILED" if failure_details.get("provider") == "SocialCrawl" else "FIND_FAILED"
+              diagnostics = {
+                  "outcome": "PROVIDER_ERROR" if failure_details.get("provider") == "SocialCrawl" else "FIND_ERROR",
+                  "explanation": str(exc)[:1000],
+                  "requests_executed": request_count,
+                  "failed_call": failed_call,
+                  "request_diagnostics": failure_details.get("request") or {},
+              }
+              failure_result = {
+                  "candidates": [],
+                  "stats": stats,
+                  "request": params,
+                  "diagnostics": diagnostics,
+              }
+              (out / "candidates.json").write_text(json.dumps(failure_result, ensure_ascii=False, indent=2), encoding="utf-8")
+              (out / "candidate_summary.json").write_text("[]", encoding="utf-8")
+              (out / "run_result.json").write_text(json.dumps({
+                  "command": "find", "exit_code": 1, "failure_class": failure_class,
+                  "status": "ERROR", "message": str(exc)[:1000], "diagnostics": diagnostics,
+              }, ensure_ascii=False, indent=2), encoding="utf-8")
+              with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+                  summary.write("## FIND failed; diagnostic artifact preserved\n\n")
+                  summary.write(f"- Failure: {type(exc).__name__} — {str(exc)[:800]}\n")
+                  summary.write(f"- Requests recorded: {request_count}\n")
+                  summary.write("- Artifacts: candidates.json, candidate_summary.json, run_result.json.\n\n")
+              print(json.dumps(failure_result, ensure_ascii=False, indent=2))
+              raise SystemExit(1)
           def mark_find_state_if_executed(result):
               stats = result.get("stats") or {}
               diagnostics = result.get("diagnostics") or {}

@@ -31,18 +31,20 @@ LEGACY_ERROR = ""
 try:
     from .legacy.discover import canonical_source_identity_keys, discover_and_rank
     from .legacy.discovery.tiktok_socialcrawl import SocialCrawlError, SocialCrawlTikTokTopAds
+    from .socialcrawl_client import RetryingSocialCrawlTikTokTopAds
     from .legacy.verticals import classify_vertical
 except Exception as e:  # e.g. the 'requests' package is missing
     LEGACY_ERROR = f"{type(e).__name__}: {e}"
-    discover_and_rank = canonical_source_identity_keys = SocialCrawlTikTokTopAds = classify_vertical = None
+    discover_and_rank = canonical_source_identity_keys = SocialCrawlTikTokTopAds = RetryingSocialCrawlTikTokTopAds = classify_vertical = None
 
     class SocialCrawlError(Exception):
         pass
 
 
 class FindUnavailable(Exception):
-    def __init__(self, state: str, detail: str):
+    def __init__(self, state: str, detail: str, diagnostics: dict | None = None):
         self.state, self.detail = state, detail
+        self.diagnostics = diagnostics or {}
         super().__init__(f"{state}: {detail}")
 
 
@@ -589,7 +591,7 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
                 "search_queries_executed": [], "request_sources": [], "input_conflict": conflict,
             },
         }
-    client = client or SocialCrawlTikTokTopAds()
+    client = client or RetryingSocialCrawlTikTokTopAds()
     enabled = client.enabled() if callable(client.enabled) else client.enabled
     if not enabled:
         raise FindUnavailable("NOT_CONFIGURED", find_status()["detail"] or "SOCIALCRAWL_API_KEY is not set")
@@ -622,9 +624,27 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
             search_tags_dir=PRODUCT_SEARCH_TAGS_DIR, supply_search=True,
             performance_order_bys=performance_order_bys, include_retention=include_retention)
     except SocialCrawlError as exc:
-        raise FindUnavailable("UNAVAILABLE", str(exc)) from exc
+        raise FindUnavailable(
+            "UNAVAILABLE",
+            str(exc),
+            diagnostics={
+                "provider": "SocialCrawl",
+                "error_type": type(exc).__name__,
+                "request": getattr(exc, "diagnostics", {}) or getattr(client, "last_request_diagnostics", {}),
+                "discovery_stats": getattr(client, "last_discovery_stats", {}) or {},
+            },
+        ) from exc
     except OSError as exc:
-        raise FindUnavailable("UNAVAILABLE", f"{type(exc).__name__}: {exc}") from exc
+        raise FindUnavailable(
+            "UNAVAILABLE",
+            f"{type(exc).__name__}: {exc}",
+            diagnostics={
+                "provider": "SocialCrawl",
+                "error_type": type(exc).__name__,
+                "request": getattr(client, "last_request_diagnostics", {}),
+                "discovery_stats": getattr(client, "last_discovery_stats", {}) or {},
+            },
+        ) from exc
     candidates = [to_candidate(item, request, stamp, "found") for item in ranked]
     stats = getattr(client, "last_discovery_stats", {}) or {}
     strategy = stats.setdefault("discovery_strategy", {})
