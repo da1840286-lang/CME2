@@ -99,6 +99,227 @@ def _retention_execution_plan(
     return effective, effective_max_requests, strategy
 
 
+class _DiscoveryEvidenceTracker:
+    """Observe provider rows without changing the vendored discovery contract or its gates."""
+
+    _LOCAL_FIELDS = frozenset({
+        "_client", "calls", "values_by_identity", "positions_by_identity",
+        "provenance_by_identity", "values_by_ad_id", "positions_by_ad_id",
+        "retention_order_by",
+    })
+    PERFORMANCE_FIELDS = (
+        "ctr", "cvr", "play_2s_rate", "play_6s_rate", "views", "likes",
+        "comments", "shares", "estimated_reach", "rank",
+    )
+    RETENTION_FIELDS = ("retention_2s", "retention_6s", "retention_curve")
+
+    def __init__(self, client):
+        object.__setattr__(self, "_client", client)
+        object.__setattr__(self, "calls", [])
+        object.__setattr__(self, "values_by_identity", {})
+        object.__setattr__(self, "positions_by_identity", {})
+        object.__setattr__(self, "provenance_by_identity", {})
+        object.__setattr__(self, "values_by_ad_id", {})
+        object.__setattr__(self, "positions_by_ad_id", {})
+        object.__setattr__(self, "retention_order_by", None)
+
+    def __getattr__(self, name):
+        return getattr(self._client, name)
+
+    def __setattr__(self, name, value):
+        if name in self._LOCAL_FIELDS:
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self._client, name, value)
+
+    @staticmethod
+    def _identity_tokens(record):
+        if not isinstance(record, dict):
+            return set()
+        tokens = set()
+        try:
+            tokens.update(str(value) for value in (canonical_source_identity_keys(record) or set()) if value)
+        except Exception:
+            pass
+        for field in ("ad_id", "video_id"):
+            value = str(record.get(field) or "").strip()
+            if value:
+                tokens.add("record:" + field + ":" + value)
+        return tokens
+
+    @classmethod
+    def _row_values(cls, row):
+        source_signal = row.get("source_signal")
+        source_signal = source_signal if isinstance(source_signal, dict) else {}
+        values = {}
+        for field in cls.PERFORMANCE_FIELDS + cls.RETENTION_FIELDS:
+            value = row.get(field)
+            if value in (None, ""):
+                value = source_signal.get(field)
+            if value not in (None, "", []):
+                values[field] = value
+        invalid_points = row.get("retention_curve_invalid_points")
+        if invalid_points not in (None, ""):
+            values["retention_curve_invalid_points"] = invalid_points
+        return values
+
+    @staticmethod
+    def _nonempty_count(rows, field):
+        return sum(1 for row in rows if isinstance(row, dict) and row.get(field) not in (None, "", []))
+
+    def _remember(self, result, *, source, order_by="", keyword="", retention_requested=False):
+        result = result if isinstance(result, dict) else {}
+        rows = [row for row in (result.get("items") or []) if isinstance(row, dict)]
+        for position, row in enumerate(rows, start=1):
+            tokens = self._identity_tokens(row)
+            values = self._row_values(row)
+            ad_id = str(row.get("ad_id") or row.get("video_id") or "").strip()
+            for token in tokens:
+                bucket = self.values_by_identity.setdefault(token, {})
+                for field, value in values.items():
+                    bucket.setdefault(field, value)
+                positions = self.positions_by_identity.setdefault(token, {})
+                if source == "ads_top":
+                    if retention_requested:
+                        position_key = str(order_by) + "|retention"
+                    elif keyword:
+                        position_key = str(order_by) + "|keyword:" + str(keyword)
+                    else:
+                        position_key = str(order_by)
+                    positions.setdefault(position_key, position)
+                provenance = row.get("retention_provenance")
+                if isinstance(provenance, dict) and provenance:
+                    provenance_bucket = self.provenance_by_identity.setdefault(token, {})
+                    for field, value in provenance.items():
+                        if value:
+                            provenance_bucket.setdefault(str(field), value)
+            if ad_id:
+                id_values = self.values_by_ad_id.setdefault(ad_id, {})
+                for field, value in values.items():
+                    id_values.setdefault(field, value)
+                if source == "ads_top":
+                    id_positions = self.positions_by_ad_id.setdefault(ad_id, {})
+                    if retention_requested:
+                        position_key = str(order_by) + "|retention"
+                    elif keyword:
+                        position_key = str(order_by) + "|keyword:" + str(keyword)
+                    else:
+                        position_key = str(order_by)
+                    id_positions.setdefault(position_key, position)
+            if retention_requested:
+                object.__setattr__(self, "retention_order_by", order_by)
+
+        playback_fields = ("play_2s_rate", "play_6s_rate")
+        call = {
+            "call": len(self.calls) + 1,
+            "source": source,
+            "order_by": order_by,
+            "keyword": keyword or "",
+            "returned": len(rows),
+            "credits_used": result.get("credits_used"),
+            "request_id": result.get("request_id"),
+            "provider_params": result.get("params") or {},
+            "returned_ad_ids": [str(row.get("ad_id") or row.get("video_id") or "") for row in rows[:12]],
+            "playback_metrics_returned": {
+                field: self._nonempty_count(rows, field) for field in playback_fields
+            },
+            "retention_requested": bool(retention_requested),
+            "retention_returned": {
+                field: self._nonempty_count(rows, field) for field in self.RETENTION_FIELDS
+            } if retention_requested else {},
+            "raw_playback_field_diagnostics": result.get("raw_playback_field_diagnostics") or {},
+        }
+        self.calls.append(call)
+        return result
+
+    def fetch_sponsored_search(self, **kwargs):
+        result = self._client.fetch_sponsored_search(**kwargs)
+        return self._remember(
+            result, source="sponsored_search", order_by="sponsored_search",
+            keyword=str(kwargs.get("query") or ""),
+        )
+
+    def fetch_board(self, **kwargs):
+        result = self._client.fetch_board(**kwargs)
+        return self._remember(
+            result, source="ads_top", order_by=str(kwargs.get("order_by") or ""),
+            keyword=str(kwargs.get("keyword") or ""),
+            retention_requested=bool(kwargs.get("include_retention")),
+        )
+
+    def evidence_for(self, record):
+        values, positions, provenance = {}, {}, {}
+        for token in self._identity_tokens(record):
+            for field, value in self.values_by_identity.get(token, {}).items():
+                values.setdefault(field, value)
+            for key, value in self.positions_by_identity.get(token, {}).items():
+                positions.setdefault(key, value)
+            for field, value in self.provenance_by_identity.get(token, {}).items():
+                provenance.setdefault(field, value)
+        record_id = str((record or {}).get("ad_id") or (record or {}).get("video_id") or "").strip()
+        if record_id:
+            for field, value in self.values_by_ad_id.get(record_id, {}).items():
+                values.setdefault(field, value)
+            for key, value in self.positions_by_ad_id.get(record_id, {}).items():
+                positions.setdefault(key, value)
+        return values, positions, provenance
+
+
+def _merge_discovery_evidence(ranked, tracker):
+    """Attach observed metrics, board positions and identity-matched retention to shortlisted rows."""
+    for item in ranked or []:
+        if not isinstance(item, dict):
+            continue
+        record = item.get("record")
+        if not isinstance(record, dict):
+            continue
+        values, positions, provenance = tracker.evidence_for(record)
+        for field, value in values.items():
+            if record.get(field) in (None, ""):
+                record[field] = value
+        current_positions = record.get("discovery_board_positions")
+        current_positions = dict(current_positions) if isinstance(current_positions, dict) else {}
+        for key, value in positions.items():
+            current_positions.setdefault(key, value)
+        if current_positions:
+            record["discovery_board_positions"] = current_positions
+        current_provenance = record.get("retention_provenance")
+        current_provenance = dict(current_provenance) if isinstance(current_provenance, dict) else {}
+        for field, value in provenance.items():
+            if value:
+                current_provenance.setdefault(field, value)
+        if current_provenance:
+            record["retention_provenance"] = current_provenance
+        if any(record.get(field) not in (None, "", []) for field in tracker.RETENTION_FIELDS):
+            record["retention_collection_order_by"] = tracker.retention_order_by
+            record["retention_collected_via_unfiltered_request"] = True
+
+
+def _enrich_selection_diagnostics(stats, tracker):
+    diagnostic = stats.get("source_selection_diagnostics")
+    if not isinstance(diagnostic, dict):
+        return
+    for row in diagnostic.get("examples") or []:
+        if not isinstance(row, dict):
+            continue
+        ad_id = str(row.get("ad_id") or "").strip()
+        if not ad_id:
+            continue
+        values = tracker.values_by_ad_id.get(ad_id) or {}
+        positions = tracker.positions_by_ad_id.get(ad_id) or {}
+        current_values = row.get("performance_values")
+        current_values = dict(current_values) if isinstance(current_values, dict) else {}
+        for field, value in values.items():
+            if field in tracker.PERFORMANCE_FIELDS:
+                current_values.setdefault(field, value)
+        row["performance_values"] = current_values
+        current_positions = row.get("discovery_board_positions")
+        current_positions = dict(current_positions) if isinstance(current_positions, dict) else {}
+        for key, value in positions.items():
+            current_positions.setdefault(key, value)
+        row["discovery_board_positions"] = current_positions
+
+
 def find_status() -> dict:
     if LEGACY_ERROR:
         return {"state": "UNAVAILABLE", "detail": LEGACY_ERROR, "how_to_fix": "pip install -r requirements.txt"}
@@ -133,6 +354,8 @@ def to_candidate(item: dict, request: dict, collected_at: str, origin: str, sour
     boards = list(rec.get("discovery_boards") or [])
     metrics = {}
     retention_boards = [board for board in boards if board in {"play_2s_rate", "play_6s_rate"}]
+    retention_collection_source = ["include=retention"] if rec.get("retention_collected_via_unfiltered_request") else []
+    retention_collection_order_by = rec.get("retention_collection_order_by")
     retention_provenance = rec.get("retention_provenance")
     retention_provenance = retention_provenance if isinstance(retention_provenance, dict) else {}
     retention_metric_names = {"retention_2s", "retention_6s", "retention_curve"}
@@ -140,7 +363,9 @@ def to_candidate(item: dict, request: dict, collected_at: str, origin: str, sour
         value = rec.get(name)
         if value is not None and value != "":
             field_source = "socialcrawl:tiktok_ads_top" if name in retention_metric_names else src
-            field_boards = (retention_boards or boards) if name in retention_metric_names else boards
+            field_boards = (
+                retention_boards or retention_collection_source or boards
+            ) if name in retention_metric_names else boards
             metrics[name] = {"value": value, "source": field_source, "boards": field_boards, "collected_at": collected_at}
             if name in retention_provenance:
                 metrics[name]["provenance"] = retention_provenance[name]
@@ -154,6 +379,8 @@ def to_candidate(item: dict, request: dict, collected_at: str, origin: str, sour
         "status": "AVAILABLE" if has_retention else "NOT_AVAILABLE",
         "source": "socialcrawl:tiktok_ads_top" if has_retention else None,
         "boards": retention_boards,
+        "collection_order_by": retention_collection_order_by,
+        "collected_via_unfiltered_request": bool(rec.get("retention_collected_via_unfiltered_request")),
         "retention_2s": rec.get("retention_2s"),
         "retention_6s": rec.get("retention_6s"),
         "curve_point_count": retention_curve_points,
@@ -705,21 +932,36 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
         )
     search_terms = _rotate_query_terms(search_terms, prior_query_history)
     request["search_terms"] = list(search_terms)
+    dual_playback_retention = retention_strategy.get("mode") == "targeted_playback_boards_plus_retention"
+    evidence_tracker = _DiscoveryEvidenceTracker(client) if dual_playback_retention else None
     try:
         ranked = discover_and_rank(
-            client=client, country=country, period=period, keywords=search_terms, order_bys=order_bys,
-            limit_per_board=limit_per_board, max_ads=max_ads, max_requests=max_requests,
-            keyword_boards=(
-                2 if retention_strategy.get("mode") == "targeted_playback_boards_plus_retention"
-                else max_requests
-            ),
+            client=evidence_tracker or client, country=country, period=period, keywords=search_terms, order_bys=order_bys,
+            limit_per_board=limit_per_board, max_ads=max_ads,
+            max_requests=(max_requests - 1 if dual_playback_retention else max_requests),
+            keyword_boards=(2 if dual_playback_retention else max_requests),
             vertical=VERTICAL, target_offer=offer["target_offer"],
             product_type=offer["product_type"] or offer["product_category"],
             prelander=offer["prelander"], landing_page=offer["landing_page"],
             discovery_mode=str(params.get("discovery_mode") or "auto"),
             exclude_ad_ids=prior_seen_keys,
             search_tags_dir=PRODUCT_SEARCH_TAGS_DIR, supply_search=True,
-            performance_order_bys=performance_order_bys, include_retention=include_retention)
+            performance_order_bys=performance_order_bys,
+            include_retention=(False if dual_playback_retention else include_retention))
+        if dual_playback_retention:
+            # This is a separate, unfiltered data-enrichment request. Its rows can add
+            # retention only to identities already shortlisted by the gated discovery pass.
+            evidence_tracker.fetch_board(
+                country=country,
+                period=period,
+                order_by=retention_strategy["retention_request_order_by"],
+                keyword=None,
+                industry=None,
+                ad_language="en",
+                limit=limit_per_board,
+                include_retention=True,
+            )
+            _merge_discovery_evidence(ranked, evidence_tracker)
     except SocialCrawlError as exc:
         raise FindUnavailable(
             "UNAVAILABLE",
@@ -742,14 +984,29 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
                 "discovery_stats": getattr(client, "last_discovery_stats", {}) or {},
             },
         ) from exc
-    candidates = [to_candidate(item, request, stamp, "found") for item in ranked]
     stats = getattr(client, "last_discovery_stats", {}) or {}
+    if dual_playback_retention and evidence_tracker is not None:
+        calls = list(stats.get("calls") or [])
+        if evidence_tracker.calls and evidence_tracker.calls[-1].get("retention_requested"):
+            retention_call = dict(evidence_tracker.calls[-1])
+            retention_call["call"] = len(calls) + 1
+            calls.append(retention_call)
+            stats["calls"] = calls
+            stats["planned_requests"] = len(calls)
+            stats["executed_requests"] = len(calls)
+            stats["request_budget"] = requested_max_requests
+            credits = retention_call.get("credits_used")
+            if isinstance(credits, (int, float)):
+                stats["total_credits_reported"] = int(stats.get("total_credits_reported") or 0) + int(credits)
+        _enrich_selection_diagnostics(stats, evidence_tracker)
+    candidates = [to_candidate(item, request, stamp, "found") for item in ranked]
     strategy = stats.setdefault("discovery_strategy", {})
     executed_calls = stats.get("calls") or []
     if retention_strategy.get("mode") == "targeted_playback_boards_plus_retention":
         strategy["request_policy"] = (
-            "Two target Sponsored Search queries, then keyword-filtered play_6s_rate and play_2s_rate Ads Top calls, "
-            "then one unfiltered include=retention request. Retention is supplementary evidence; selection and Target-Fit gates are unchanged."
+            "Bounded target Sponsored Search plus keyword-filtered playback-board discovery, followed by one separate "
+            "unfiltered include=retention request. Early stopping when the eligible source queue fills is preserved; "
+            "retention adds evidence only to shortlisted matching identities and does not relax selection or Target-Fit gates."
         )
     else:
         strategy["request_policy"] = (

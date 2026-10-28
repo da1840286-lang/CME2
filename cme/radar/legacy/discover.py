@@ -378,13 +378,6 @@ def _merge_item(combined: dict[str, dict[str, Any]], item: dict[str, Any], order
         existing["discovery_boards"].append(order_by)
     if keyword and keyword not in existing.setdefault("discovery_keywords", []):
         existing["discovery_keywords"].append(keyword)
-    incoming_positions = item.get("discovery_board_positions")
-    if isinstance(incoming_positions, dict):
-        current_positions = existing.get("discovery_board_positions")
-        current_positions = dict(current_positions) if isinstance(current_positions, dict) else {}
-        for position_key, position in incoming_positions.items():
-            current_positions.setdefault(str(position_key), position)
-        existing["discovery_board_positions"] = current_positions
     for field in (
         "ctr", "cvr", "play_2s_rate", "play_6s_rate", "rank", "cost_score", "like_tier", "views", "likes",
         "comments", "shares", "estimated_reach", "duration_seconds", "video_url",
@@ -514,35 +507,20 @@ def _fetch_plan(
         }
         playback_metric_examples = [
             {
-                "position": position,
                 "ad_id": str(item.get("ad_id") or item.get("video_id") or ""),
                 "title": str(item.get("title") or "")[:120],
                 "play_2s_rate": item.get("play_2s_rate"),
                 "play_6s_rate": item.get("play_6s_rate"),
-                "views": item.get("views"),
-                "likes": item.get("likes"),
-                "rank": item.get("rank"),
             }
-            for position, item in enumerate(result["items"], start=1)
+            for item in result["items"]
             if isinstance(item, dict)
             and any(item.get(field) not in (None, "") for field in playback_fields)
         ][:3]
         before = len(combined)
         new_items = 0
-        for position, item in enumerate(result["items"], start=1):
+        for item in result["items"]:
             if not isinstance(item, dict):
                 continue
-            if order_by != "sponsored_search":
-                positions = item.get("discovery_board_positions")
-                positions = dict(positions) if isinstance(positions, dict) else {}
-                if retention_requested:
-                    position_key = f"{order_by}|retention"
-                elif keyword:
-                    position_key = f"{order_by}|keyword:{keyword}"
-                else:
-                    position_key = str(order_by)
-                positions.setdefault(position_key, position)
-                item["discovery_board_positions"] = positions
             item["discovery_vertical"] = str(vertical or "")
             item.setdefault("discovery_source", "tiktok_sponsored_search" if order_by == "sponsored_search" else "ads_top")
             item.setdefault("discovery_query", keyword or "")
@@ -973,7 +951,6 @@ def _performance_evidence(item: dict[str, Any]) -> dict[str, Any]:
         "performance_score": round(performance_score, 2),
         "available_fields": native_fields,
         "performance_boards": performance_boards,
-        "board_positions": record.get("discovery_board_positions") or {},
         "commercial_result_confirmed": False,
     }
 
@@ -1266,16 +1243,6 @@ def _selection_diagnostics(
                 not_selected_count += 1
                 counts[reason] = counts.get(reason, 0) + 1
 
-            source_signal = record.get("source_signal")
-            source_signal = source_signal if isinstance(source_signal, dict) else {}
-            performance_values = {}
-            for field in ("ctr", "cvr", "play_2s_rate", "play_6s_rate", "views", "likes", "comments", "shares", "estimated_reach", "rank"):
-                value = record.get(field)
-                if value in (None, ""):
-                    value = source_signal.get(field)
-                if value not in (None, ""):
-                    performance_values[field] = value
-
             rows.append({
                 "ad_id": str(record.get("ad_id") or record.get("video_id") or ""),
                 "source": "ads_top" if str(record.get("discovery_source") or "") == "ads_top" else "sponsored_search",
@@ -1293,9 +1260,7 @@ def _selection_diagnostics(
                 "performance_basis": evidence["basis"],
                 "performance_score": evidence["performance_score"],
                 "performance_fields": evidence["available_fields"],
-                "performance_values": performance_values,
                 "performance_boards": evidence["performance_boards"],
-                "discovery_board_positions": record.get("discovery_board_positions") or {},
                 "commercial_result_confirmed": False,
                 "action": action,
                 "final_score": round(final_score, 2),
@@ -1346,15 +1311,6 @@ def discover_and_rank(
     include_retention: bool = False,
 ) -> list[dict[str, Any]]:
     retention_boards = RETENTION_BOARDS if include_retention else None
-    dual_playback_retention = bool(
-        retention_boards
-        and {"play_2s_rate", "play_6s_rate"}.issubset(set(performance_order_bys or []))
-    )
-    if dual_playback_retention and max_requests < 5:
-        raise ValueError(
-            "include_retention with playback_both needs find_requests >= 5 "
-            "for two Sponsored Search queries, both targeted Ads Top boards, and one retention call."
-        )
     _plan = functools.partial(_fetch_plan, retention_boards=retention_boards)
     mode = (discovery_mode or "auto").lower().strip()
     if mode not in {"auto", "strict", "expanded", "mechanism-hunt"}:
@@ -1484,26 +1440,15 @@ def discover_and_rank(
         # often omits. Discovering those rows is not commercial approval: Selection and
         # the downstream Target-Fit gate remain unchanged and strict.
         requested_supply_budget = min(max(0, int(keyword_boards)), max_requests)
-        if dual_playback_retention:
-            # Reserve two supply queries and three Ads Top slots: both targeted board
-            # orders, plus one unfiltered retention call.
-            requested_supply_budget = min(2, max_requests)
-            reserved_performance_budget = min(max_requests - 1, max(3, (3 * max_requests + 9) // 10))
-        else:
-            reserved_performance_budget = (
-                min(max_requests - 1, max(1, (3 * max_requests + 9) // 10))
-                if max_requests > 1 else 0
-            )
+        reserved_performance_budget = (
+            min(max_requests - 1, max(1, (3 * max_requests + 9) // 10))
+            if max_requests > 1 else 0
+        )
         supply_search_budget = min(requested_supply_budget, max_requests - reserved_performance_budget)
         supply_queries = _ordered_supply_queries(
             vertical, explicit, max_count=supply_search_budget, search_tags_dir=search_tags_dir,
         )
         supply_search_budget = len(supply_queries)
-        if dual_playback_retention and not supply_queries:
-            raise ValueError(
-                "playback_both with retention requires at least one product search term "
-                "to filter the Ads Top board requests."
-            )
         performance_budget = max_requests - supply_search_budget
         query_index = 0
         search_calls = 0
@@ -1517,23 +1462,14 @@ def discover_and_rank(
             requested_performance_order
             + [x for x in default_performance_order if x in client.ORDER_BY]
         )) or order_list
-        targeted_playback_orders = [
-            name for name in (performance_order_bys or [])
-            if name in {"play_6s_rate", "play_2s_rate"}
-        ]
-        retention_order_by = targeted_playback_orders[0] if targeted_playback_orders else "play_6s_rate"
-        retention_probe_done = not dual_playback_retention
         while len(calls) < max_requests:
             money_count, mechanism_count = source_analysis_ready_counts()
             analysis_ready_count = money_count + mechanism_count
 
-            # A requested retention sample is mandatory, even if the target queue fills early.
-            if analysis_ready_count >= source_queue_limit and (
-                not dual_playback_retention or retention_probe_done
-            ):
+            if analysis_ready_count >= source_queue_limit:
                 break
 
-            if (analysis_ready_count == 0 or dual_playback_retention) and search_calls < supply_search_budget and query_index < len(supply_queries):
+            if analysis_ready_count == 0 and search_calls < supply_search_budget and query_index < len(supply_queries):
                 kw = supply_queries[query_index]
                 query_index += 1
                 search_calls += 1
@@ -1557,24 +1493,12 @@ def discover_and_rank(
             elif len(calls) >= max_requests:
                 break
 
-            # Keep both target-filtered playback rankings, then make one separate
-            # unfiltered retention request. Retention never replaces either target board.
-            is_retention_probe = bool(
-                dual_playback_retention
-                and top_index >= len(targeted_playback_orders)
-                and not retention_probe_done
-            )
-            if is_retention_probe:
-                order_by = retention_order_by
+            # Prioritize measurable performance boards in the independent discovery lane.
+            # If a source becomes eligible early, remaining request capacity can help fill the queue.
+            order_by = performance_order_list[top_index % len(performance_order_list)]
+            performance_keyword = supply_queries[top_index % len(supply_queries)] if supply_queries else None
+            if retention_boards and order_by in retention_boards:
                 performance_keyword = None
-            elif dual_playback_retention and top_index < len(targeted_playback_orders):
-                order_by = targeted_playback_orders[top_index]
-                performance_keyword = supply_queries[top_index % len(supply_queries)]
-            else:
-                order_by = performance_order_list[top_index % len(performance_order_list)]
-                performance_keyword = supply_queries[top_index % len(supply_queries)] if supply_queries else None
-                if retention_boards and order_by in retention_boards and not dual_playback_retention:
-                    performance_keyword = None
             total_credits = _plan(
                 client=client, country=country, period=period, industry=industry, vertical=vertical,
                 ad_language=ad_language, limit_per_board=limit_per_board,
@@ -1582,8 +1506,6 @@ def discover_and_rank(
                 total_credits=total_credits,
             )
             top_index += 1
-            if is_retention_probe:
-                retention_probe_done = True
             continue
     else:
         # Legacy Ads Top path: keep the old broad/performance behaviour when the
