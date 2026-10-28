@@ -1,7 +1,7 @@
 {
   "source_archive": "CME-live-integration-layer2-receipt-reconcile-2026-10-19.zip",
   "source_archive_sha256": "467767cad429a0ec8192d844fae164082fb493e79cb8f671a71f9bbdf14adc35",
-  "note": "Vendored source is based on the old CME build. legacy/discover.py contains live discovery policy: bounded targeted Sponsored Search plus reserved Ads Top performance discovery; automatic FIND requires source-body product/promotion evidence and rejects explicit cross-market delivery signals. Views/likes-only evidence remains an engagement proxy, not revenue. Source-commercial/mechanism and Target-Fit gates remain downstream checks. This branch adds explicit product-head anchors and LOW-confidence family matches when target use context is missing. Raw provider playback diagnostics retain field paths and scalar values without storing complete provider response bodies. Optional include=retention for pure playback Ads Top boards is off by default; parser preserves provider scale/provenance and does not relabel retention as play rate. Retry feedback includes failed checks for failed MUST atoms even when check.required=false.",
+  "note": "Vendored source is based on the old CME build. legacy/discover.py contains live discovery policy: bounded targeted Sponsored Search plus reserved Ads Top performance discovery; automatic FIND requires source-body product/promotion evidence and rejects explicit cross-market delivery signals. Views/likes-only evidence remains an engagement proxy, not revenue. Source-commercial/mechanism and Target-Fit gates remain downstream checks. This branch adds explicit product-head anchors and LOW-confidence family matches when target use context is missing. Raw provider diagnostics retain bounded response metadata (cache state, warnings, dropped-row counts, and response samples) plus playback field paths without storing complete provider responses. Keyword-filtered playback board requests bypass cache; published playback-rate numbers remain unavailable and must not be replaced with retention values. Optional include=retention for pure playback Ads Top boards is off by default; parser preserves provider scale/provenance and does not relabel retention as play rate. Retry feedback includes failed checks for failed MUST atoms even when check.required=false.",
   "decisions": {
     "REUSE": {
       "legacy/discover.py": "discover_and_rank: the real discovery, filtering, dedup keys and ranking",
@@ -30,7 +30,7 @@
     "legacy/arbitrage.py": "51bbafc094c47662c1ebfa2f93a0651f9554ab5ab674946bb1cb56156af28957",
     "legacy/verticals.py": "20a2b48a4b4e554ac9914c628178a8e672fc9739785b4d797c989b788ed77277",
     "legacy/market_taxonomy.py": "0966d0fb52533bda275ed54d4860fc83f52b5136c8a9daa72ef165312c7fa6f0",
-    "legacy/discovery/tiktok_socialcrawl.py": "ef63a4e0e17a2714944f39425a3f1b19faa0af31953ca3d609635c6fabfd08c3",
+    "legacy/discovery/tiktok_socialcrawl.py": "f4f387fbe1858f647a09e26c75d4b90476002c3da12ccea7ff623ddcda755f7c",
     "legacy/discovery/__init__.py": "539c24c03c4f0f9befd6913966f88637f03068a2ef36d8606b8ce87a1c3aa6b3",
     "data/verticals/physical_products.json": "b93878676e7087ca90db2cb659ede532de8ca190edb1b32e6e2f720a8e8e96d5",
     "data/verticals/ai_developer_tools.json": "61cd9cd4c895606f5b31d490cf1ebc4dcf8da2db4c1e25de067aa1915909e81a",
