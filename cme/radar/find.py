@@ -66,30 +66,34 @@ def _retention_execution_plan(
     }
     both_retention_boards = {"play_2s_rate", "play_6s_rate"}.issubset(set(requested))
     if include_retention and both_retention_boards:
-        # The provider returns both named retention points on each row, but still
-        # ranks the 2s and 6s boards separately. One curve cannot replace the other
-        # board's source population or board ordering.
-        if effective_max_requests < 4:
+        # The provider forbids combining include=retention with keyword/industry filters.
+        # Keep the two target-filtered playback rankings separate and allocate one additional
+        # unfiltered call for retention capture; do not silently replace the target boards.
+        if effective_max_requests < 5:
             raise ValueError(
-                "include_retention with playback_both needs find_requests >= 4 "
-                "to reserve two source-search calls and both Ads Top board calls."
+                "include_retention with playback_both needs find_requests >= 5 "
+                "for two Sponsored Search queries, both targeted Ads Top boards, and one retention call."
             )
+        target_boards = [name for name in requested if name in {"play_2s_rate", "play_6s_rate"}]
         strategy = {
-            "mode": "two_retention_board_orders",
+            "mode": "targeted_playback_boards_plus_retention",
             "requested_performance_order_bys": requested,
             "effective_performance_order_bys": effective,
             "requested_max_requests": int(requested_max_requests),
             "effective_max_requests": effective_max_requests,
-            "retention_board_order_bys": [name for name in requested if name in {"play_2s_rate", "play_6s_rate"}],
-            "retention_points_returned_by_each_call": ["retention_2s", "retention_6s", "retention_curve"],
+            "targeted_board_order_bys": target_boards,
+            "retention_request_order_by": target_boards[0] if target_boards else "play_6s_rate",
+            "retention_calls": 1,
+            "targeted_board_calls_are_keyword_filtered": True,
+            "retention_call_is_unfiltered": True,
             "rationale": (
-                "Keep separate play_2s_rate and play_6s_rate boards because their ranking order differs; "
-                "each include=retention call returns the named 2s/6s points and curve for its own rows. "
-                "Product relevance and source-quality gates remain unchanged."
+                "Reserve two Sponsored Search target queries, one keyword-filtered Ads Top request for each "
+                "playback ranking, and one unfiltered include=retention request. The retention response is "
+                "merged only by source identity; product relevance and source-quality gates remain unchanged."
             ),
             "interpretation": (
-                "retention_2s/retention_6s are curve points, not the exact play_2s_rate/play_6s_rate "
-                "values used to sort the board and not proof of conversion, sales, or profit."
+                "Retention points are not the exact play_2s_rate/play_6s_rate values used to sort Ads Top "
+                "and are not proof of conversion, sales, or profit."
             ),
         }
     return effective, effective_max_requests, strategy
@@ -176,6 +180,7 @@ def to_candidate(item: dict, request: dict, collected_at: str, origin: str, sour
     why = {"explanation": _d(decision, "explanation"), "action": _d(decision, "action"), "tags": _d(decision, "tags"),
            "scope": rec.get("discovery_scope"), "boards": boards, "keywords": rec.get("discovery_keywords") or [],
            "hits": rec.get("discovery_hits"), "relevance_reason": rel.get("reason"),
+           "discovery_board_positions": rec.get("discovery_board_positions") or {},
            "retention_evidence": retention_evidence}
     c = {
         "keys": sorted(canonical_source_identity_keys(rec)) if canonical_source_identity_keys else [],
@@ -704,7 +709,11 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
         ranked = discover_and_rank(
             client=client, country=country, period=period, keywords=search_terms, order_bys=order_bys,
             limit_per_board=limit_per_board, max_ads=max_ads, max_requests=max_requests,
-            keyword_boards=max_requests, vertical=VERTICAL, target_offer=offer["target_offer"],
+            keyword_boards=(
+                2 if retention_strategy.get("mode") == "targeted_playback_boards_plus_retention"
+                else max_requests
+            ),
+            vertical=VERTICAL, target_offer=offer["target_offer"],
             product_type=offer["product_type"] or offer["product_category"],
             prelander=offer["prelander"], landing_page=offer["landing_page"],
             discovery_mode=str(params.get("discovery_mode") or "auto"),
@@ -737,10 +746,16 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
     stats = getattr(client, "last_discovery_stats", {}) or {}
     strategy = stats.setdefault("discovery_strategy", {})
     executed_calls = stats.get("calls") or []
-    strategy["request_policy"] = (
-        "Bounded Sponsored Search plus reserved Ads Top performance queries. FIND shortlists by product-type match "
-        "and strongest available performance evidence; money/mechanism and Target-Fit remain downstream transfer gates."
-    )
+    if retention_strategy.get("mode") == "targeted_playback_boards_plus_retention":
+        strategy["request_policy"] = (
+            "Two target Sponsored Search queries, then keyword-filtered play_6s_rate and play_2s_rate Ads Top calls, "
+            "then one unfiltered include=retention request. Retention is supplementary evidence; selection and Target-Fit gates are unchanged."
+        )
+    else:
+        strategy["request_policy"] = (
+            "Bounded Sponsored Search plus reserved Ads Top performance queries. FIND shortlists by product-type match "
+            "and strongest available performance evidence; money/mechanism and Target-Fit remain downstream transfer gates."
+        )
     strategy["supply_search_enabled"] = True
     strategy["supply_lane"] = "tiktok_sponsored_search_plus_ads_top_performance"
     strategy["selection_mode"] = "product"
@@ -762,6 +777,26 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
     retention_summary = {
         "strategy": retention_strategy,
         "retention_calls": len(retention_calls),
+        "retention_call_details": [
+            {
+                "order_by": call.get("order_by"),
+                "keyword": call.get("keyword") or "",
+                "retention_requested": bool(call.get("retention_requested")),
+                "returned": call.get("returned", 0),
+            }
+            for call in retention_calls
+        ],
+        "targeted_playback_board_calls": [
+            {
+                "order_by": call.get("order_by"),
+                "keyword": call.get("keyword") or "",
+                "returned": call.get("returned", 0),
+                "retention_requested": bool(call.get("retention_requested")),
+            }
+            for call in (stats.get("calls") or [])
+            if call.get("order_by") in {"play_2s_rate", "play_6s_rate"}
+            and call.get("keyword") and not call.get("retention_requested")
+        ],
         "returned_rows_with_retention": retention_returned,
         "selected_candidates_with_retention": selected_with_retention,
         "selected_candidates_from_retention_board": sum(

@@ -7,7 +7,7 @@ from unittest.mock import Mock, patch
 import requests
 
 import cme.radar.find  # noqa: F401  sets CME_VERTICALS_DIR before the legacy import
-from cme.radar.legacy.discover import _fetch_plan, _merge_item
+from cme.radar.legacy.discover import _fetch_plan, _merge_item, discover_and_rank
 from cme.radar.legacy.discovery.tiktok_socialcrawl import SocialCrawlError, SocialCrawlTikTokTopAds, parse_retention
 from cme.radar.socialcrawl_client import RetryingSocialCrawlTikTokTopAds, normalize_retention_curve
 from cme.radar.find import _retention_execution_plan, to_candidate
@@ -154,11 +154,14 @@ class FetchBoardRetentionTests(unittest.TestCase):
 
 
 class FakeBoardClient:
-    def __init__(self):
+    def __init__(self, responses=None):
         self.calls = []
+        self.responses = list(responses or [])
 
     def fetch_board(self, **kwargs):
         self.calls.append(kwargs)
+        if self.responses:
+            return self.responses.pop(0)
         return {"items": [], "credits_used": 1, "request_id": "x", "params": {}}
 
 
@@ -184,6 +187,102 @@ class FetchPlanRetentionTests(unittest.TestCase):
         client, calls = self.run_plan([("play_6s_rate", None)], None)
         self.assertNotIn("include_retention", client.calls[0])
         self.assertFalse(calls[0]["retention_requested"])
+
+    def test_target_filtered_boards_and_retention_keep_separate_positions(self):
+        base = {
+            "ad_id": "same-ad",
+            "title": "Cordless car vacuum",
+            "source_url": "https://www.tiktok.com/@brand/video/same-ad",
+            "video_url": "https://cdn.example/video.mp4",
+        }
+        responses = [
+            {"items": [dict(base)], "credits_used": 1, "request_id": "a", "params": {}},
+            {"items": [dict(base)], "credits_used": 1, "request_id": "b", "params": {}},
+            {"items": [{**base, "retention_2s": 0.7, "retention_6s": 0.3,
+                        "retention_curve": [1.0, 0.7, 0.3]}],
+             "credits_used": 20, "request_id": "c", "params": {}},
+        ]
+        client, calls, combined = FakeBoardClient(responses), [], {}
+        _fetch_plan(
+            client=client, country="US", period=30, industry="", ad_language="en",
+            limit_per_board=10,
+            plan=[
+                ("play_6s_rate", "car vacuum"),
+                ("play_2s_rate", "cordless car vacuum"),
+                ("play_6s_rate", None),
+            ],
+            combined=combined, calls=calls, total_credits=0,
+            retention_boards=frozenset({"play_2s_rate", "play_6s_rate"}),
+        )
+        self.assertEqual(client.calls[0]["keyword"], "car vacuum")
+        self.assertNotIn("include_retention", client.calls[0])
+        self.assertEqual(client.calls[1]["keyword"], "cordless car vacuum")
+        self.assertNotIn("include_retention", client.calls[1])
+        self.assertTrue(client.calls[2]["include_retention"])
+        self.assertIsNone(client.calls[2]["keyword"])
+        self.assertEqual([call["retention_requested"] for call in calls], [False, False, True])
+        positions = combined["same-ad"]["discovery_board_positions"]
+        self.assertEqual(positions["play_6s_rate|keyword:car vacuum"], 1)
+        self.assertEqual(positions["play_2s_rate|keyword:cordless car vacuum"], 1)
+        self.assertEqual(positions["play_6s_rate|retention"], 1)
+
+    def test_dual_playback_retention_discovery_uses_filtered_boards_then_retention(self):
+        class Client(SocialCrawlTikTokTopAds):
+            def __init__(self):
+                super().__init__(api_key="test")
+                self.calls = []
+                self.last_discovery_stats = {}
+
+            def fetch_sponsored_search(self, **kwargs):
+                self.calls.append({"source": "sponsored_search", **kwargs})
+                return {"items": [], "credits_used": 0, "request_id": "search", "params": {}}
+
+            def fetch_board(self, **kwargs):
+                self.calls.append({"source": "ads_top", **kwargs})
+                return {"items": [], "credits_used": 0, "request_id": "board", "params": {}}
+
+        client = Client()
+        with patch("cme.radar.legacy.discover._ordered_supply_queries",
+                   return_value=["car vacuum", "cordless car vacuum"]), \
+             patch("cme.radar.legacy.discover._advance_supply_query_cursor"):
+            discover_and_rank(
+                client=client, country="US", period=30, keywords=["car vacuum"],
+                order_bys=["for_you"], industry="", ad_language="en", limit_per_board=10,
+                max_ads=3, max_requests=5, keyword_boards=5, vertical="Physical Products",
+                target_offer="Fanttik V8 Mate Cordless Car Vacuum",
+                product_type="cordless handheld car vacuum", discovery_mode="auto",
+                supply_search=True, performance_order_bys=["play_6s_rate", "play_2s_rate"],
+                include_retention=True,
+            )
+        self.assertEqual([call["source"] for call in client.calls],
+                         ["sponsored_search", "sponsored_search", "ads_top", "ads_top", "ads_top"])
+        board_calls = [call for call in client.calls if call["source"] == "ads_top"]
+        self.assertEqual(
+            [(call["order_by"], call.get("keyword"), bool(call.get("include_retention")))
+             for call in board_calls],
+            [
+                ("play_6s_rate", "car vacuum", False),
+                ("play_2s_rate", "cordless car vacuum", False),
+                ("play_6s_rate", None, True),
+            ],
+        )
+
+    def test_dual_playback_retention_needs_five_requests(self):
+        class Client(SocialCrawlTikTokTopAds):
+            def __init__(self):
+                super().__init__(api_key="test")
+                self.last_discovery_stats = {}
+
+        with self.assertRaisesRegex(ValueError, "find_requests >= 5"):
+            discover_and_rank(
+                client=Client(), country="US", period=30, keywords=["car vacuum"],
+                order_bys=["for_you"], industry="", ad_language="en", limit_per_board=10,
+                max_ads=3, max_requests=4, keyword_boards=4, vertical="Physical Products",
+                target_offer="Fanttik V8 Mate Cordless Car Vacuum",
+                product_type="cordless handheld car vacuum", discovery_mode="auto",
+                supply_search=True, performance_order_bys=["play_6s_rate", "play_2s_rate"],
+                include_retention=True,
+            )
 
 
 class RetentionMergeTests(unittest.TestCase):
@@ -289,12 +388,14 @@ class RetentionExecutionPolicyTests(unittest.TestCase):
             ["play_6s_rate", "play_2s_rate"], True, 5)
         self.assertEqual(order_bys, ["play_6s_rate", "play_2s_rate"])
         self.assertEqual(max_requests, 5)
-        self.assertEqual(strategy["mode"], "two_retention_board_orders")
+        self.assertEqual(strategy["mode"], "targeted_playback_boards_plus_retention")
         self.assertEqual(strategy["effective_max_requests"], 5)
         self.assertEqual(
-            strategy["retention_board_order_bys"], ["play_6s_rate", "play_2s_rate"])
-        self.assertIn("retention_2s", strategy["retention_points_returned_by_each_call"])
-        self.assertIn("retention_6s", strategy["retention_points_returned_by_each_call"])
+            strategy["targeted_board_order_bys"], ["play_6s_rate", "play_2s_rate"])
+        self.assertEqual(strategy["retention_calls"], 1)
+        self.assertTrue(strategy["targeted_board_calls_are_keyword_filtered"])
+        self.assertTrue(strategy["retention_call_is_unfiltered"])
+        self.assertEqual(strategy["retention_request_order_by"], "play_6s_rate")
 
     def test_without_retention_does_not_rewrite_requested_board_order(self):
         order_bys, max_requests, strategy = _retention_execution_plan(
@@ -303,9 +404,11 @@ class RetentionExecutionPolicyTests(unittest.TestCase):
         self.assertEqual(max_requests, 5)
         self.assertEqual(strategy["mode"], "operator_requested_order")
 
-    def test_dual_retention_policy_requires_two_searches_and_both_board_slots(self):
-        with self.assertRaises(ValueError):
-            _retention_execution_plan(["play_2s_rate", "play_6s_rate"], True, 3)
+    def test_dual_retention_policy_requires_two_searches_both_boards_and_retention_slot(self):
+        for request_count in (3, 4):
+            with self.subTest(request_count=request_count):
+                with self.assertRaisesRegex(ValueError, "find_requests >= 5"):
+                    _retention_execution_plan(["play_2s_rate", "play_6s_rate"], True, request_count)
 
 
 class RetentionCandidatePropagationTests(unittest.TestCase):

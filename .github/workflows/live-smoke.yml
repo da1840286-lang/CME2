@@ -30,7 +30,7 @@ on:
         required: true
         default: "30"
       find_requests:
-        description: "Hard cap on SocialCrawl requests. Product mode reserves part of the budget for Ads Top performance queries; mechanism mode uses explicit Sponsored Search keywords only. Source-commercial and Target-Fit remain separate downstream gates."
+        description: "Hard cap on SocialCrawl requests. With playback_both plus retention, set 5 to reserve two Sponsored Search queries, two keyword-filtered Ads Top boards, and one unfiltered retention call. Source-commercial and Target-Fit remain separate downstream gates."
         type: number
         required: true
         default: 4
@@ -45,7 +45,7 @@ on:
         required: false
         default: "car vacuum"
       find_performance_order:
-        description: "Targeted live validation for FIND. Choose playback_both and set find_requests=4 to use the two Ads Top calls for play_6s_rate and play_2s_rate. Default preserves normal order; selection gates are unchanged."
+        description: "Targeted live validation for FIND. Choose playback_both with find_requests=4 when retention is off, or 5 when find_include_retention is on; the latter reserves two filtered playback boards plus one separate unfiltered retention call. Selection gates are unchanged."
         type: choice
         options:
           - default
@@ -55,7 +55,7 @@ on:
         required: true
         default: default
       find_include_retention:
-        description: "Add include=retention to playback Ads Top calls (extra credits, minimum 20 per call). Requires find_performance_order other than default."
+        description: "Request retention points in one separate unfiltered Ads Top call (extra credits, minimum 20). With playback_both, set find_requests=5; the two target-filtered boards do not request retention."
         type: boolean
         required: false
         default: false
