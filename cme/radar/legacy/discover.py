@@ -722,16 +722,17 @@ def _product_type_relevance(record: dict[str, Any], product_type: str = "") -> d
         context for context, aliases in _PRODUCT_CONTEXT_ALIASES.items()
         if set(phrase_terms) & aliases
     }
+    # Use-context must be stated in source copy/title, not inferred from a hashtag.
+    # A hashtag may corroborate product identity (e.g. #carvacuum), but it cannot prove
+    # that the demonstrated/sold product is actually intended for the target context.
     context_verified = not expected_contexts or any(
         set(body_tokens) & _PRODUCT_CONTEXT_ALIASES[context] for context in expected_contexts
     )
-    if expected_contexts and not context_verified:
-        for tag in tags:
-            compact_tag = re.sub(r"[^a-z0-9]", "", tag)
-            if any(alias.replace(" ", "") in compact_tag
-                   for context in expected_contexts for alias in _PRODUCT_CONTEXT_ALIASES[context]):
-                context_verified = True
-                break
+    context_hashtag_only = bool(expected_contexts) and not context_verified and any(
+        any(alias.replace(" ", "") in re.sub(r"[^a-z0-9]", "", tag)
+            for alias in _PRODUCT_CONTEXT_ALIASES[context])
+        for tag in tags for context in expected_contexts
+    )
 
     # Accept only an actual product noun in body/hashtag form. A verb such as #vacuuming isn't a noun anchor.
     anchor_forms = {anchor, anchor + "s", anchor + "es"}
@@ -790,7 +791,8 @@ def _product_type_relevance(record: dict[str, Any], product_type: str = "") -> d
         score = 95.0 if context_verified else 60.0
         reason = ("product hashtag corroborated by source-body product/promotion evidence"
                   if context_verified else
-                  "product hashtag plus independent pitch; target use context is not stated")
+                  "product hashtag plus independent pitch; target use context is not stated in source copy"
+                  + (" (context-like hashtag is not accepted as proof)" if context_hashtag_only else ""))
     else:
         has_support_terms = any(token in body_tokens for token in identity_terms if token != anchor)
         confidence = "HIGH" if context_verified and (bool(expected_contexts) or has_support_terms) else (
@@ -799,7 +801,8 @@ def _product_type_relevance(record: dict[str, Any], product_type: str = "") -> d
         score = 90.0 if confidence == "HIGH" else 75.0 if confidence == "MEDIUM" else 55.0
         reason = ("requested product noun and source-body product/promotion evidence; target context is present"
                   if context_verified else
-                  "requested product noun and source-body product/promotion evidence; target context is not stated")
+                  "requested product noun and source-body product/promotion evidence; target context is not stated in source copy"
+                  + (" (context-like hashtag is not accepted as proof)" if context_hashtag_only else ""))
 
     return {
         "status": "MATCH", "confidence": confidence, "score": score, "reason": reason,

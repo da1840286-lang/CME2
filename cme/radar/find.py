@@ -102,16 +102,28 @@ def _retention_execution_plan(
 
 
 def _target_board_keyword(offer: dict, fallback: str = "") -> str:
-    """Prefer distinctive target brand/model tokens over generic product-type words."""
+    """Search a performance board by product category, not the target's own brand/model."""
     offer = offer if isinstance(offer, dict) else {}
     target = " ".join(str(offer.get("target_offer") or offer.get("name") or "").split())
     product_type = " ".join(str(offer.get("product_type") or offer.get("product_category") or "").split())
+    fallback = " ".join(str(fallback or "").split())
     product_tokens = {token.casefold() for token in re.findall(r"[a-z0-9]+", product_type, flags=re.IGNORECASE)}
-    target_tokens = re.findall(r"[a-z0-9]+", target, flags=re.IGNORECASE)
-    specific_tokens = [token for token in target_tokens if token.casefold() not in product_tokens]
-    if specific_tokens:
-        return " ".join(specific_tokens)
-    return target or product_type or " ".join(str(fallback or "").split())
+    fallback_tokens = {token.casefold() for token in re.findall(r"[a-z0-9]+", fallback, flags=re.IGNORECASE)}
+
+    # Keep a supplied keyword when it actually names this product category.
+    # Broad vertical labels (e.g. AUTO) and our own brand/model are not useful
+    # Ads Top keywords; derive a category query without common product modifiers.
+    if fallback and fallback_tokens & product_tokens:
+        return fallback
+    modifiers = {
+        "a", "an", "and", "for", "from", "in", "of", "on", "or", "the", "to", "with",
+        "cordless", "handheld", "portable", "wireless", "rechargeable", "electric", "mini",
+        "compact", "lightweight", "powerful", "smart", "new", "best", "top", "small", "large",
+    }
+    category_tokens = [token for token in re.findall(r"[a-z0-9]+", product_type, flags=re.IGNORECASE)
+                       if token.casefold() not in modifiers]
+    category_query = " ".join(category_tokens).strip()
+    return category_query or product_type or target or fallback
 
 
 def _retention_enrichment_policy(calls: list[dict]) -> dict:
@@ -488,9 +500,9 @@ class _DiscoveryEvidenceTracker:
         order_by = str(kwargs.get("order_by") or "")
         retention_requested = bool(kwargs.get("include_retention"))
 
-        # The legacy scheduler feeds its first generic supply term to both playback
-        # boards. Prefer the actual target brand/model so the provider filters the
-        # requested product, rather than silently repeating a broad category query.
+        # The legacy scheduler feeds its first supply term to both playback boards.
+        # Keep a category keyword, but do not query Ads Top for our own brand/model
+        # or a broad vertical label when the offer has a concrete product type.
         if (
             order_by in {"play_2s_rate", "play_6s_rate"}
             and order_by in set(self.restricted_order_bys or [])
@@ -887,13 +899,13 @@ def _find_diagnostics(stats: dict, candidate_count: int) -> dict:
     hard_excluded = int(stats.get("pre_visual_verification_hard_excluded_ads") or 0)
     selection_details = stats.get("source_selection_diagnostics") or {}
     performance_ready = int(stats.get("performance_ready_source_ads") or 0)
-    performance_gate = stats.get("requested_performance_evidence_gate") or {}
     role_gate = stats.get("product_source_role_gate") or {}
     if candidate_count:
         outcome = "CANDIDATES_FOUND"
         explanation = (
-            "FIND shortlisted sources only after product-role and requested-performance evidence checks. "
-            "Attention metrics are not proof of sales; commercial/mechanism and Target-Fit remain downstream gates."
+            "FIND shortlisted relevant sources after product-role and source-readiness checks. Requested playback-board "
+            "values are recorded when returned; missing numeric rates do not erase a relevant source. Attention metrics "
+            "are not proof of sales; source-commercial/mechanism and Target-Fit remain independent gates."
         )
     elif raw_returned == 0:
         outcome = "NO_API_ROWS"
@@ -911,14 +923,6 @@ def _find_diagnostics(stats: dict, candidate_count: int) -> dict:
         explanation = (
             "Discovery returned relevant-looking rows, but none independently showed the target product being promoted. "
             "Incidental mentions, use context, and adjacent products were rejected in product mode."
-        )
-    elif (performance_gate.get("applied")
-          and int(performance_gate.get("considered_candidates") or 0) > 0
-          and int(performance_gate.get("accepted_candidates") or 0) == 0):
-        outcome = "NO_REQUESTED_PERFORMANCE_EVIDENCE"
-        explanation = (
-            "Target-product sources were found, but none had a native numeric value or a real position on the requested "
-            "performance board(s). FIND did not silently substitute views/likes engagement proxies."
         )
     elif performance_ready == 0:
         outcome = "NO_PERFORMANCE_EVIDENCE"
@@ -1015,8 +1019,16 @@ def _apply_product_selection_gates(candidates: list[dict], request: dict) -> tup
     }
     performance_gate = {
         "applied": bool(requested), "requested_metrics": requested,
-        "considered_candidates": 0, "accepted_candidates": 0,
-        "rejected_candidates": 0, "rejected_examples": [],
+        "mode": "EVIDENCE_ONLY_NON_GATING",
+        "eligibility_effect": "NONE",
+        "considered_candidates": 0,
+        "candidates_with_requested_evidence": 0,
+        "candidates_missing_requested_evidence": 0,
+        # Retained for compatible consumers; only counts candidates with board/native evidence.
+        "accepted_candidates": 0,
+        "rejected_candidates": 0,
+        "rejected_examples": [],
+        "missing_evidence_examples": [],
         "fallback_to_engagement_proxy": False,
     }
     for candidate in candidates or []:
@@ -1069,21 +1081,37 @@ def _apply_product_selection_gates(candidates: list[dict], request: dict) -> tup
         role_eligible_count += 1
         if requested:
             performance_gate["considered_candidates"] += 1
-            if not _has_requested_performance_evidence(candidate, requested):
+            has_requested_evidence = _has_requested_performance_evidence(candidate, requested)
+            candidate["requested_performance_evidence"] = {
+                "requested_metrics": list(requested),
+                "status": "AVAILABLE" if has_requested_evidence else "MISSING",
+                "evidence_basis": "native_metric_or_board_position" if has_requested_evidence else "none",
+                "affects_eligibility": False,
+                "note": (
+                    "A requested native metric or position on a requested Ads Top board was observed."
+                    if has_requested_evidence else
+                    "SocialCrawl may sort Ads Top by play rate without returning the numeric rate; absence of the value is recorded, not treated as a failed product match."
+                ),
+            }
+            if has_requested_evidence:
+                performance_gate["candidates_with_requested_evidence"] += 1
+                performance_gate["accepted_candidates"] += 1
+            else:
                 metric_rejected.append({
                     "id": candidate.get("id"), "ad_id": record.get("ad_id"),
                     "title": str(record.get("title") or candidate.get("title") or "")[:180],
-                    "reason": "REQUESTED_PERFORMANCE_EVIDENCE_MISSING",
+                    "reason": "REQUESTED_PERFORMANCE_EVIDENCE_MISSING_NON_GATING",
                     "available_basis": (candidate.get("performance_evidence") or {}).get("basis"),
                     "requested_metrics": list(requested),
                 })
-                continue
-            performance_gate["accepted_candidates"] += 1
+                performance_gate["candidates_missing_requested_evidence"] += 1
         accepted.append(candidate)
     role_gate["role_eligible_candidates"] = role_eligible_count
     role_gate["rejected_examples"] = role_rejected[:12]
-    performance_gate["rejected_candidates"] = len(metric_rejected)
-    performance_gate["rejected_examples"] = metric_rejected[:12]
+    # Missing numerical board metrics are an evidence gap, not a product eligibility failure.
+    performance_gate["rejected_candidates"] = 0
+    performance_gate["rejected_examples"] = []
+    performance_gate["missing_evidence_examples"] = metric_rejected[:12]
     return accepted, {"product_selection": role_gate, "requested_performance": performance_gate}
 
 

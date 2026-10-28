@@ -46,10 +46,11 @@ _PRODUCT_NOUNS = (
 _PROMOTION = re.compile(
     r"\b(?:buy(?:\s+now)?|shop\s+now|order(?:\s+today|\s+now)?|get\s+yours|grab\s+(?:this|yours)|"
     r"available\s+now|add\s+to\s+cart|free\s+shipping|blows?|removes?|cleans?|sucks?|picks?\s+up|"
-    r"scrubs?|cuts?|charges?|stores?|organizes?|reduces?|filters?|washes?|polishes?|dries?|"
+    r"scrubs?|cuts?|charges?|stores?\s+(?:up|your|more|items|tools|accessories|equipment|supplies|everything)|organizes?|reduces?|filters?|washes?|polishes?|dries?|"
     r"inflates?|deflates?|works?\s+(?:great|well)|easy\s+to\s+carry|in\s+seconds|one[-\s]handed|"
     r"perfect\s+for|made\s+for|designed\s+for|try\s+it|game\s*changer|must[-\s]?have|"
-    r"discount|sale|deal|introducing|meet\s+the)\b", re.IGNORECASE,
+    r"discount|sale|deal|introducing|meet\s+the|love\s+this|needed\s+one|back\s+in\s+stock|"
+    r"new\s+(?:vacuum|cleaner|product|tool))\b", re.IGNORECASE,
 )
 _CTA = re.compile(r"\b(?:buy(?:\s+now)?|shop\s+now|order(?:\s+today|\s+now)?|get\s+yours|add\s+to\s+cart|grab\s+this)\b", re.IGNORECASE)
 _TARGET_ACTION = re.compile(
@@ -149,8 +150,18 @@ def _anchor_present(anchor: str, view: dict) -> str:
         compact = re.sub(r"[^a-z0-9]", "", str(tag).casefold())
         if compact in forms:
             return "hashtag"
-        if anchor == "vacuum" and compact.startswith("vacuum") and compact[len("vacuum"):] in suffixes:
-            return "hashtag"
+        if anchor == "vacuum":
+            # Social-commerce tags commonly combine context + product + suffix:
+            # #carvacuumcleaner and #vacuumcleaner. Do not accept gerunds such as #vacuuming.
+            suffix_match = next((suffix for suffix in suffixes if compact.endswith(anchor + suffix)), None)
+            if suffix_match:
+                prefix = compact[:-len(anchor + suffix)]
+                allowed_prefixes = {
+                    "", "car", "auto", "automotive", "vehicle", "handheld", "cordless",
+                    "portable", "mini", "wireless", "electric", "rechargeable",
+                }
+                if prefix in allowed_prefixes:
+                    return "hashtag"
         # Compounds such as #carvacuum and #tireinflator are okay; gerunds are not.
         if compact.endswith(anchor) and compact[:-len(anchor)] and not compact.endswith("ing"):
             return "hashtag"
@@ -171,15 +182,25 @@ def _promo_signals(record: dict, view: dict) -> list[str]:
 
 
 def _target_is_promoted(body: str, anchor: str) -> bool:
-    """Require target-noun-linked action/CTA, not a passing mention in unrelated source copy."""
+    """Require source-body evidence tied to the target noun, including ordinary product-intro copy."""
     if not anchor:
         return False
+    anchor_pattern = re.compile(r"\b" + re.escape(anchor) + r"(?:s|es)?\b")
     for sentence in re.split(r"[\n.!?;]+", body):
-        match = re.search(r"\b" + re.escape(anchor) + r"\b", sentence)
+        match = anchor_pattern.search(sentence)
         if not match:
             continue
+        before = sentence[max(0, match.start() - 45):match.start()]
         tail = sentence[match.end():match.end() + 120]
         if _TARGET_ACTION.search(tail):
+            return True
+        # Common ad/review introductions put the commercial cue before the product noun:
+        # "new vacuum here we go", "bought this vacuum", etc.
+        if re.search(
+            r"\b(?:new|bought|ordered|got|unboxed|testing|reviewing)\s+"
+            r"(?:(?:a|the|my|this|our)\s+)?(?:[a-z0-9]+\s+){0,2}$",
+            before,
+        ):
             return True
         cta = _CTA.search(sentence)
         if cta and abs(cta.start() - match.start()) <= 55:

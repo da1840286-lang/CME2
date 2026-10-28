@@ -410,9 +410,9 @@ class FetchPlanRetentionTests(unittest.TestCase):
         self.assertEqual(len(client.search_calls), 2)
         self.assertEqual(len(client.calls), 3)
         self.assertEqual(client.calls[0]["order_by"], "play_6s_rate")
-        self.assertEqual(client.calls[0]["keyword"], "Fanttik V8 Mate")
+        self.assertEqual(client.calls[0]["keyword"], "car vacuum")
         self.assertEqual(client.calls[1]["order_by"], "play_2s_rate")
-        self.assertEqual(client.calls[1]["keyword"], "Fanttik V8 Mate")
+        self.assertEqual(client.calls[1]["keyword"], "cordless car vacuum")
         self.assertEqual(client.calls[2]["order_by"], "play_6s_rate")
         self.assertIsNone(client.calls[2]["keyword"])
         self.assertIsNone(client.calls[2]["industry"])
@@ -445,24 +445,24 @@ class FetchPlanRetentionTests(unittest.TestCase):
 
 
 class RetentionEnrichmentPolicyTests(unittest.TestCase):
-    def test_target_board_keyword_prefers_brand_and_model_over_generic_category(self):
-        self.assertEqual(
-            _target_board_keyword({
-                "target_offer": "Fanttik V8 Mate Cordless Car Vacuum",
-                "product_type": "cordless handheld car vacuum",
-            }, "car vacuum"),
-            "Fanttik V8 Mate",
-        )
+    def test_target_board_keyword_uses_category_query_not_our_own_brand(self):
+        offer = {
+            "target_offer": "Fanttik V8 Mate Cordless Car Vacuum",
+            "product_type": "cordless handheld car vacuum",
+        }
+        self.assertEqual(_target_board_keyword(offer, "car vacuum"), "car vacuum")
+        self.assertEqual(_target_board_keyword(offer, "Fanttik V8 Mate"), "car vacuum")
+        self.assertEqual(_target_board_keyword(offer, "AUTO"), "car vacuum")
 
     def test_retention_is_skipped_when_targeted_boards_have_no_target_product_rows(self):
         decision = _retention_enrichment_policy([
             {
-                "source": "ads_top", "order_by": "play_6s_rate", "keyword": "Fanttik V8 Mate",
+                "source": "ads_top", "order_by": "play_6s_rate", "keyword": "car vacuum",
                 "candidate_lane": True, "retention_requested": False, "returned": 10,
                 "eligible_rows_returned": 0, "target_role_match_count": 0,
             },
             {
-                "source": "ads_top", "order_by": "play_2s_rate", "keyword": "Fanttik V8 Mate",
+                "source": "ads_top", "order_by": "play_2s_rate", "keyword": "car vacuum",
                 "candidate_lane": True, "retention_requested": False, "returned": 10,
                 "eligible_rows_returned": 0, "target_role_match_count": 0,
             },
@@ -474,12 +474,12 @@ class RetentionEnrichmentPolicyTests(unittest.TestCase):
     def test_retention_runs_only_when_a_target_product_row_exists(self):
         decision = _retention_enrichment_policy([
             {
-                "source": "ads_top", "order_by": "play_6s_rate", "keyword": "Fanttik V8 Mate",
+                "source": "ads_top", "order_by": "play_6s_rate", "keyword": "car vacuum",
                 "candidate_lane": True, "retention_requested": False, "returned": 10,
                 "eligible_rows_returned": 1, "target_role_match_count": 1,
             },
             {
-                "source": "ads_top", "order_by": "play_2s_rate", "keyword": "Fanttik V8 Mate",
+                "source": "ads_top", "order_by": "play_2s_rate", "keyword": "car vacuum",
                 "candidate_lane": True, "retention_requested": False, "returned": 10,
                 "eligible_rows_returned": 0, "target_role_match_count": 0,
             },
