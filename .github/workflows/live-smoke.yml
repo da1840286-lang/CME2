@@ -719,7 +719,13 @@ jobs:
                            "commercial_evidence": c.get("commercial_evidence") or {},
                            "playback_metrics": {k: (c.get("metrics") or {}).get(k, {}).get("value")
                                                 for k in ("ctr", "cvr", "play_2s_rate", "play_6s_rate")
-                                                if k in (c.get("metrics") or {})}})
+                                                if k in (c.get("metrics") or {})},
+                           "retention_metrics": {
+                               k: (c.get("metrics") or {}).get(k, {}).get("value")
+                               for k in ("retention_2s", "retention_6s")
+                               if k in (c.get("metrics") or {})},
+                           "retention_curve_points": (c.get("retention_evidence") or {}).get("curve_point_count", 0),
+                           "retention_evidence": c.get("retention_evidence") or {}})
           (out / "candidate_summary.json").write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as s:
               mode = os.environ["CME_STAGE"]
@@ -737,6 +743,18 @@ jobs:
                       s.write("SocialCrawl returned no raw ad rows for the planned source queries.\n\n")
                   s.write(f"Diagnosis: `{diag.get('outcome', 'UNKNOWN')}` — {diag.get('explanation', 'No additional FIND diagnostics available')}\n\n")
                   s.write(f"Requests: {diag.get('requests_executed', 0)}; unique ads: {diag.get('unique_ads', 0)}; product-relevant: {diag.get('product_relevant_ads', diag.get('target_relevant_ads', 0))}; performance-ready: {diag.get('performance_ready_source_ads', 0)}; shortlisted: {diag.get('auto_shortlist_ads', 0)}; source-money-gate pass (not revenue): {diag.get('money_ready_source_ads', 0)}; hard-excluded: {diag.get('hard_excluded_ads', 0)}.\n\n")
+                  retention_diag = diag.get("retention_selection") or stats.get("retention_selection") or {}
+                  if retention_diag.get("retention_calls"):
+                      returned = retention_diag.get("returned_rows_with_retention") or {}
+                      s.write(
+                          f"Retention capture: calls={retention_diag.get('retention_calls', 0)}; "
+                          f"2s points={returned.get('retention_2s', 0)}; "
+                          f"6s points={returned.get('retention_6s', 0)}; "
+                          f"curves={returned.get('retention_curve', 0)}; "
+                          f"shortlisted with retention={retention_diag.get('selected_candidates_with_retention', 0)}.\n"
+                          "Exact numeric play_2s_rate/play_6s_rate values are not published by SocialCrawl; "
+                          "retention points are not the exact board score or proof of sales.\n\n"
+                      )
                   selection_diag = diag.get("source_selection_diagnostics") or {}
                   by_reason = selection_diag.get("by_reason") or {}
                   if by_reason:
@@ -744,7 +762,7 @@ jobs:
                       for item in (selection_diag.get("examples") or [])[:6]:
                           title = str(item.get("title") or "(no title)").replace("\n", " ")[:120]
                           url = item.get("source_url") if str(item.get("source_url") or "").startswith("https://") else ""
-                          s.write(f"- {item.get('ad_id')} — {item.get('reason')}; {title}; action={item.get('action')}; money_gate={item.get('money_gate_pass')}; performance={(c.get('performance_evidence') or {}).get('basis', 'unknown')}; commercial_evidence={(c.get('commercial_evidence') or {}).get('level', 'unknown')}; playback={c.get('playback_metrics') or {}}; [open ad]({url})\n")
+                          s.write(f"- {item.get('ad_id')} — {item.get('reason')}; {title}; action={item.get('action')}; money_gate={item.get('money_gate_pass')}; performance={item.get('performance_basis', 'unknown')}:{item.get('performance_fields') or []}; performance_score={item.get('performance_score')}; [open ad]({url})\n")
                       s.write("\n")
                   if queries:
                       s.write("Sponsored Search queries tried: " + ", ".join(queries) + "\n\n")

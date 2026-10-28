@@ -6,6 +6,7 @@ and bounded transient retries; other requests retain the legacy behavior.
 """
 from __future__ import annotations
 
+import math
 import time
 import uuid
 from datetime import datetime, timezone
@@ -22,6 +23,110 @@ RETENTION_MAX_RETRIES = 3
 RETRYABLE_HTTP_STATUSES = frozenset({408, 425, 429, 500, 502, 503, 504})
 
 
+
+_RETENTION_CURVE_MAX_POINTS = 120
+_RETENTION_VALUE_KEYS = ("retention", "value", "rate", "ratio", "fraction", "share", "percentage", "percent")
+_RETENTION_SECOND_KEYS = ("second", "seconds", "time", "t")
+
+
+def _finite_retention_number(value: Any) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) and number >= 0 else None
+
+
+def _retention_point_value(point: Any) -> float | None:
+    number = _finite_retention_number(point)
+    if number is not None:
+        return number
+    if isinstance(point, dict):
+        for key in _RETENTION_VALUE_KEYS:
+            if key in point:
+                number = _finite_retention_number(point.get(key))
+                if number is not None:
+                    return number
+    return None
+
+
+def _retention_point_second(point: Any) -> int | None:
+    if not isinstance(point, dict):
+        return None
+    for key in _RETENTION_SECOND_KEYS:
+        value = _finite_retention_number(point.get(key))
+        if value is not None and value >= 1 and value.is_integer():
+            return int(value)
+    return None
+
+
+def normalize_retention_curve(curve: Any, max_points: int = _RETENTION_CURVE_MAX_POINTS) -> tuple[list[float | None] | None, int, str]:
+    """Normalize supported curve shapes without shifting seconds when a point is invalid."""
+    cap = max(1, int(max_points))
+    if curve is None:
+        return None, 0, "missing"
+    if isinstance(curve, dict):
+        for key in ("points", "values", "curve"):
+            nested = curve.get(key)
+            if isinstance(nested, list):
+                points, invalid, shape = normalize_retention_curve(nested, max_points=cap)
+                return points, invalid, f"mapping:{key}/{shape}"
+        numeric_seconds = []
+        for key, value in curve.items():
+            try:
+                second = int(str(key).strip())
+            except (TypeError, ValueError):
+                numeric_seconds = []
+                break
+            if second < 1 or str(second) != str(key).strip():
+                numeric_seconds = []
+                break
+            numeric_seconds.append((second, value))
+        if numeric_seconds and len(numeric_seconds) == len(curve):
+            highest_raw = max(second for second, _ in numeric_seconds)
+            highest = min(highest_raw, cap)
+            points: list[float | None] = [None] * highest
+            for second, value in numeric_seconds:
+                if second <= cap:
+                    points[second - 1] = _retention_point_value(value)
+            invalid = sum(point is None for point in points) + max(0, highest_raw - cap)
+            if any(point is not None for point in points):
+                return points, invalid, "mapping:second_keys"
+            return None, invalid, "mapping:second_keys:no_valid_points"
+        return None, 0, "unsupported_dict"
+    if not isinstance(curve, list):
+        return None, 0, f"unsupported_{type(curve).__name__}"
+    if not curve:
+        return None, 0, "empty_list"
+
+    raw_points = curve[:cap]
+    explicit_seconds = [_retention_point_second(point) for point in raw_points]
+    schema = "list:object" if any(isinstance(point, dict) for point in raw_points) else "list:scalar"
+    if any(second is not None for second in explicit_seconds):
+        highest_raw = max((second or 0) for second in explicit_seconds)
+        highest = min(highest_raw, cap)
+        points = [None] * highest
+        for point, second in zip(raw_points, explicit_seconds):
+            if second is not None and second <= cap:
+                points[second - 1] = _retention_point_value(point)
+        invalid = (
+            sum(second is None for second in explicit_seconds)
+            + sum(value is None for value in points)
+            + max(0, len(curve) - cap)
+        )
+        if any(value is not None for value in points):
+            return points, invalid, schema + ":explicit_seconds"
+        return None, invalid, schema + ":no_valid_points"
+
+    points = [_retention_point_value(point) for point in raw_points]
+    invalid = sum(point is None for point in points) + max(0, len(curve) - cap)
+    if any(point is not None for point in points):
+        return points, invalid, schema
+    return None, invalid, schema + ":no_valid_points"
+
+
 class RetentionRequestError(SocialCrawlError):
     """SocialCrawl request failure with structured, safe-to-persist diagnostics."""
 
@@ -32,6 +137,78 @@ class RetentionRequestError(SocialCrawlError):
 
 class RetryingSocialCrawlTikTokTopAds(SocialCrawlTikTokTopAds):
     """Preserve the vendored adapter; add bounded retry only for retention requests."""
+
+    @staticmethod
+    def _raw_ad(item: dict[str, Any]) -> dict[str, Any]:
+        post = item.get("post", item)
+        if not isinstance(post, dict):
+            return {}
+        ext = post.get("ext") if isinstance(post.get("ext"), dict) else {}
+        ad = ext.get("ad") if isinstance(ext.get("ad"), dict) else {}
+        return ad
+
+    def _unwrap_item(self, item: dict[str, Any]) -> dict[str, Any]:
+        normalized = super()._unwrap_item(item)
+        ad = self._raw_ad(item)
+        curve, invalid_points, shape = normalize_retention_curve(ad.get("retention"))
+        normalized["retention_curve"] = curve
+        normalized["retention_curve_invalid_points"] = invalid_points
+        provenance = normalized.get("retention_provenance")
+        provenance = dict(provenance) if isinstance(provenance, dict) else {}
+        if curve is not None:
+            provenance["retention_curve"] = "post.ext.ad.retention"
+        elif ad.get("retention") is None:
+            provenance["retention_curve"] = "post.ext.ad.retention:missing"
+        else:
+            provenance["retention_curve"] = f"post.ext.ad.retention:{shape}"
+        normalized["retention_provenance"] = provenance
+        return normalized
+
+    @classmethod
+    def _retention_schema_diagnostics(cls, items: list[dict[str, Any]]) -> dict[str, Any]:
+        shape_counts: dict[str, int] = {}
+        examples: list[dict[str, Any]] = []
+        curves_available = 0
+        for row in items:
+            raw = row.get("raw") if isinstance(row.get("raw"), dict) else {}
+            ad = cls._raw_ad(raw)
+            curve = ad.get("retention")
+            points, invalid_points, shape = normalize_retention_curve(curve)
+            shape_counts[shape] = shape_counts.get(shape, 0) + 1
+            if points is not None:
+                curves_available += 1
+            if len(examples) < 5:
+                examples.append({
+                    "ad_id": str(row.get("ad_id") or ""),
+                    "curve_shape": shape,
+                    "raw_curve_type": type(curve).__name__ if curve is not None else "null",
+                    "raw_point_count": len(curve) if isinstance(curve, (list, dict)) else None,
+                    "parsed_point_count": len(points) if isinstance(points, list) else 0,
+                    "invalid_or_missing_points": invalid_points,
+                    "first_point_type": type(curve[0]).__name__ if isinstance(curve, list) and curve else None,
+                    "first_point_keys": sorted(str(key) for key in curve[0].keys())[:12]
+                        if isinstance(curve, list) and curve and isinstance(curve[0], dict) else [],
+                })
+        return {
+            "rows": len(items),
+            "rows_with_parsed_curve": curves_available,
+            "shape_counts": dict(sorted(shape_counts.items())),
+            "examples": examples,
+            "note": "Shape diagnostics only; curve values stay attached to their source record.",
+        }
+
+    def fetch_board(self, **kwargs) -> dict[str, Any]:
+        # Keep the requested board limit. Retention points accompany each ad, but a
+        # 2s-ranked board and a 6s-ranked board are different populations and must not
+        # be collapsed just because both return the same retention fields.
+        retention_requested = bool(kwargs.get("include_retention"))
+        result = super().fetch_board(**kwargs)
+        if retention_requested:
+            diagnostics = result.get("raw_playback_field_diagnostics")
+            diagnostics = dict(diagnostics) if isinstance(diagnostics, dict) else {}
+            diagnostics["retention_curve_schema"] = self._retention_schema_diagnostics(result.get("items") or [])
+            result["raw_playback_field_diagnostics"] = diagnostics
+        return result
 
     @staticmethod
     def _retry_delay_seconds(retry_after: Any, retry_index: int) -> float:

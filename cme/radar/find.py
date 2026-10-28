@@ -24,6 +24,7 @@ os.environ.setdefault("CME_VERTICALS_DIR", str(DATA_DIR / "verticals"))  # befor
 
 VERTICAL = "Physical Products"
 METRIC_FIELDS = ("views", "likes", "comments", "shares", "ctr", "cvr", "play_2s_rate", "play_6s_rate",
+                 "retention_2s", "retention_6s", "retention_curve",
                  "rank", "cost_score", "like_tier", "estimated_reach", "engagement_rate")
 PERIODS = (7, 30, 180)
 
@@ -46,6 +47,52 @@ class FindUnavailable(Exception):
         self.state, self.detail = state, detail
         self.diagnostics = diagnostics or {}
         super().__init__(f"{state}: {detail}")
+
+
+def _retention_execution_plan(
+    requested_order_bys: list[str], include_retention: bool, requested_max_requests: int,
+) -> tuple[list[str], int, dict]:
+    """Keep distinct TikTok board rankings; each row carries both retention points."""
+    requested = list(dict.fromkeys(str(value) for value in requested_order_bys if value))
+    effective = list(requested)
+    effective_max_requests = int(requested_max_requests)
+    strategy = {
+        "mode": "operator_requested_order",
+        "requested_performance_order_bys": requested,
+        "effective_performance_order_bys": effective,
+        "requested_max_requests": effective_max_requests,
+        "effective_max_requests": effective_max_requests,
+        "note": "Retention points are not the exact play-rate fields used to sort Ads Top.",
+    }
+    both_retention_boards = {"play_2s_rate", "play_6s_rate"}.issubset(set(requested))
+    if include_retention and both_retention_boards:
+        # The provider returns both named retention points on each row, but still
+        # ranks the 2s and 6s boards separately. One curve cannot replace the other
+        # board's source population or board ordering.
+        if effective_max_requests < 4:
+            raise ValueError(
+                "include_retention with playback_both needs find_requests >= 4 "
+                "to reserve two source-search calls and both Ads Top board calls."
+            )
+        strategy = {
+            "mode": "two_retention_board_orders",
+            "requested_performance_order_bys": requested,
+            "effective_performance_order_bys": effective,
+            "requested_max_requests": int(requested_max_requests),
+            "effective_max_requests": effective_max_requests,
+            "retention_board_order_bys": [name for name in requested if name in {"play_2s_rate", "play_6s_rate"}],
+            "retention_points_returned_by_each_call": ["retention_2s", "retention_6s", "retention_curve"],
+            "rationale": (
+                "Keep separate play_2s_rate and play_6s_rate boards because their ranking order differs; "
+                "each include=retention call returns the named 2s/6s points and curve for its own rows. "
+                "Product relevance and source-quality gates remain unchanged."
+            ),
+            "interpretation": (
+                "retention_2s/retention_6s are curve points, not the exact play_2s_rate/play_6s_rate "
+                "values used to sort the board and not proof of conversion, sales, or profit."
+            ),
+        }
+    return effective, effective_max_requests, strategy
 
 
 def find_status() -> dict:
@@ -81,10 +128,40 @@ def to_candidate(item: dict, request: dict, collected_at: str, origin: str, sour
     src = source_label or default_source
     boards = list(rec.get("discovery_boards") or [])
     metrics = {}
+    retention_boards = [board for board in boards if board in {"play_2s_rate", "play_6s_rate"}]
+    retention_provenance = rec.get("retention_provenance")
+    retention_provenance = retention_provenance if isinstance(retention_provenance, dict) else {}
+    retention_metric_names = {"retention_2s", "retention_6s", "retention_curve"}
     for name in METRIC_FIELDS:
         value = rec.get(name)
         if value is not None and value != "":
-            metrics[name] = {"value": value, "source": src, "boards": boards, "collected_at": collected_at}
+            field_source = "socialcrawl:tiktok_ads_top" if name in retention_metric_names else src
+            field_boards = (retention_boards or boards) if name in retention_metric_names else boards
+            metrics[name] = {"value": value, "source": field_source, "boards": field_boards, "collected_at": collected_at}
+            if name in retention_provenance:
+                metrics[name]["provenance"] = retention_provenance[name]
+    retention_curve = rec.get("retention_curve")
+    retention_curve_points = sum(
+        1 for point in retention_curve
+        if isinstance(point, (int, float)) and not isinstance(point, bool)
+    ) if isinstance(retention_curve, list) else 0
+    has_retention = any(rec.get(field) not in (None, "", []) for field in ("retention_2s", "retention_6s", "retention_curve"))
+    retention_evidence = {
+        "status": "AVAILABLE" if has_retention else "NOT_AVAILABLE",
+        "source": "socialcrawl:tiktok_ads_top" if has_retention else None,
+        "boards": retention_boards,
+        "retention_2s": rec.get("retention_2s"),
+        "retention_6s": rec.get("retention_6s"),
+        "curve_point_count": retention_curve_points,
+        "curve_invalid_or_missing_points": rec.get("retention_curve_invalid_points"),
+        "provenance": dict(retention_provenance),
+        "is_exact_play_rate": False,
+        "commercial_result_confirmed": False,
+        "interpretation": (
+            "TikTok audience-retention points; not the exact play-rate values used to sort Ads Top "
+            "and not evidence of conversion, sales, or profit."
+        ),
+    }
     rel = rec.get("vertical_relevance") or {}
     brand = rec.get("brand")
     video = rec.get("video_url_540p") or rec.get("video_url") or rec.get("video_url_360p") or ""
@@ -98,7 +175,8 @@ def to_candidate(item: dict, request: dict, collected_at: str, origin: str, sour
         score["components"] = _d(decision, "components") or {}
     why = {"explanation": _d(decision, "explanation"), "action": _d(decision, "action"), "tags": _d(decision, "tags"),
            "scope": rec.get("discovery_scope"), "boards": boards, "keywords": rec.get("discovery_keywords") or [],
-           "hits": rec.get("discovery_hits"), "relevance_reason": rel.get("reason")}
+           "hits": rec.get("discovery_hits"), "relevance_reason": rel.get("reason"),
+           "retention_evidence": retention_evidence}
     c = {
         "keys": sorted(canonical_source_identity_keys(rec)) if canonical_source_identity_keys else [],
         "origin": origin, "platform": "tiktok",
@@ -111,6 +189,7 @@ def to_candidate(item: dict, request: dict, collected_at: str, origin: str, sour
         "landing_page": rec.get("landing_page") or None, "landing_page_url": rec.get("landing_page_url") or None,
         "duration_seconds": rec.get("duration_seconds"), "duration_source": rec.get("duration_source"),
         "metrics": metrics,
+        "retention_evidence": retention_evidence,
         "source_check": {"status": rel.get("status") or "UNKNOWN", "classification": rel.get("classification"),
                          "score": rel.get("score"), "excluded": rel.get("excluded"), "reason": rel.get("reason"),
                          "product_relevance": rec.get("product_relevance") or {},
@@ -558,6 +637,11 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
     include_retention = raw_include_retention is True or str(raw_include_retention).strip().lower() in {"1", "true", "yes", "on"}
     if include_retention and not {"play_2s_rate", "play_6s_rate"} & set(performance_order_bys):
         raise ValueError("include_retention needs performance_order_bys with play_2s_rate and/or play_6s_rate")
+    requested_max_requests = max_requests
+    requested_performance_order_bys = list(performance_order_bys)
+    performance_order_bys, max_requests, retention_strategy = _retention_execution_plan(
+        requested_performance_order_bys, include_retention, requested_max_requests
+    )
     user_keywords = _clean_terms(params.get("keywords"))
     offer = _offer_context(params)
     performance_names = {"ctr", "cvr", "play_2s_rate", "play_6s_rate"}
@@ -570,12 +654,16 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
     search_terms = _clean_terms(user_keywords + [offer["target_offer"], offer["product_type"], offer["product_category"]]) if selection_mode == "product" else user_keywords
     request = {
         "country": country, "period": period, "order_bys": order_bys,
-        "performance_order_bys": performance_order_bys, "include_retention": include_retention,
+        "performance_order_bys": performance_order_bys,
+        "requested_performance_order_bys": requested_performance_order_bys,
+        "include_retention": include_retention,
+        "max_requests": max_requests, "requested_max_requests": requested_max_requests,
+        "retention_strategy": retention_strategy,
         "keywords": user_keywords,
         "search_terms": search_terms, "selection_mode": selection_mode,
         "target_offer": offer["target_offer"], "product_type": offer["product_type"],
         "product_category": offer["product_category"], "max_ads": max_ads,
-        "max_requests": max_requests, "vertical": VERTICAL,
+        "vertical": VERTICAL,
     }
     if conflict:
         return {
@@ -659,6 +747,38 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
     strategy["supply_search_calls_used"] = sum(1 for call in executed_calls if call.get("source") == "sponsored_search")
     strategy["performance_calls_used"] = sum(1 for call in executed_calls if call.get("source") == "ads_top")
     diagnostics = _find_diagnostics(stats, len(candidates))
+    retention_calls = [
+        call for call in (stats.get("calls") or [])
+        if isinstance(call, dict) and call.get("retention_requested")
+    ]
+    retention_returned = {
+        field: sum(int((call.get("retention_returned") or {}).get(field) or 0) for call in retention_calls)
+        for field in ("retention_2s", "retention_6s", "retention_curve")
+    }
+    selected_with_retention = sum(
+        1 for candidate in candidates
+        if (candidate.get("retention_evidence") or {}).get("status") == "AVAILABLE"
+    )
+    retention_summary = {
+        "strategy": retention_strategy,
+        "retention_calls": len(retention_calls),
+        "returned_rows_with_retention": retention_returned,
+        "selected_candidates_with_retention": selected_with_retention,
+        "selected_candidates_from_retention_board": sum(
+            1 for candidate in candidates
+            if any(board in {"play_2s_rate", "play_6s_rate"} for board in ((candidate.get("why") or {}).get("boards") or []))
+        ),
+        "curve_schema": [
+            ((call.get("raw_playback_field_diagnostics") or {}).get("retention_curve_schema") or {})
+            for call in retention_calls
+        ],
+        "note": (
+            "Retention-board rows still must pass product relevance and source-quality gates. "
+            "Unrelated high-retention ads must not be admitted solely because they rank on Ads Top."
+        ),
+    }
+    stats["retention_selection"] = retention_summary
+    diagnostics["retention_selection"] = retention_summary
     evidence_counts = {}
     for candidate in candidates:
         evidence = candidate.get("commercial_evidence") or {}

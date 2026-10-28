@@ -9,7 +9,8 @@ import requests
 import cme.radar.find  # noqa: F401  sets CME_VERTICALS_DIR before the legacy import
 from cme.radar.legacy.discover import _fetch_plan, _merge_item
 from cme.radar.legacy.discovery.tiktok_socialcrawl import SocialCrawlError, SocialCrawlTikTokTopAds, parse_retention
-from cme.radar.socialcrawl_client import RetryingSocialCrawlTikTokTopAds
+from cme.radar.socialcrawl_client import RetryingSocialCrawlTikTokTopAds, normalize_retention_curve
+from cme.radar.find import _retention_execution_plan, to_candidate
 from cme.run import qa_retry_feedback
 
 
@@ -243,6 +244,97 @@ class RetryFeedbackForMustJudgeChecks(unittest.TestCase):
             self.assertIn("mech_result_1", feedback[0])
             self.assertIn("No cleaned strip visible", feedback[0])
             self.assertNotIn("comp_1", feedback[0])
+
+
+class RetentionCurveNormalizationTests(unittest.TestCase):
+    def test_numeric_curve_preserves_time_positions_with_invalid_points(self):
+        points, invalid, shape = normalize_retention_curve([0.91, None, "bad", 0.42])
+        self.assertEqual(points, [0.91, None, None, 0.42])
+        self.assertEqual(invalid, 2)
+        self.assertEqual(shape, "list:scalar")
+
+    def test_structured_curve_uses_explicit_second_and_keeps_gaps(self):
+        points, invalid, shape = normalize_retention_curve([
+            {"second": 1, "retention": 0.9},
+            {"second": 3, "retention": 0.55},
+        ])
+        self.assertEqual(points, [0.9, None, 0.55])
+        self.assertEqual(shape, "list:object:explicit_seconds")
+        self.assertGreaterEqual(invalid, 1)
+
+    def test_second_keyed_mapping_is_ordered_by_second(self):
+        points, invalid, shape = normalize_retention_curve({"3": 0.4, "1": 0.9})
+        self.assertEqual(points, [0.9, None, 0.4])
+        self.assertEqual(shape, "mapping:second_keys")
+        self.assertEqual(invalid, 1)
+
+    def test_unknown_curve_shape_is_not_guessed(self):
+        points, invalid, shape = normalize_retention_curve({"opaque": "unknown"})
+        self.assertIsNone(points)
+        self.assertEqual(shape, "unsupported_dict")
+
+
+    def test_retention_call_respects_requested_board_limit(self):
+        response = {"items": [], "credits_used": 20, "request_id": "r1", "params": {},
+                    "raw_playback_field_diagnostics": {}}
+        client = RetryingSocialCrawlTikTokTopAds(api_key="test")
+        with patch.object(SocialCrawlTikTokTopAds, "fetch_board", return_value=response) as base_fetch:
+            client.fetch_board(country="US", period=30, order_by="play_6s_rate",
+                               include_retention=True, limit=10)
+        self.assertEqual(base_fetch.call_args.kwargs["limit"], 10)
+
+class RetentionExecutionPolicyTests(unittest.TestCase):
+    def test_both_board_request_preserves_distinct_retention_board_rankings(self):
+        order_bys, max_requests, strategy = _retention_execution_plan(
+            ["play_6s_rate", "play_2s_rate"], True, 5)
+        self.assertEqual(order_bys, ["play_6s_rate", "play_2s_rate"])
+        self.assertEqual(max_requests, 5)
+        self.assertEqual(strategy["mode"], "two_retention_board_orders")
+        self.assertEqual(strategy["effective_max_requests"], 5)
+        self.assertEqual(
+            strategy["retention_board_order_bys"], ["play_6s_rate", "play_2s_rate"])
+        self.assertIn("retention_2s", strategy["retention_points_returned_by_each_call"])
+        self.assertIn("retention_6s", strategy["retention_points_returned_by_each_call"])
+
+    def test_without_retention_does_not_rewrite_requested_board_order(self):
+        order_bys, max_requests, strategy = _retention_execution_plan(
+            ["play_6s_rate", "play_2s_rate"], False, 5)
+        self.assertEqual(order_bys, ["play_6s_rate", "play_2s_rate"])
+        self.assertEqual(max_requests, 5)
+        self.assertEqual(strategy["mode"], "operator_requested_order")
+
+    def test_dual_retention_policy_requires_two_searches_and_both_board_slots(self):
+        with self.assertRaises(ValueError):
+            _retention_execution_plan(["play_2s_rate", "play_6s_rate"], True, 3)
+
+
+class RetentionCandidatePropagationTests(unittest.TestCase):
+    def test_retention_metrics_keep_ads_top_provenance_and_not_play_rate_labels(self):
+        record = {
+            "ad_id": "ad-retention-1",
+            "title": "Cordless car vacuum",
+            "source_url": "https://www.tiktok.com/@brand/video/ad-retention-1",
+            "video_url": "https://cdn.example/video.mp4",
+            "discovery_source": "tiktok_sponsored_search",
+            "discovery_boards": ["sponsored_search", "play_6s_rate"],
+            "retention_2s": 0.71,
+            "retention_6s": 0.43,
+            "retention_curve": [0.9, 0.71, None, 0.52, 0.43],
+            "retention_curve_invalid_points": 1,
+            "retention_provenance": {
+                "retention_2s": "post.ext.ad.retention_2s",
+                "retention_6s": "post.ext.ad.retention_6s",
+                "retention_curve": "post.ext.ad.retention",
+            },
+        }
+        candidate = to_candidate({"record": record, "decision": None}, {"country": "US", "period": 30}, "2026-10-28T00:00:00Z", "found")
+        self.assertEqual(candidate["metrics"]["retention_2s"]["value"], 0.71)
+        self.assertEqual(candidate["metrics"]["retention_2s"]["source"], "socialcrawl:tiktok_ads_top")
+        self.assertEqual(candidate["metrics"]["retention_2s"]["boards"], ["play_6s_rate"])
+        self.assertNotIn("play_6s_rate", candidate["metrics"])
+        self.assertEqual(candidate["retention_evidence"]["status"], "AVAILABLE")
+        self.assertFalse(candidate["retention_evidence"]["is_exact_play_rate"])
+        self.assertFalse(candidate["retention_evidence"]["commercial_result_confirmed"])
 
 
 if __name__ == "__main__":
