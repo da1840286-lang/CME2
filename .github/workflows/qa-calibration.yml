@@ -89,7 +89,7 @@ jobs:
 
           - Source GitHub Actions run: https://github.com/da1840286-lang/CME2/actions/runs/40554399775
           - Source artifact ID: 12756213543 (cme-frame-out), from branch integration/zip-full-build-2026-10-27.
-          - Calibrated judge: current branch openrouter_free_judge adapter (google/gemma-4-31b-it:free).
+          - Calibrated judge: temporary calibration_nemotron_judge adapter (nvidia/nemotron-3.5-super-vl:free); the previous Google AI Studio upstream returned HTTP 429.
           - Frames are previously generated product-ad frames. This calibrates the judge against this labeled sample; it does not certify general performance on all products or future generations.
           - These labels are a visual-review starting set, not user-supplied ground truth. Strict false labels mean the specific MUST requirement is not unambiguously demonstrated in that still frame.
 
@@ -101,8 +101,40 @@ jobs:
           Positive labels for keep_hook_1, keep_mechanism_1, and mech_problem_1 are based on the visible cordless handheld vacuum and car-interior debris context. Because these are still images, they do not prove actual motion or suction over time.
           MD
 
-      - name: Create runtime settings
-        run: cp settings.example.json settings.json
+      - name: Create runtime settings and alternate free vision judge
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp settings.example.json settings.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          settings_path = Path("settings.json")
+          settings = json.loads(settings_path.read_text(encoding="utf-8"))
+          settings["judge_adapter"] = "calibration_nemotron_judge"
+          # This attempt is intentionally bounded: don't double the request count on a rate-limit response.
+          settings["transient_retries"] = 0
+          settings["retry_delay_seconds"] = 0
+          catalog_path = Path("adapters.json")
+          catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+          base = next(item for item in catalog["adapters"] if item["name"] == "openrouter_free_brain")
+          alternate = dict(base)
+          alternate["name"] = "calibration_nemotron_judge"
+          alternate["kind"] = "judge"
+          alternate["model_id"] = "nvidia/nemotron-3.5-super-vl:free"
+          alternate["params"] = {
+              "response_format_mode": "json_object",
+              "temperature": 0,
+              "max_tokens": 1500,
+              "reasoning": {"enabled": False}
+          }
+          alternate["notes"] = "Temporary calibration-only vision judge; fallback attempt after the Google AI Studio free upstream was rate-limited."
+          catalog["adapters"].append(alternate)
+          settings_path.write_text(json.dumps(settings, ensure_ascii=False, indent=2) + "\\n", encoding="utf-8")
+          Path("qa_calibration/runtime_settings.json").write_text(json.dumps(settings, ensure_ascii=False, indent=2) + "\\n", encoding="utf-8")
+          Path("qa_calibration/runtime_adapters.json").write_text(json.dumps(catalog, ensure_ascii=False, indent=2) + "\\n", encoding="utf-8")
+          PY
 
       - name: Run repeated single-pass vs observe-verify calibration
         id: calibration
@@ -149,7 +181,7 @@ jobs:
             echo "- Branch: ${GITHUB_REF_NAME}"
             echo "- Commit: ${GITHUB_SHA}"
             echo "- Source frame run: https://github.com/da1840286-lang/CME2/actions/runs/40554399775"
-            echo "- Judge: google/gemma-4-31b-it:free via OpenRouter"
+            echo "- Judge: nvidia/nemotron-3.5-super-vl:free via OpenRouter (calibration-only alternate adapter)"
             echo "- Repeats: 3 per frame per mode"
             echo
             if [[ -f qa_calibration/calibration_out/calibration_report.md ]]; then
