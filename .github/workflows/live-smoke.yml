@@ -21,7 +21,7 @@ on:
         required: true
         default: "US"
       period:
-        description: "TikTok Top Ads lookback period"
+        description: "Lookback period in days for supported source-age filtering and attention scoring; this does not create playback metrics."
         type: choice
         options:
           - "7"
@@ -30,7 +30,7 @@ on:
         required: true
         default: "30"
       find_requests:
-        description: "Hard cap on SocialCrawl requests. With playback_both plus retention, set 5 to budget for up to two Sponsored Search queries, two keyword-filtered Ads Top boards, and one unfiltered retention call. Source-commercial and Target-Fit remain separate downstream gates."
+        description: "Hard cap on SocialCrawl requests. When play_2s_rate, play_6s_rate, or playback_both is selected, the contract-aware plan uses this budget for up to three product-targeted Sponsored Search queries; it does not call Ads Top playback boards or retention. Requested playback metrics are reported as unavailable for product-query selection. Source-commercial and Target-Fit remain separate downstream gates."
         type: number
         required: true
         default: 4
@@ -40,12 +40,12 @@ on:
         required: true
         default: 3
       keywords:
-        description: "TikTok ad keywords, comma-separated"
+        description: "Comma-separated fallback/generic search terms. In contract-aware product search, the exact offer name and product type are prioritized before these terms."
         type: string
         required: false
         default: "car vacuum"
       find_performance_order:
-        description: "Targeted live validation for FIND. Choose playback_both with find_requests=4 when retention is off, or 5 when find_include_retention is on; the latter reserves two filtered playback boards plus one separate unfiltered retention call. Selection gates are unchanged."
+        description: "Optional playback-metric request for FIND. Selecting play_2s_rate, play_6s_rate, or playback_both activates the contract-aware product-search plan: request budget goes to targeted Sponsored Search, Ads Top playback boards are not called, and the requested metric is reported as NOT_OBTAINABLE_FOR_PRODUCT_QUERY. The attention score is only a proxy, not commercial proof. default keeps the existing default discovery plan."
         type: choice
         options:
           - default
@@ -55,12 +55,12 @@ on:
         required: true
         default: default
       find_include_retention:
-        description: "Request retention points in one separate unfiltered Ads Top call (extra credits, minimum 20). With playback_both, set find_requests=5; the two target-filtered boards do not request retention."
+        description: "Requires a playback-metric option, but the current contract-aware plan intentionally skips unfiltered Ads Top retention calls when play_2s_rate or play_6s_rate is requested. A true value does not override this provider limitation; leave false for the current product-targeted FIND path."
         type: boolean
         required: false
         default: false
       find_selection_mode:
-        description: "FIND selector. Product keeps the current scored product lane; mechanism searches explicit keywords using Sponsored Search and an attention proxy only."
+        description: "Product targets the configured offer; when a playback-metric option is selected it uses contract-aware, product-targeted Sponsored Search and an attention proxy only. Mechanism searches explicit keywords using Sponsored Search and an attention proxy only. Attention is not commercial proof; source-commercial and Target-Fit gates remain separate."
         type: choice
         options:
           - product
