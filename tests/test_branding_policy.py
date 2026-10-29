@@ -62,7 +62,7 @@ class CampaignBrandingPolicyTests(unittest.TestCase):
                 seen["rule"] = {a.id: a.text for a in atoms}[SYSTEM_NO_TEXT_ID]
                 return {a.id: {"pass": True, "evidence": "No readable text or branding"} for a in atoms}
             qa = make_qa_checks([A("product_main", "Black handheld vacuum is visible", kind="product")], 1,
-                               judge_fn=judge, ocr=lambda _p: "Fanttik", branding_policy=NO_BRANDING, allowed_text=())
+                               judge_fn=judge, ocr=lambda _p: "LABEL", branding_policy=NO_BRANDING, allowed_text=())
             rows = {x.check_id:x for x in qa(path)}
             self.assertEqual(rows["no_text"].status, "FAIL")
             self.assertTrue(rows["no_text"].required)
@@ -201,7 +201,7 @@ class CampaignBrandingPolicyTests(unittest.TestCase):
             self.assertEqual(row["source_filename"], "target.png")
             self.assertEqual(row["preparation"]["status"], "TEXT_REGIONS_MASKED")
             self.assertEqual(row["preparation"]["verification"]["status"], "PASS")
-            self.assertEqual(row["preparation"]["detected_words"], ["Fanttik"])
+            self.assertEqual(row["preparation"]["detected_words"], ["LABEL"])
             self.assertEqual(data["reference_preparation"][0]["prepared_sha256"], "b" * 64)
 
     def test_no_text_found_is_not_proof_the_reference_is_clean(self):
@@ -209,7 +209,7 @@ class CampaignBrandingPolicyTests(unittest.TestCase):
             with self.assertRaises(GateError) as cm:
                 self._run(d, self._judge(False, "yellow wordmark LABEL visible on the body"), status="NO_CONFIDENT_TEXT_FOUND")
             self.assertIn("still visible", str(cm.exception))
-            self.assertIn("Fanttik", str(cm.exception))
+            self.assertIn("LABEL", str(cm.exception))
             blocked = list((Path(d) / "out" / "receipts").glob("blocked_*.json"))
             self.assertEqual(len(blocked), 1)
             self.assertEqual(json.loads(blocked[0].read_text())["overall"], "BLOCKED_BRANDING_REFERENCE")
