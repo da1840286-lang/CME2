@@ -865,10 +865,10 @@ def analyst_transport(calls, content=None, status=200):
     good["mechanism_hypothesis"] = {"text": "гипотеза", "kind": "OBSERVED"}  # model overclaims: code must force INFERRED
     good["transferability"] = {"text": "перенос", "kind": "INFERRED"}
     good["evidence"] = [
-        {"t_sec": 3.0, "frame": 1, "observation": "visible hook", "supports": ["hook", "product_intervention"]},
-        {"t_sec": 5.0, "frame": 2, "observation": "visible buyer problem", "supports": ["buyer_problem"]},
-        {"t_sec": 7.0, "frame": 3, "observation": "visible result state", "supports": ["result_demo"]},
-        {"t_sec": 11.0, "frame": 5, "observation": "visible CTA", "supports": ["cta"]},
+        {"t_sec": 2.72, "frame": 1, "observation": "visible hook", "supports": ["hook", "product_intervention"]},
+        {"t_sec": 4.94, "frame": 2, "observation": "visible buyer problem", "supports": ["buyer_problem"]},
+        {"t_sec": 7.16, "frame": 3, "observation": "visible result state", "supports": ["result_demo"]},
+        {"t_sec": 11.6, "frame": 5, "observation": "visible CTA", "supports": ["cta"]},
         {"t_sec": 8.0, "frame": 3, "observation": "fabricated timestamp", "supports": ["buyer_problem"]},
     ]
     good["limits"] = {"text": "кадры, не всё видео", "missing": ["звук"]}
@@ -915,13 +915,16 @@ class ManualAnalysis(RadarAppFixture):
         self.assertEqual(a["model_requested"], expected_model)
         self.assertEqual(a["model_responded"], expected_model)
         m = a["material"]
-        self.assertEqual([f["t_sec"] for f in m["frames"]], [1.0, 3.0, 5.0, 7.0, 9.0, 11.0])
+        # 12 s video: adaptive plan = 6 frames from just after the start to just before the end
+        self.assertEqual([f["t_sec"] for f in m["frames"]], [0.5, 2.72, 4.94, 7.16, 9.38, 11.6])
+        self.assertEqual(m["frame_sampling"]["mode"], "adaptive_anchored")
+        self.assertEqual(m["frame_sampling"]["end_anchor_sec"], 11.6)
         self.assertFalse(m["video_fully_viewed"])
         self.assertTrue(m["source_url"].startswith("https://example.invalid/ad/6001"))
         self.assertEqual(m["ad_id"], "6001")
         r = a["result"]
         self.assertEqual(r["mechanism_hypothesis"]["kind"], "INFERRED")           # hypothesis never becomes an observation
-        self.assertEqual([e["t_sec"] for e in r["evidence"]], [3.0, 5.0, 7.0, 11.0])  # invented timestamp dropped
+        self.assertEqual([e["t_sec"] for e in r["evidence"]], [2.72, 4.94, 7.16, 11.6])  # invented timestamp dropped
         self.assertTrue(any("8.0" in w for w in r["warnings"]))
         self.assertIsNone(r["ratings"]["product_demo"])                           # out-of-range rating is not trusted
         self.assertEqual(len([c for c in calls[0]["messages"][1]["content"] if c["type"] == "image_url"]), 6)
