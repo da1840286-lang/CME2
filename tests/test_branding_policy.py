@@ -95,7 +95,7 @@ class CampaignBrandingPolicyTests(unittest.TestCase):
             draw = ImageDraw.Draw(image)
             draw.rounded_rectangle((40, 90, 600, 270), 40, fill=(22, 22, 22))     # product body
             draw.ellipse((470, 150, 530, 210), outline=(0, 190, 200), width=8)     # a coloured control that must survive
-            draw.text((90, 135), "FANTTIK", font=font, fill=(250, 215, 0))
+            draw.text((90, 135), "LABEL", font=font, fill=(250, 215, 0))
             image.save(source)
             before = image.copy()
             prepared = prepare_unbranded_reference(source, Path(d) / "out" / "clean.png")
@@ -112,6 +112,40 @@ class CampaignBrandingPolicyTests(unittest.TestCase):
             again = prepare_unbranded_reference(source, Path(d) / "out" / "clean.png")
             self.assertTrue(again["cached"])
 
+
+    @unittest.skipUnless(shutil.which("tesseract"), "tesseract not installed")
+    def test_neutral_text_is_removed_without_flattening_a_surface_gradient(self):
+        from numpy import abs as np_abs, asarray, uint8
+        font = _font()
+        if font is None:
+            self.skipTest("no TrueType font")
+        with tempfile.TemporaryDirectory() as d:
+            source = Path(d) / "gradient_product.png"
+            height, width = 360, 720
+            base = Image.new("RGB", (width, height), (255, 255, 255))
+            body_mask = Image.new("L", (width, height), 0)
+            ImageDraw.Draw(body_mask).rounded_rectangle((40, 90, 680, 270), radius=40, fill=255)
+            pixels = asarray([[[int(22 + 35 * x / width + 5 * y / height)] * 3
+                               for x in range(width)] for y in range(height)], dtype=uint8)
+            gradient = Image.fromarray(pixels, "RGB")
+            base.paste(gradient, (0, 0), body_mask)
+            ImageDraw.Draw(base).ellipse((560, 150, 620, 210), outline=(0, 190, 200), width=8)
+            marked = base.copy()
+            ImageDraw.Draw(marked).text((135, 142), "MODEL 27", font=font, fill=(225, 225, 225))
+            marked.save(source)
+
+            before = list(marked.getdata())
+            prepared = prepare_unbranded_reference(source, Path(d) / "out" / "clean.png")
+            self.assertEqual(prepared["status"], "TEXT_REGIONS_MASKED", prepared)
+            with Image.open(source) as original:
+                self.assertEqual(list(original.getdata()), before, "the original reference must remain untouched")
+            with Image.open(prepared["path"]) as cleaned:
+                output = asarray(cleaned.convert("RGB")).astype("int16")
+            expected = asarray(base).astype("int16")
+            error = np_abs(output - expected)
+            self.assertLess(float(error[130:225, 90:535].mean()), 3.0,
+                            "restoration must preserve gradual surface shading rather than create a patch")
+
     def test_multicolour_regions_are_left_alone(self):
         from cme.branding import _letter_mask
         image = Image.new("RGB", (200, 120), (20, 20, 20))
@@ -127,7 +161,7 @@ class CampaignBrandingPolicyTests(unittest.TestCase):
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes(png_bytes())
             return {"path": str(destination), "status": status, "masked_regions": 1, "residual_regions": 0,
-                    "detected_words": ["Fanttik"], "source_sha256": "a" * 64, "prepared_sha256": "b" * 64, **extra}
+                    "detected_words": ["LABEL"], "source_sha256": "a" * 64, "prepared_sha256": "b" * 64, **extra}
         return prepare
 
     def _run(self, d, judge, status="TEXT_REGIONS_MASKED", **extra):
@@ -173,7 +207,7 @@ class CampaignBrandingPolicyTests(unittest.TestCase):
     def test_no_text_found_is_not_proof_the_reference_is_clean(self):
         with tempfile.TemporaryDirectory() as d:
             with self.assertRaises(GateError) as cm:
-                self._run(d, self._judge(False, "yellow wordmark Fanttik visible on the body"), status="NO_CONFIDENT_TEXT_FOUND")
+                self._run(d, self._judge(False, "yellow wordmark LABEL visible on the body"), status="NO_CONFIDENT_TEXT_FOUND")
             self.assertIn("still visible", str(cm.exception))
             self.assertIn("Fanttik", str(cm.exception))
             blocked = list((Path(d) / "out" / "receipts").glob("blocked_*.json"))

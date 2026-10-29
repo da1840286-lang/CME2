@@ -107,11 +107,16 @@ def resolved_brand_marks(policy, approved_brand_marks=(), offer_name="", product
 
 
 def reference_lettering_rule():
-    """Judge criterion for the image that will be sent to the generator as the product reference."""
-    return ("REFERENCE IMAGE CHECK: PASS only if NO logo, brand name, wordmark, model name, product label, branding "
-            "emblem, readable letters/numbers or pseudo-text is visible anywhere in this image, including on the "
-            "product itself. Judge the actual pixels. A smooth or smudged patch where lettering used to be is "
-            "acceptable only if no letter shapes remain recognisable.")
+    """Visual acceptance rule for the prepared image-provider reference."""
+    return (
+        "REFERENCE IMAGE CHECK: PASS only if no logo, brand name, wordmark, model name, product label, branding "
+        "emblem, readable letters/numbers or pseudo-text remains anywhere, including on the product itself. "
+        "Also FAIL if text removal leaves a flat-colour rectangle, polygon, hard-edged fill, blur smear, halo, "
+        "broken material texture, interrupted lighting gradient, lost highlight, or visible discontinuity. "
+        "The repaired region must follow the surrounding surface's shape, texture, shading and perspective. "
+        "Preserve adjacent real product details such as buttons, controls, seams, ports and material boundaries. "
+        "Judge the actual pixels, not the status label or OCR result."
+    )
 
 
 # ---- text localisation ------------------------------------------------------------------------------
@@ -198,6 +203,7 @@ def locate_text(image, angles=SWEEP_ANGLES):
 
 LETTER_MIN_PIXELS, LETTER_EXPLAINED_SHARE, LETTER_LINE_TOLERANCE, LETTER_DIFF = 30, 0.6, 40, 40
 LETTER_STRONG_DIFF = 90
+REFERENCE_PREPARATION_VERSION = 3
 
 
 def _dominant_colour(pixels):
@@ -287,31 +293,198 @@ def _letter_mask(image, polygons):
     return ImageChops.multiply(mask, ImageChops.invert(border_bg)), surface
 
 
+
+
+def _tight_text_region(polygons, width, height):
+    """Build a conservative OCR region from geometry, without brand or product-specific rules."""
+    import cv2
+    import numpy as np
+
+    region = np.zeros((height, width), dtype=np.uint8)
+    for polygon in polygons:
+        points = np.asarray(polygon, dtype=np.float32).reshape(-1, 2)
+        if len(points) < 4 or not np.isfinite(points).all():
+            continue
+        center = points.mean(axis=0)
+        edge_a, edge_b = points[1] - points[0], points[2] - points[1]
+        norm_a, norm_b = float(np.linalg.norm(edge_a)), float(np.linalg.norm(edge_b))
+        long_edge = edge_a if norm_a >= norm_b else edge_b
+        edge_len = float(np.linalg.norm(long_edge))
+        if edge_len < 2:
+            continue
+        axis_u = long_edge / edge_len
+        axis_v = np.asarray((-axis_u[1], axis_u[0]), dtype=np.float32)
+        projected = np.column_stack(((points - center) @ axis_u, (points - center) @ axis_v))
+        u0, u1 = float(projected[:, 0].min()), float(projected[:, 0].max())
+        v0, v1 = float(projected[:, 1].min()), float(projected[:, 1].max())
+        axis_angle = abs(float(np.degrees(np.arctan2(axis_u[1], axis_u[0])))) % 90.0
+        axis_deviation = min(axis_angle, 90.0 - axis_angle)
+        if axis_deviation <= 12.0:
+            trim_u = trim_v = 0.0
+        else:
+            trim_u = (u1 - u0) * 0.005
+            trim_v = (v1 - v0) * 0.125
+        if (u1 - u0) <= 2 * trim_u or (v1 - v0) <= 2 * trim_v:
+            continue
+        corners_uv = np.asarray(((u0 + trim_u, v0 + trim_v), (u1 - trim_u, v0 + trim_v),
+                                 (u1 - trim_u, v1 - trim_v), (u0 + trim_u, v1 - trim_v)), dtype=np.float32)
+        corners = center + corners_uv[:, 0, None] * axis_u + corners_uv[:, 1, None] * axis_v
+        cv2.fillPoly(region, [np.round(corners).astype(np.int32)], 255)
+    return region
+
+
+def _directional_surface_repair(image, polygons):
+    """Remove text by rebuilding its surface from neighbouring pixels; return None if unsafe.
+
+    All location, orientation and contrast thresholds derive from the current image and OCR geometry.
+    There are no brand names, product-specific colours or fixed image coordinates in this algorithm.
+    """
+    import cv2
+    import numpy as np
+
+    rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+    height, width = rgb.shape[:2]
+    region = _tight_text_region(polygons, width, height)
+    if cv2.countNonZero(region) < 30:
+        return None
+
+    lab = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
+    sigma = max(1.5, min(width, height) / 360.0)
+    local_surface = cv2.GaussianBlur(lab, (0, 0), sigmaX=sigma, sigmaY=sigma)
+    contrast = np.linalg.norm(lab - local_surface, axis=2)
+    values = contrast[region > 0]
+    if values.size < 30:
+        return None
+    threshold = max(10.0, float(np.percentile(values, 60)))
+    ink = ((contrast >= threshold) & (region > 0)).astype(np.uint8) * 255
+    ink = cv2.morphologyEx(ink, cv2.MORPH_CLOSE,
+                           cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)), iterations=1)
+    ys, xs = np.where(ink > 0)
+    if len(xs) < 30:
+        return None
+
+    coords = np.column_stack((xs, ys)).astype(np.float32)
+    mean, eigenvectors = cv2.PCACompute(coords, mean=None, maxComponents=2)
+    if eigenvectors is None or len(eigenvectors) == 0:
+        return None
+    direction = eigenvectors[0]
+    angle = float(np.degrees(np.arctan2(direction[1], direction[0])))
+    if angle > 90:
+        angle -= 180
+    elif angle < -90:
+        angle += 180
+    covariance = np.cov(coords.T)
+    eigenvalues = np.linalg.eigvalsh(covariance)
+    if eigenvalues[-1] <= 1.0 or eigenvalues[-1] / max(1.0, eigenvalues[0]) < 1.15:
+        return None
+
+    center = (float(mean[0, 0]), float(mean[0, 1]))
+    matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
+    inverse = cv2.invertAffineTransform(matrix)
+    rotated = cv2.warpAffine(rgb, matrix, (width, height), flags=cv2.INTER_CUBIC,
+                             borderMode=cv2.BORDER_REFLECT_101)
+    rotated_ink = cv2.warpAffine(ink, matrix, (width, height), flags=cv2.INTER_NEAREST,
+                                 borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+    rotated_region = cv2.warpAffine(region, matrix, (width, height), flags=cv2.INTER_NEAREST,
+                                    borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+    margin = max(2, int(round(max(width, height) / 1400.0 * 6.0)))
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * margin + 1, 2 * margin + 1))
+    expanded = cv2.dilate(rotated_ink, kernel, iterations=1)
+    use_word_band = min(abs(angle), abs(abs(angle) - 90.0)) <= 15.0
+    fill_shape = cv2.dilate(rotated_region, kernel, iterations=1) if use_word_band else expanded
+    rows = np.flatnonzero(np.any(fill_shape > 0, axis=1))
+    if rows.size < 2:
+        return None
+
+    detail_source = rotated[:, :, 0].astype(np.float32)
+    detail = np.abs(detail_source - cv2.GaussianBlur(detail_source, (0, 0), sigmaX=1.5, sigmaY=1.5))
+    pad = max(2, int(round(max(width, height) / 1400.0 * 3.0)))
+    sample_width = max(3, pad + 1)
+    side_detail = []
+    for y in rows:
+        columns = np.flatnonzero(fill_shape[y] > 0)
+        if columns.size == 0:
+            continue
+        left, right = int(columns.min()), int(columns.max())
+        if left > sample_width and right + sample_width < width:
+            side_detail.extend(detail[y, left - sample_width:left].tolist())
+            side_detail.extend(detail[y, right + 1:right + 1 + sample_width].tolist())
+
+    if side_detail and float(np.percentile(side_detail, 75)) > 8.0:
+        # For textured surfaces, use a narrow glyph mask and inpainting, never a flat rectangle.
+        inpaint_mask = cv2.dilate(ink, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)), iterations=1)
+        repaired = cv2.inpaint(cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR), inpaint_mask, 3.0, cv2.INPAINT_TELEA)
+        return Image.fromarray(cv2.cvtColor(repaired, cv2.COLOR_BGR2RGB), mode="RGB")
+
+    changed = rotated.copy()
+    band = np.zeros((height, width), dtype=np.uint8)
+    for y in rows:
+        columns = np.flatnonzero(fill_shape[y] > 0)
+        if columns.size == 0:
+            continue
+        x0 = max(sample_width, int(columns.min()) - pad)
+        x1 = min(width - sample_width - 1, int(columns.max()) + pad)
+        if x1 <= x0:
+            continue
+        left_pixels = rotated[y, x0 - sample_width:x0].astype(np.float32)
+        right_pixels = rotated[y, x1 + 1:x1 + 1 + sample_width].astype(np.float32)
+        left_color, right_color = np.median(left_pixels, axis=0), np.median(right_pixels, axis=0)
+        weights = np.linspace(0.0, 1.0, x1 - x0 + 1, dtype=np.float32)[:, None]
+        changed[y, x0:x1 + 1] = np.clip(
+            left_color[None, :] * (1.0 - weights) + right_color[None, :] * weights, 0, 255
+        ).astype(np.uint8)
+        cv2.line(band, (x0, int(y)), (x1, int(y)), 255, 1)
+
+    restored = cv2.warpAffine(changed, inverse, (width, height), flags=cv2.INTER_CUBIC,
+                              borderMode=cv2.BORDER_REFLECT_101)
+    blend = cv2.warpAffine(cv2.GaussianBlur(band, (0, 0), sigmaX=1.5, sigmaY=1.5), inverse,
+                           (width, height), flags=cv2.INTER_LINEAR,
+                           borderMode=cv2.BORDER_CONSTANT, borderValue=0).astype(np.float32) / 255.0
+    result = (rgb.astype(np.float32) * (1.0 - blend[:, :, None]) +
+              restored.astype(np.float32) * blend[:, :, None]).clip(0, 255).astype(np.uint8)
+    return Image.fromarray(result, mode="RGB")
+
+
 def _fill_clusters(image, clusters):
-    """Fill each lettering cluster separately; clusters that do not look like lettering are left untouched.
-    Returns (cleaned_image, accepted_polygons, rejected_cluster_count)."""
+    """Remove text by reconstructing surface texture and lighting, not by painting a solid colour."""
     cleaned, accepted, rejected = image.copy(), [], 0
     for cluster in clusters:
-        mask, surface = _letter_mask(cleaned, cluster)
-        if mask is None:
+        repaired = _directional_surface_repair(cleaned, cluster)
+        if repaired is None:
             rejected += 1
             continue
-        cleaned = Image.composite(Image.new("RGB", cleaned.size, surface), cleaned, mask)
+        cleaned = repaired
         accepted.extend(cluster)
     return cleaned, accepted, rejected
 
 
 def _merge_polygons(found):
-    """One polygon per lettering cluster: the best-supported hit plus hits at a similar angle that overlap it."""
+    """Merge overlapping OCR detections of the same wordmark using image-space geometry only."""
     groups = []
     for hit in sorted(found, key=lambda h: -h["conf"]):
-        for g in groups:
-            if _overlap(hit["poly"], g[0]["poly"]) >= 0.3 and abs(hit["angle"] - g[0]["angle"]) <= 20:
-                g.append(hit)
+        for group in groups:
+            if any(_overlap(hit["poly"], existing["poly"]) >= 0.3 for existing in group):
+                group.append(hit)
                 break
         else:
             groups.append([hit])
-    return [[h["poly"] for h in g] for g in groups]
+    changed = True
+    while changed:
+        changed = False
+        for i in range(len(groups)):
+            if changed:
+                break
+            box_i = _bbox([point for hit in groups[i] for point in hit["poly"]])
+            poly_i = [(box_i[0], box_i[1]), (box_i[2], box_i[1]), (box_i[2], box_i[3]), (box_i[0], box_i[3])]
+            for j in range(i + 1, len(groups)):
+                box_j = _bbox([point for hit in groups[j] for point in hit["poly"]])
+                poly_j = [(box_j[0], box_j[1]), (box_j[2], box_j[1]), (box_j[2], box_j[3]), (box_j[0], box_j[3])]
+                if _overlap(poly_i, poly_j) >= 0.3:
+                    groups[i].extend(groups[j])
+                    del groups[j]
+                    changed = True
+                    break
+    return [[h["poly"] for h in group] for group in groups]
 
 
 def _sha(path):
@@ -335,9 +508,12 @@ def prepare_unbranded_reference(source: str | Path, destination: str | Path):
     try:
         if sidecar.is_file() and destination.is_file():
             cached = json.loads(sidecar.read_text(encoding="utf-8"))
-            if cached.get("source_sha256") == source_sha and cached.get("prepared_sha256") == _sha(destination) \
-                    and cached.get("sweep") == len(SWEEP_ANGLES) and cached.get("status") in {
-                        "TEXT_REGIONS_MASKED", "NO_CONFIDENT_TEXT_FOUND", "MASK_INCOMPLETE"}:
+            if (cached.get("source_sha256") == source_sha
+                    and cached.get("prepared_sha256") == _sha(destination)
+                    and cached.get("sweep") == len(SWEEP_ANGLES)
+                    and cached.get("algorithm_version") == REFERENCE_PREPARATION_VERSION
+                    and cached.get("status") in {
+                        "TEXT_REGIONS_MASKED", "NO_CONFIDENT_TEXT_FOUND", "MASK_INCOMPLETE"}):
                 return {**cached, "path": str(destination), "cached": True}
     except (OSError, ValueError):
         pass
@@ -380,13 +556,13 @@ def prepare_unbranded_reference(source: str | Path, destination: str | Path):
             # that the independent visual check of the prepared image still gets to judge.
             residual = sum(1 for h in leftovers if any(_overlap(h["poly"], poly) >= 0.3 for poly in polys))
             masked = len(clusters) - rejected
-            report = {"status": ("MASK_INCOMPLETE" if residual else
+            report = {"status": ("MASK_INCOMPLETE" if residual or rejected else
                                  "TEXT_REGIONS_MASKED" if masked else "NO_CONFIDENT_TEXT_FOUND"),
                       "masked_regions": masked, "rejected_regions": rejected, "residual_regions": residual,
                       "unrelated_hits": len(leftovers) - residual,
                       "detected_words": words}
         report.update({"path": str(destination), "source_sha256": source_sha, "prepared_sha256": _sha(destination),
-                       "sweep": len(SWEEP_ANGLES), "cached": False})
+                       "sweep": len(SWEEP_ANGLES), "algorithm_version": REFERENCE_PREPARATION_VERSION, "cached": False})
         sidecar.write_text(json.dumps(report, ensure_ascii=False, indent=1), encoding="utf-8")
         return report
     except Exception as exc:
