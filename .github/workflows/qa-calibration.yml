@@ -131,9 +131,9 @@ jobs:
           }
           alternate["notes"] = "Temporary calibration-only vision judge; fallback attempt after the Google AI Studio free upstream was rate-limited."
           catalog["adapters"].append(alternate)
-          settings_path.write_text(json.dumps(settings, ensure_ascii=False, indent=2) + "\\n", encoding="utf-8")
-          Path("qa_calibration/runtime_settings.json").write_text(json.dumps(settings, ensure_ascii=False, indent=2) + "\\n", encoding="utf-8")
-          Path("qa_calibration/runtime_adapters.json").write_text(json.dumps(catalog, ensure_ascii=False, indent=2) + "\\n", encoding="utf-8")
+          settings_path.write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")
+          Path("qa_calibration/runtime_settings.json").write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")
+          Path("qa_calibration/runtime_adapters.json").write_text(json.dumps(catalog, ensure_ascii=False, indent=2), encoding="utf-8")
           PY
 
       - name: Run repeated single-pass vs observe-verify calibration
@@ -144,7 +144,7 @@ jobs:
           set +e
           python scripts/calibrate_judge.py \
             --settings settings.json \
-            --catalog adapters.json \
+            --catalog qa_calibration/runtime_adapters.json \
             --atoms qa_calibration/input_bundle/atoms.json \
             --frames \
               qa_calibration/input_bundle/shots/shot_01_a01.png \
