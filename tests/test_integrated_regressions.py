@@ -182,7 +182,7 @@ class CrossStageContractTests(unittest.TestCase):
                 }).encode()
 
             judge = make_openrouter_judge(
-                {"model_id": "test/independent-vision", "response_format_mode": "json_object"},
+                {"model_id": "test/independent-vision", "response_format_mode": "json_object", "judge_mode": "single_pass"},
                 api_key="test-key", transport=send,
             )
             atoms = [

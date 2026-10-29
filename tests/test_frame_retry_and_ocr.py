@@ -10,6 +10,7 @@ from cme.qa import brand_tokens, ocr_text_check
 from cme.radar.select import rank_transfer_candidates, select_transfer_candidate
 from cme.smoke import main as smoke_main
 import tests.test_firstrun as first_run
+from tests.judge_fakes import judge_reply_body
 
 BRAND = brand_tokens("Fanttik V8 Mate Cordless Car Vacuum", "cordless handheld car vacuum")
 
@@ -100,14 +101,13 @@ class FrameRetryTests(unittest.TestCase):
         base, state = ctx["transport"], {"judge": 0}
 
         def transport(method, url, headers, payload):
-            content = payload["messages"][1]["content"]
-            if isinstance(content, list):
+            system = str(payload["messages"][0]["content"])
+            if "careful visual inspector" in system:
                 state["judge"] += 1
-                ids = [r["id"] for r in json.loads(content[0]["text"])]
-                ok = state["judge"] > fail_calls
-                return 200, first_run.completion(
-                    json.dumps({"results": [{"id": i, "pass": ok, "evidence": "seen"} for i in ids]}),
-                    payload["model"])
+            ok = state["judge"] > fail_calls
+            judged = judge_reply_body(payload, ok=ok)
+            if judged is not None:
+                return 200, first_run.completion(json.dumps(judged), payload["model"])
             return base(method, url, headers, payload)
         ctx["transport"] = transport
         return ctx

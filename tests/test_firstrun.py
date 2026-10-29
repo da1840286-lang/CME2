@@ -8,6 +8,7 @@ from cme.atoms import ATOM_SCHEMA, KINDS, check_claims, parse_atoms
 from cme.brain import BrainError, apply_patch, request_atoms
 from cme.offer import OfferCard, load_offer
 from cme.providers import CallLog, InfraError, ModelRef, ProviderCallError, ProviderPolicyError, call_with_policy
+from tests.judge_fakes import judge_reply_body
 from cme.qa import CheckResult, judge_batch_checks, make_qa_checks
 from cme.registry import AdapterSpec, Settings, SettingsError, build_adapter, load_catalog, load_settings, make_image_provider
 from cme.run import AttemptLimit, produce_shot
@@ -303,7 +304,7 @@ class JudgeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             img = Path(d) / "f.png"
             img.write_bytes(PNG)
-            judge = make_openrouter_judge({"model_id": "vendor/v:free"}, "k", send)
+            judge = make_openrouter_judge({"model_id": "vendor/v:free", "judge_mode": "single_pass"}, "k", send)
             out, meta = judge(img, [A("a1", "Product visible"), A("a2", "Hand holding it")])
         content = calls[0]["messages"][1]["content"]
         image_parts = [part for part in content if isinstance(part, dict) and part.get("type") == "image_url"]
@@ -489,10 +490,9 @@ class SmokeEndToEndTests(unittest.TestCase):
         brain_atoms = {"atoms": atom_rows}
         def transport(method, url, headers, payload):
             content = payload["messages"][1]["content"]
-            if isinstance(content, list):  # judge call (has an image)
-                ids = [r["id"] for r in json.loads(content[0]["text"])]
-                return 200, completion(json.dumps({"results": [{"id": i, "pass": not judge_fail, "evidence": "seen"} for i in ids]}),
-                                       payload["model"])
+            judged = judge_reply_body(payload, ok=not judge_fail)
+            if judged is not None:
+                return 200, completion(json.dumps(judged), payload["model"])
             return 200, completion(json.dumps(brain_atoms), payload["model"])
         out = Path(tmp) / "hf_out.png"
         out.write_bytes(PNG)

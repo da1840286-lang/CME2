@@ -69,7 +69,7 @@ class ProductIdentityJudgeTests(unittest.TestCase):
                     for row in requested
                 ]}))
 
-            judge = make_openrouter_judge({"model_id": "vendor/vision-test"}, "key", send)
+            judge = make_openrouter_judge({"model_id": "vendor/vision-test", "judge_mode": "single_pass"}, "key", send)
             answers, _meta = judge(generated, [A("product_main", "Target product is clear", kind="product")], [reference])
             self.assertTrue(answers["product_main"]["pass"])
             self.assertTrue(answers[PRODUCT_IDENTITY_CHECK_ID]["pass"])
