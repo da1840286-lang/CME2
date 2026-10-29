@@ -20,9 +20,9 @@ ASPECTS = {"problem_state", "changed_state", "contact_action", "object_presence"
 NON_VISUAL_REASONS = {"brand_or_model", "power_or_internal", "purpose_or_benefit", "time_or_motion"}
 # A verifier may not hide an obviously visible spatial/state/contact/composition requirement as non-visual.
 VISUAL_SCOPE_CUES = re.compile(
-    r"\\b(?:left|right|center|centre|top|bottom|position|location|touch(?:es|ing)?|contact|"
+    r"\b(?:left|right|center|centre|top|bottom|position|location|touch(?:es|ing)?|contact|"
     r"overlap(?:s|ping)?|between|beside|edge|boundary|strip|surface|region|area|composition|"
-    r"quantity|count|shape|foreground|background|debris|dust|grains?|nozzle|cloth|carpet)\\b",
+    r"quantity|count|shape|foreground|background|debris|dust|grains?|nozzle|cloth|carpet)\b",
     re.IGNORECASE,
 )
 ROLE_ASPECTS = {
