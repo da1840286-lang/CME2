@@ -57,6 +57,10 @@ _TARGET_ACTION = re.compile(
     r"has|works?|blows?|charges?|inflates?|filters?|washes?|scrubs?|cuts?|is\s+designed|is\s+made)\b",
     re.IGNORECASE,
 )
+# Rows returned by Sponsored Search / Ads Top are paid-ad inventory by construction. That is a
+# property of the post (not of the search query), so it may corroborate promotion when the post's
+# own text names the target product noun. It never replaces the noun-in-body requirement.
+_PAID_INVENTORY_SOURCES = frozenset({"tiktok_sponsored_search", "sponsored_search", "ads_top"})
 _SPEC = re.compile(r"\b\d+(?:\.\d+)?\s?(?:psi|v|w|kpa|pa|mah|mm|cm|oz|ml|l|rpm|lm|gb)\b", re.IGNORECASE)
 _PROMO_TAGS = {"tiktokshop", "tiktokmademebuyit", "amazonfinds", "amazonfind", "ad", "sponsored", "shopnow"}
 
@@ -191,6 +195,27 @@ def _target_is_promoted(body: str, anchor: str) -> bool:
 
 
 
+def _paid_inventory_corroborates(record: dict, view: dict, anchor: str, contexts: set, mention_source: str) -> bool:
+    """Paid-ad inventory + target noun in the post's own text + an independent corroborator.
+
+    Corroborators: target use context in the text (e.g. "car" for a car vacuum) or the noun also in the
+    post's hashtags. Passing mentions ("vacuum sealed", "before vacuuming") have neither and stay out.
+    """
+    if not anchor or not mention_source:
+        return False
+    if str((record or {}).get("discovery_source") or "").strip().lower() not in _PAID_INVENTORY_SOURCES:
+        return False
+    # Verb use ("then vacuum it away", "to vacuum") names an action, not the advertised product.
+    verb_use = re.compile(
+        r"\b(?:then|to|will|can|gonna|would|should)\s+" + re.escape(anchor) + r"\b|"
+        r"\b" + re.escape(anchor) + r"(?:ed)?\s+(?:it|them|up|away|out)\b", re.IGNORECASE)
+    if verb_use.search(view.get("body") or ""):
+        return False
+    if contexts and _context_verified(contexts, view):
+        return True
+    return bool(_anchor_present(anchor, {"body_tokens": [], "hashtags": view["hashtags"]}))
+
+
 def match_source_to_product_query(record: dict, query: str) -> dict:
     """Require the product returned by Sponsored Search to match its own query.
 
@@ -212,6 +237,8 @@ def match_source_to_product_query(record: dict, query: str) -> dict:
         }
     linked = _target_is_promoted(view["body"], anchor)
     if mention_source == "hashtag" and _promo_signals(record, view):
+        linked = True
+    if not linked and _paid_inventory_corroborates(record, view, anchor, _target_contexts(query), mention_source):
         linked = True
     if not linked:
         return {
@@ -245,7 +272,17 @@ def classify_source_role(record: dict, *, product_type: str = "", product_catego
     contexts = _target_contexts(product_type, product_category, target_offer)
     context_verified = _context_verified(contexts, view)
 
-    if target_source and target_promoted and promoted:
+    # Paid-inventory corroboration: a product-naming title such as "Handheld Cordless Car Vacuum
+    # cleaner!" carries no verb or CTA, yet is exactly what a seller's ad looks like.
+    paid_target_ok = False
+    if target_source and not (target_promoted and promoted) and _paid_inventory_corroborates(
+            record, view, anchor, contexts, target_source):
+        paid_target_ok = True
+        target_promoted = True
+        promo = list(promo) + ["paid_ad_inventory"]
+    promoted_for_target = promoted or paid_target_ok
+
+    if target_source and target_promoted and promoted_for_target:
         role = TARGET_PRODUCT
         confidence = "MEDIUM" if context_verified else "LOW"
         reason = "Target product noun is tied to source-body promotion/action." + (
@@ -271,7 +308,7 @@ def classify_source_role(record: dict, *, product_type: str = "", product_catego
         "source_body_present": bool(source_text), "source_body_evidence": source_text[:500],
         "target_anchor": anchor or None, "target_mention_source": target_source or None,
         "matched_target_terms": sorted(term for term in target_terms if term in body_tokens),
-        "detected_product_nouns": detected, "promotion_evidence": promoted,
+        "detected_product_nouns": detected, "promotion_evidence": promoted_for_target,
         "target_promotion_evidence": target_promoted, "promo_signals": promo,
         "promotion_signal": promotion_match.group(0) if promotion_match else None,
     }

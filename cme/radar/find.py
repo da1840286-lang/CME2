@@ -16,6 +16,9 @@ from .evidence import classify_commercial_evidence
 from .attention import attention_absolute_v1, attention_rank, MECHANISM_ATTENTION_FLOOR, MECHANISM_MIN_COVERAGE
 from .fit import ADJACENT_MECHANISM, TARGET_PRODUCT, classify_source_role, match_source_to_product_query
 from .seen import SeenLedger, build_scope
+from .provider_contract import (
+    CONTRACT_AWARE_MODE, contract_summary, plan_uses_contract, ordered_target_queries,
+)
 
 DATA_DIR = Path(__file__).resolve().parent / "data"
 # Search-only seeds for the live Sponsored Search lane. Keep separate from the
@@ -52,11 +55,36 @@ class FindUnavailable(Exception):
 
 def _retention_execution_plan(
     requested_order_bys: list[str], include_retention: bool, requested_max_requests: int,
+    performance_plan: str = "contract_aware",
 ) -> tuple[list[str], int, dict]:
-    """Keep distinct TikTok board rankings; each row carries both retention points."""
+    """Keep distinct TikTok board rankings; each row carries both retention points.
+
+    performance_plan="contract_aware" (default): see provider_contract. Ads Top play-rate boards can
+    neither be product-targeted nor expose numeric rates, and include=retention cannot be combined with
+    a keyword, so executing them cannot yield a product-relevant ad carrying that metric. The whole
+    request budget goes to product-targeted Sponsored Search and the requested metric is reported as
+    not obtainable. performance_plan="legacy_ads_top" keeps the old plan for explicit probing.
+    """
     requested = list(dict.fromkeys(str(value) for value in requested_order_bys if value))
     effective = list(requested)
     effective_max_requests = int(requested_max_requests)
+    if plan_uses_contract(performance_plan) and {"play_2s_rate", "play_6s_rate"} & set(requested):
+        return [], effective_max_requests, {
+            "mode": CONTRACT_AWARE_MODE,
+            "requested_performance_order_bys": requested,
+            "effective_performance_order_bys": [],
+            "requested_max_requests": effective_max_requests,
+            "effective_max_requests": effective_max_requests,
+            "retention_calls": 0, "targeted_board_calls": 0,
+            "retention_requested_but_not_executed": bool(include_retention),
+            "requested_metric_status": "NOT_OBTAINABLE_FOR_PRODUCT_QUERY",
+            "provider_contract": contract_summary(),
+            "rationale": (
+                "play_2s_rate/play_6s_rate are Ads Top sort orders only: rows carry no numeric rate and "
+                "keyword-filtered boards returned off-target ads in every audited run. The budget is spent on "
+                "product-targeted Sponsored Search (exact product, product type, generic)."
+            ),
+        }
     strategy = {
         "mode": "operator_requested_order",
         "requested_performance_order_bys": requested,
@@ -1126,8 +1154,20 @@ def _source_seen(record: dict, keys: set[str]) -> bool:
 def _run_mechanism_find(*, request: dict, offer: dict, keywords: list[str], client,
                         ledger: SeenLedger, scope: dict, prior_seen_keys: set[str],
                         stamp: str, country: str, period: int, max_requests: int,
-                        max_ads: int, limit_per_board: int) -> dict:
-    """Explicit-keyword Sponsored-Search-only adjacent-product selection; no Ads Top lane."""
+                        max_ads: int, limit_per_board: int,
+                        accept_role: str = ADJACENT_MECHANISM, lane: str = "mechanism",
+                        attention_floor: float | None = None,
+                        requested_metric_status: dict | None = None) -> dict:
+    """Sponsored-Search-only selection; no Ads Top lane, no pool-relative percentile.
+
+    lane="mechanism": adjacent-product sources (explicit keywords).
+    lane="target_product": same gates for the target product class (contract-aware product mode).
+    """
+    target_lane = lane == "target_product"
+    # Target lane: attention ranks candidates but does not cut them by default (floor 0.0). Reach is priority
+    # metadata, not a quality gate; a fixed floor removed relevant car-vacuum ads at 80-140k views. The
+    # coverage gate still requires real engagement fields, and an operator may set attention_floor.
+    floor = (0.0 if target_lane else MECHANISM_ATTENTION_FLOOR) if attention_floor is None else float(attention_floor)
     date_posted = {7: "this-week", 30: "this-month", 180: "last-6-months"}[period]
     calls, raw_records, qualified, rejected = [], [], [], []
     rows_by_identity, identity_keys_seen = {}, set()
@@ -1207,13 +1247,13 @@ def _run_mechanism_find(*, request: dict, offer: dict, keywords: list[str], clie
             reason = "NO_PLAYABLE_VIDEO"
         elif not query_product_match.get("matches"):
             reason = str(query_product_match.get("reason") or "QUERY_PRODUCT_UNVERIFIED")
-        elif role.get("role") != ADJACENT_MECHANISM:
+        elif role.get("role") != accept_role:
             reason = str(role.get("role") or "OFF_TOPIC")
         elif not role.get("promotion_evidence"):
             reason = "NO_INDEPENDENT_PROMOTION_EVIDENCE"
         elif attention["coverage"] < MECHANISM_MIN_COVERAGE:
             reason = "LOW_ATTENTION_COVERAGE"
-        elif attention["score"] < MECHANISM_ATTENTION_FLOOR:
+        elif attention["score"] < floor:
             reason = "BELOW_ATTENTION_PROXY_FLOOR"
         else:
             reason = ""
@@ -1232,7 +1272,10 @@ def _run_mechanism_find(*, request: dict, offer: dict, keywords: list[str], clie
             "basis": "ATTENTION_PROXY_ONLY", "score": attention["score"],
             "coverage": attention["coverage"], "is_commercial_proof": False,
         }
-        record["selection_decision"] = "QUALIFIED_ADJACENT_MECHANISM"
+        if requested_metric_status:
+            record["performance_evidence"].update(requested_metric_status)
+            record["performance_evidence"]["requested_metric_confirmed"] = False
+        record["selection_decision"] = "QUALIFIED_TARGET_PRODUCT" if target_lane else "QUALIFIED_ADJACENT_MECHANISM"
         qualified.append(record)
 
     qualified.sort(key=lambda record: (
@@ -1242,9 +1285,10 @@ def _run_mechanism_find(*, request: dict, offer: dict, keywords: list[str], clie
     ))
     selected = qualified[:max_ads]
     for record in selected:
-        record["selection_decision"] = "SELECTED_ADJACENT_MECHANISM"
+        record["selection_decision"] = "SELECTED_TARGET_PRODUCT" if target_lane else "SELECTED_ADJACENT_MECHANISM"
         record["selection_reason"] = (
-            "Promoted adjacent product passed the source-body, media, and attention-proxy gates. "
+            ("Promoted target-class product" if target_lane else "Promoted adjacent product")
+            + " passed the source-body, media, and attention-proxy gates. "
             "Causal mechanism, transferability, and commercial value remain unevaluated."
         )
     for record in qualified[max_ads:]:
@@ -1269,11 +1313,17 @@ def _run_mechanism_find(*, request: dict, offer: dict, keywords: list[str], clie
         "adjacent_mechanism_ads": len(qualified), "auto_shortlist_ads": len(selected),
         "performance_lane_reserved": False,
         "discovery_strategy": {
-            "selection_mode": "mechanism", "supply_lane": "tiktok_sponsored_search_only",
+            "selection_mode": "product" if target_lane else "mechanism",
+            "supply_lane": "tiktok_sponsored_search_only",
             "supply_search_enabled": True, "supply_search_budget": len(calls), "performance_budget": 0,
             "performance_calls_used": 0, "supply_queries_planned": keywords[:max_requests],
             "supply_queries_executed": [call["keyword"] for call in calls],
-            "request_policy": "Explicit-keyword Sponsored Search only; Ads Top/performance ordering disabled.",
+            "request_policy": (
+                "Contract-aware product plan: product-targeted Sponsored Search only; Ads Top/retention not "
+                "executed because the provider cannot return them for a product-targeted ad."
+                if target_lane else
+                "Explicit-keyword Sponsored Search only; Ads Top/performance ordering disabled."),
+            "attention_floor": floor, "requested_metric_status": requested_metric_status or None,
             "attention_proxy_version": "attention_absolute_v1", "attention_is_commercial_proof": False,
             "seen_ttl_days": 30, "prior_query_history": query_history_before,
         },
@@ -1285,7 +1335,9 @@ def _run_mechanism_find(*, request: dict, offer: dict, keywords: list[str], clie
         },
     }
     diagnostics = {
-        "outcome": "CANDIDATES_FOUND" if candidates else ("NO_API_ROWS" if raw_count == 0 else "NO_QUALIFIED_ADJACENT_MECHANISM"),
+        "outcome": "CANDIDATES_FOUND" if candidates else (
+            "NO_API_ROWS" if raw_count == 0
+            else "NO_TARGET_RELEVANCE" if target_lane else "NO_QUALIFIED_ADJACENT_MECHANISM"),
         "explanation": (
             "Adjacent-product sources passed text, media, and fixed-weight attention-proxy checks. This is not commercial proof; "
             "the causal mechanism and independent Target-Fit remain downstream."
@@ -1303,6 +1355,23 @@ def _run_mechanism_find(*, request: dict, offer: dict, keywords: list[str], clie
         "request_sources": ["sponsored_search" for _ in calls], "performance_calls_used": 0,
         "commercial_evidence_note": "Attention proxy is not commercial proof; Target-Fit remains NOT_EVALUATED.",
     }
+    stats["total_credits_reported"] = sum(
+        int(call.get("credits_used") or 0) for call in calls if isinstance(call.get("credits_used"), (int, float)))
+    diagnostics["total_credits_reported"] = stats["total_credits_reported"]
+    if requested_metric_status:
+        availability = {
+            "requested_metrics": list(requested_metric_status.get("requested_metrics") or []),
+            "numeric_values_returned": {}, "board_rows_returned": {},
+            "status": requested_metric_status.get("requested_metric_status"),
+            "provider_contract": contract_summary(),
+            "interpretation": (
+                "Requested playback metrics were not executed as boards: the provider cannot return them for a "
+                "product-targeted ad. Candidates carry labeled attention-proxy evidence only."
+            ),
+        }
+        stats["performance_metric_availability"] = availability
+        diagnostics["performance_metric_availability"] = availability
+        diagnostics["requested_metric_status"] = requested_metric_status.get("requested_metric_status")
     return {"candidates": candidates, "stats": stats, "request": request, "diagnostics": diagnostics}
 
 
@@ -1335,16 +1404,23 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
         raise ValueError("include_retention needs performance_order_bys with play_2s_rate and/or play_6s_rate")
     requested_max_requests = max_requests
     requested_performance_order_bys = list(performance_order_bys)
+    performance_plan = str(params.get("performance_plan") or "contract_aware").strip().lower()
+    include_retention_requested = include_retention
     performance_order_bys, max_requests, retention_strategy = _retention_execution_plan(
-        requested_performance_order_bys, include_retention, requested_max_requests
+        requested_performance_order_bys, include_retention, requested_max_requests,
+        performance_plan=performance_plan,
     )
+    contract_aware = retention_strategy.get("mode") == CONTRACT_AWARE_MODE
+    if contract_aware:
+        include_retention = False  # not executed: retention cannot be product-targeted
     user_keywords = _clean_terms(params.get("keywords"))
     offer = _offer_context(params)
     performance_names = {"ctr", "cvr", "play_2s_rate", "play_6s_rate"}
     if selection_mode == "mechanism":
         if not user_keywords:
             raise ValueError("mechanism selection requires explicit keywords; offer fields are not discovery keywords")
-        if any(str(value).strip() in performance_names for value in performance_order_bys + order_bys):
+        if any(str(value).strip() in performance_names
+               for value in requested_performance_order_bys + performance_order_bys + order_bys):
             raise ValueError("mechanism mode disables Ads Top/performance order; choose product mode for performance-board discovery")
     conflict = _query_offer_conflict(user_keywords, offer) if selection_mode == "product" else None
     search_terms = _clean_terms(user_keywords + [offer["target_offer"], offer["product_type"], offer["product_category"]]) if selection_mode == "product" else user_keywords
@@ -1353,6 +1429,8 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
         "performance_order_bys": performance_order_bys,
         "requested_performance_order_bys": requested_performance_order_bys,
         "include_retention": include_retention,
+        "include_retention_requested": include_retention_requested,
+        "performance_plan": performance_plan,
         "max_requests": max_requests, "requested_max_requests": requested_max_requests,
         "retention_strategy": retention_strategy,
         "keywords": user_keywords,
@@ -1393,6 +1471,31 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
             ledger=ledger, scope=scope, prior_seen_keys=prior_seen_keys, stamp=stamp,
             country=country, period=period, max_requests=max_requests, max_ads=max_ads,
             limit_per_board=limit_per_board,
+        )
+    if contract_aware:
+        queries = ordered_target_queries(
+            offer["target_offer"], offer["product_type"], user_keywords, offer["product_category"],
+            limit=min(3, requested_max_requests),
+            rotate=lambda terms: _rotate_query_terms(terms, prior_query_history),
+        )
+        request["search_terms"] = list(queries)
+        request["targeted_sponsored_search_queries"] = list(queries)
+        request["provider_request_plan"] = {
+            "target_sponsored_search_queries": len(queries), "targeted_playback_boards": [],
+            "unfiltered_retention_calls": 0, "unrequested_performance_fallbacks": False,
+            "requested_metric_status": retention_strategy["requested_metric_status"],
+        }
+        raw_floor = params.get("attention_floor")
+        return _run_mechanism_find(
+            request=request, offer=offer, keywords=queries, client=client,
+            ledger=ledger, scope=scope, prior_seen_keys=prior_seen_keys, stamp=stamp,
+            country=country, period=period, max_requests=len(queries), max_ads=max_ads,
+            limit_per_board=limit_per_board, accept_role=TARGET_PRODUCT, lane="target_product",
+            attention_floor=(None if raw_floor in (None, "") else float(raw_floor)),
+            requested_metric_status={
+                "requested_metrics": list(requested_performance_order_bys),
+                "requested_metric_status": retention_strategy["requested_metric_status"],
+            },
         )
     search_terms = _rotate_query_terms(search_terms, prior_query_history)
     request["search_terms"] = list(search_terms)

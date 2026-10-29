@@ -400,7 +400,7 @@ class FetchPlanRetentionTests(unittest.TestCase):
                 "country": "US", "period": 30, "max_requests": 5, "max_ads": 3,
                 "keywords": ["car vacuum"], "selection_mode": "product",
                 "performance_order_bys": ["play_6s_rate", "play_2s_rate"],
-                "include_retention": True,
+                "include_retention": True, "performance_plan": "legacy_ads_top",
             }, client=client, now="2026-10-28T00:00:00Z")
         kwargs = discover_mock.call_args.kwargs
         self.assertEqual(kwargs["max_requests"], 3)
@@ -618,7 +618,7 @@ class RetentionCurveNormalizationTests(unittest.TestCase):
 class RetentionExecutionPolicyTests(unittest.TestCase):
     def test_both_board_request_preserves_distinct_retention_board_rankings(self):
         order_bys, max_requests, strategy = _retention_execution_plan(
-            ["play_6s_rate", "play_2s_rate"], True, 5)
+            ["play_6s_rate", "play_2s_rate"], True, 5, performance_plan="legacy_ads_top")
         self.assertEqual(order_bys, ["play_6s_rate", "play_2s_rate"])
         self.assertEqual(max_requests, 5)
         self.assertEqual(strategy["mode"], "targeted_playback_boards_plus_retention")
@@ -632,7 +632,7 @@ class RetentionExecutionPolicyTests(unittest.TestCase):
 
     def test_without_retention_does_not_rewrite_requested_board_order(self):
         order_bys, max_requests, strategy = _retention_execution_plan(
-            ["play_6s_rate", "play_2s_rate"], False, 5)
+            ["play_6s_rate", "play_2s_rate"], False, 5, performance_plan="legacy_ads_top")
         self.assertEqual(order_bys, ["play_6s_rate", "play_2s_rate"])
         self.assertEqual(max_requests, 5)
         self.assertEqual(strategy["mode"], "operator_requested_order")
@@ -641,7 +641,8 @@ class RetentionExecutionPolicyTests(unittest.TestCase):
         for request_count in (3, 4):
             with self.subTest(request_count=request_count):
                 with self.assertRaisesRegex(ValueError, "find_requests >= 5"):
-                    _retention_execution_plan(["play_2s_rate", "play_6s_rate"], True, request_count)
+                    _retention_execution_plan(
+                        ["play_2s_rate", "play_6s_rate"], True, request_count, performance_plan="legacy_ads_top")
 
 
 class RetentionCandidatePropagationTests(unittest.TestCase):

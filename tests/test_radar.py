@@ -159,7 +159,8 @@ class VendoredCodeIsTheRealOne(Env):
         with self.fake_find([item], calls):
             result = F.run_find(
                 {"country": "US", "max_requests": 4, "max_ads": 20, "keywords": ["car vacuum"],
-                 "performance_order_bys": ["play_6s_rate", "play_2s_rate"], "offer": offer},
+                 "performance_order_bys": ["play_6s_rate", "play_2s_rate"], "offer": offer,
+                 "performance_plan": "legacy_ads_top"},
                 client=T.SocialCrawlTikTokTopAds(api_key="TESTKEY"),
             )
 
@@ -199,7 +200,7 @@ class VendoredCodeIsTheRealOne(Env):
                 {"country": "US", "period": 30, "max_requests": 5, "max_ads": 10,
                  "keywords": ["car vacuum"],
                  "performance_order_bys": ["play_6s_rate", "play_2s_rate"],
-                 "include_retention": True,
+                 "include_retention": True, "performance_plan": "legacy_ads_top",
                  "offer": {"name": "Fanttik V8 Mate Cordless Car Vacuum",
                            "product_type": "cordless handheld car vacuum"}},
                 client=T.SocialCrawlTikTokTopAds(api_key="TESTKEY"),
