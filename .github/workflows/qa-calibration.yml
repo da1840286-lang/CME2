@@ -1,0 +1,164 @@
+name: CME QA Judge Calibration
+run-name: QA calibration — ${{ github.ref_name }}
+
+on:
+  push:
+    branches:
+      - fix/contract-aware-find-2026-10-29
+    paths:
+      - ".github/workflows/qa-calibration.yml"
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: cme-qa-calibration-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  calibrate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      GH_TOKEN: ${{ github.token }}
+      GITHUB_API_URL: ${{ github.api_url }}
+      GITHUB_REPOSITORY: ${{ github.repository }}
+    steps:
+      - name: Check out selected branch and commit
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install project dependencies
+        run: python -m pip install --disable-pip-version-check --retries 1 --timeout 20 -r requirements.txt
+
+      - name: Download the existing real-frame artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p qa_calibration
+          curl --fail --show-error --location \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/artifacts/12756213543/zip" \
+            -o qa_calibration/source_frames_artifact.zip
+          unzip -q qa_calibration/source_frames_artifact.zip -d qa_calibration/input_bundle
+          test -s qa_calibration/input_bundle/atoms.json
+          test -s qa_calibration/input_bundle/target_product_reference.jpg
+          test -s qa_calibration/input_bundle/shots/shot_01_a01.png
+          test -s qa_calibration/input_bundle/shots/shot_01_a02.png
+          test -s qa_calibration/input_bundle/shots/shot_01_a03.png
+          cat > qa_calibration/labels.json <<'JSON'
+          {
+            "shot_01_a01.png": {
+              "keep_hook_1": true,
+              "keep_mechanism_1": true,
+              "mech_problem_1": true,
+              "mech_intervention_1": false,
+              "mech_result_1": true,
+              "comp_1": false
+            },
+            "shot_01_a02.png": {
+              "keep_hook_1": true,
+              "keep_mechanism_1": true,
+              "mech_problem_1": true,
+              "mech_intervention_1": true,
+              "mech_result_1": true,
+              "comp_1": true
+            },
+            "shot_01_a03.png": {
+              "keep_hook_1": true,
+              "keep_mechanism_1": true,
+              "mech_problem_1": true,
+              "mech_intervention_1": true,
+              "mech_result_1": false,
+              "comp_1": false
+            }
+          }
+          JSON
+          cat > qa_calibration/source_and_labels.md <<'MD'
+          # QA calibration input provenance and manual labels
+
+          - Source GitHub Actions run: https://github.com/da1840286-lang/CME2/actions/runs/40554399775
+          - Source artifact ID: 12756213543 (cme-frame-out), from branch integration/zip-full-build-2026-10-27.
+          - Calibrated judge: current branch openrouter_free_judge adapter (google/gemma-4-31b-it:free).
+          - Frames are previously generated product-ad frames. This calibrates the judge against this labeled sample; it does not certify general performance on all products or future generations.
+          - These labels are a visual-review starting set, not user-supplied ground truth. Strict false labels mean the specific MUST requirement is not unambiguously demonstrated in that still frame.
+
+          ## Label decisions
+          - shot_01_a01.png: clean strip and dirty/clean contrast are visible, but the nozzle does not clearly touch the exact dirty/clean boundary; the composition does not place the nozzle on the central strip.
+          - shot_01_a02.png: the nozzle lies at the boundary, with a visible clean strip next to untreated debris.
+          - shot_01_a03.png: the vacuum contacts the debris boundary, but a distinct debris-free strip/result is not unambiguously visible; the specified central cleaned-strip composition is also absent.
+
+          Positive labels for keep_hook_1, keep_mechanism_1, and mech_problem_1 are based on the visible cordless handheld vacuum and car-interior debris context. Because these are still images, they do not prove actual motion or suction over time.
+          MD
+
+      - name: Create runtime settings
+        run: cp settings.example.json settings.json
+
+      - name: Run repeated single-pass vs observe-verify calibration
+        id: calibration
+        continue-on-error: true
+        shell: bash
+        run: |
+          set +e
+          python scripts/calibrate_judge.py \
+            --settings settings.json \
+            --catalog adapters.json \
+            --atoms qa_calibration/input_bundle/atoms.json \
+            --frames \
+              qa_calibration/input_bundle/shots/shot_01_a01.png \
+              qa_calibration/input_bundle/shots/shot_01_a02.png \
+              qa_calibration/input_bundle/shots/shot_01_a03.png \
+            --labels qa_calibration/labels.json \
+            --reference-image qa_calibration/input_bundle/target_product_reference.jpg \
+            --repeats 3 \
+            --modes single_pass,observe_verify \
+            --priorities MUST \
+            --shot 1 \
+            --out qa_calibration/calibration_out 2>&1 | tee qa_calibration/calibration_console.log
+          status=${PIPESTATUS[0]}
+          echo "${status}" > qa_calibration/calibration_exit_code.txt
+          exit "${status}"
+
+      - name: Upload full calibration bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cme-qa-calibration-${{ github.run_id }}
+          path: |
+            qa_calibration/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Add calibration report to the run summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "# CME QA Judge Calibration"
+            echo
+            echo "- Branch: ${GITHUB_REF_NAME}"
+            echo "- Commit: ${GITHUB_SHA}"
+            echo "- Source frame run: https://github.com/da1840286-lang/CME2/actions/runs/40554399775"
+            echo "- Judge: google/gemma-4-31b-it:free via OpenRouter"
+            echo "- Repeats: 3 per frame per mode"
+            echo
+            if [[ -f qa_calibration/calibration_out/calibration_report.md ]]; then
+              cat qa_calibration/calibration_out/calibration_report.md
+            else
+              echo "Calibration report was not produced. Inspect the workflow logs and the uploaded bundle."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Mark non-OK calibration as a failed run after preserving the artifact
+        if: steps.calibration.outcome == 'failure'
+        run: exit 2
