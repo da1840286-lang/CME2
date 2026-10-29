@@ -146,6 +146,21 @@ def make_openrouter_brain(params: dict, api_key=None, transport=None):
     return call
 
 
+def _write_judge_trace(image_path, atom_ids, trace, diagnostic):
+    """Append one JSON line per observe/verify judge call when configured. Never raises."""
+    path_value = os.environ.get("CME_JUDGE_TRACE")
+    if not path_value:
+        return
+    try:
+        path = Path(path_value)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        record = {"image": Path(str(image_path)).name, "atoms": atom_ids, "diagnostic": diagnostic, **trace}
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+    except Exception:  # noqa: BLE001 - tracing must never change a QA verdict
+        pass
+
+
 def make_openrouter_judge(params: dict, api_key=None, transport=None):
     """Judge one generated frame; optional target-product references enable an identity check in the same call."""
     send = transport or urllib_transport
@@ -277,7 +292,12 @@ Reply ONLY with JSON: {"results": [{"id": "...", "pass": true|false, "evidence":
                        "cost": observe_meta.get("cost")})
         observations = parse_observations(extract_json(observe_content))
         meta = {**observe_meta}
-        if observations is None:
+        trace = {"observations": observations}
+        if observations is not None and not observations and atoms:
+            # A well-formed empty inventory is evidence that nothing was visibly confirmed, not a malformed answer.
+            out.update({a.id: {"pass": False, "evidence": "inventory reports no visible facts"} for a in atoms})
+            trace["decided"] = out
+        elif observations is None:
             diagnostic = {"component": "openrouter_judge", "reason": "observation_phase_invalid",
                           "response_excerpt": _safe_response_excerpt(observe_content),
                           "finish_reason": observe_meta.get("finish_reason")}
@@ -288,7 +308,9 @@ Reply ONLY with JSON: {"results": [{"id": "...", "pass": true|false, "evidence":
             phases.append({"phase": "verify", "completion_tokens": verify_meta.get("completion_tokens"),
                            "cost": verify_meta.get("cost")})
             meta = {**verify_meta}
-            decided = decide(extract_json(verify_content), atoms, observations)
+            verify_data = extract_json(verify_content)
+            decided = decide(verify_data, atoms, observations)
+            trace.update({"verify": verify_data, "decided": decided})
             out.update({k: {"pass": v["pass"], "evidence": v["evidence"]} for k, v in decided.items()})
             missing = sorted({a.id for a in atoms} - set(decided))
             if missing:
@@ -304,6 +326,7 @@ Reply ONLY with JSON: {"results": [{"id": "...", "pass": true|false, "evidence":
                            "cost": identity_meta.get("cost")})
             if identity_meta.get("diagnostic") and not diagnostic:
                 diagnostic = identity_meta["diagnostic"]
+        _write_judge_trace(image_path, [a.id for a in atoms], trace, diagnostic)
         meta = {**meta, "judge_mode": "observe_verify", "judge_phases": phases,
                 "observation_count": len(observations or [])}
         if diagnostic:
@@ -323,7 +346,7 @@ Reply ONLY with JSON:
   "ratings": {"problem_clarity": 1-5|null, "product_demo": 1-5|null, "proof_visibility": 1-5|null, "sequence_quality": 1-5|null}
 }
 Each S is {"text": str, "kind": "OBSERVED"|"INFERRED"}. OBSERVED only for what is visible in the frames; interpretation is INFERRED.
-The first frame is taken near the start of the video and the last frame near its end, so the opening and the final shot are both included. Compare earlier and later frames of the same surface or object: state explicitly whether visible mess or material disappeared, appeared, or stayed. Mark result_demo OBSERVED only when a later frame visibly differs from an earlier one in the way the text claims; if the frames show only the action and not its outcome, say so in the text and mark result_demo INFERRED. Describe the actual content of each frame, not what the ad probably intends; a close-up of a part is not proof of a cleaned or changed area.
+The first frame is taken near the start of the video and the last frame near its end, so the opening and final shot are both included. Compare earlier and later frames of the same object or surface and state explicitly whether anything visibly changed (appeared, disappeared, moved, filled, changed state) or stayed the same. Mark result_demo OBSERVED only when a later frame visibly differs from an earlier one in the way the text claims; if the frames show only the action and not its outcome, say so in the text and mark result_demo INFERRED. Describe the actual content of each frame, not what the ad probably intends; a close-up of a part is not proof of a changed result.
 Each evidence row's supports must name the exact section keys it visually supports (hook, buyer_problem, product_intervention, result_demo, cta, mechanism_hypothesis, transferability). Every section marked OBSERVED must have at least one valid evidence row naming that section in supports.
 Frame is a zero-based index from the provided frame list; t_sec must equal the timestamp at that index. Do not infer support from a nearby observation.
 mechanism_hypothesis and transferability are always INFERRED and are hypotheses, not proof of profitability. If something cannot be known from the frames, say so in limits.missing and use null ratings. Write all text values in English."""

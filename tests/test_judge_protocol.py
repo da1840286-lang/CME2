@@ -87,11 +87,61 @@ class DecideTests(unittest.TestCase):
         out = self.verdict([{"aspect": "problem_state", "claim": "grains", "observation_ids": ["o2"], "quote": "grains cover the right half", "holds": True}, None])
         self.assertEqual(out, {})
 
-    def test_inventory_needs_three_valid_unique_observations(self):
-        self.assertIsNone(parse_observations({"observations": OBS_FULL[:2]}))
+    def test_inventory_accepts_empty_and_sparse_lists_as_data(self):
+        self.assertEqual(parse_observations({"observations": OBS_FULL[:2]}), OBS_FULL[:2])
+        self.assertEqual(parse_observations({"observations": []}), [])
         self.assertIsNone(parse_observations({"observations": "x"}))
+        self.assertIsNone(parse_observations({"nothing": 1}))
         dup = OBS_FULL + [dict(OBS_FULL[0], text="duplicate id"), {"id": "", "text": "no id"}]
         self.assertEqual([o["id"] for o in parse_observations({"observations": dup})], ["o1", "o2", "o3", "o4"])
+
+    HOOK = Atom("keep_hook_1", "scene", "Show the BrandX Model-9 as the compact quick solution", "MUST", "image", 1)
+
+    def cond(self, aspect, ids, quote, holds=True, reason=None, claim="c"):
+        row = {"aspect": aspect, "claim": claim, "observation_ids": ids, "quote": quote, "holds": holds}
+        if reason:
+            row["non_visual_reason"] = reason
+        return row
+
+    def test_brand_and_benefit_claims_are_excluded_but_presence_is_still_proven(self):
+        out = self.verdict([
+            self.cond("object_presence", ["o1"], "a grey handheld tool lies", claim="tool visible"),
+            self.cond("non_visual", [], "", holds=False, reason="brand_or_model", claim="BrandX Model-9"),
+            self.cond("non_visual", [], "", holds=False, reason="purpose_or_benefit", claim="compact quick solution")], atom=self.HOOK)
+        self.assertTrue(out[self.HOOK.id]["pass"])
+        self.assertIn("not judged: brand_or_model, purpose_or_benefit", out[self.HOOK.id]["evidence"])
+        self.assertEqual(out[self.HOOK.id]["excluded"], 2)
+
+    def test_visual_condition_that_fails_still_fails_even_next_to_excluded_claims(self):
+        out = self.verdict([
+            self.cond("object_presence", ["o1"], "a grey handheld tool lies", holds=False, claim="tool visible"),
+            self.cond("non_visual", [], "", holds=False, reason="brand_or_model", claim="BrandX Model-9")], atom=self.HOOK)
+        self.assertFalse(out[self.HOOK.id]["pass"])
+
+    def test_requirement_with_only_non_visual_conditions_fails(self):
+        out = self.verdict([self.cond("non_visual", [], "", holds=False, reason="power_or_internal", claim="battery powered")], atom=self.HOOK)
+        self.assertFalse(out[self.HOOK.id]["pass"])
+        self.assertIn("no visually checkable condition", out[self.HOOK.id]["evidence"])
+
+    def test_non_visual_needs_a_valid_reason(self):
+        for reason in (None, "because", "state_of_surface"):
+            out = self.verdict([
+                self.cond("object_presence", ["o1"], "a grey handheld tool lies", claim="tool visible"),
+                self.cond("non_visual", [], "", holds=False, reason=reason, claim="model number")], atom=self.HOOK)
+            self.assertFalse(out[self.HOOK.id]["pass"], reason)
+
+    def test_non_visual_cannot_hide_obvious_visual_details(self):
+        out = self.verdict([
+            self.cond("object_presence", ["o1"], "a grey handheld tool lies", claim="tool visible"),
+            self.cond("non_visual", [], "", holds=False, reason="time_or_motion", claim="clean strip at right")], atom=self.HOOK)
+        self.assertFalse(out[self.HOOK.id]["pass"])
+
+    def test_verifier_cannot_dodge_the_changed_state_by_calling_it_non_visual(self):
+        out = self.verdict([
+            self.cond("problem_state", ["o2"], "grains cover the right half", claim="starting problem state"),
+            self.cond("non_visual", [], "", holds=False, reason="time_or_motion", claim="the result changed")])
+        self.assertFalse(out[RESULT.id]["pass"])
+        self.assertIn("missing proof aspect: changed_state", out[RESULT.id]["evidence"])
 
 
 class AdapterProtocolTests(unittest.TestCase):
@@ -123,8 +173,8 @@ class AdapterProtocolTests(unittest.TestCase):
         self.assertTrue(out[RESULT.id]["pass"])
         self.assertEqual(meta["judge_mode"], "observe_verify")
 
-    def test_invalid_observation_inventory_yields_no_answers(self):
-        judge, calls = self.judge({"observations": OBS_FULL[:1]}, {"results": []})
+    def test_malformed_observation_inventory_yields_no_answers(self):
+        judge, calls = self.judge({"observations": "not a list"}, {"results": []})
         out, meta = judge(self.image, [RESULT, CONTACT])
         self.assertEqual(out, {})
         self.assertEqual(len(calls), 1)
@@ -132,6 +182,51 @@ class AdapterProtocolTests(unittest.TestCase):
         rows = judge_batch_checks(str(self.image), [RESULT, CONTACT], lambda p, a: out)
         self.assertEqual({r.status for r in rows}, {"NOT_RUN"})
         self.assertTrue(all(r.required for r in rows))
+
+    def test_blank_frame_fails_every_atom_instead_of_not_run(self):
+        judge, calls = self.judge({"observations": []}, {"results": []})
+        out, _ = judge(self.image, [RESULT, CONTACT])
+        self.assertEqual(len(calls), 1)  # empty inventory needs no second call
+        self.assertEqual(set(out), {RESULT.id, CONTACT.id})
+        self.assertFalse(any(row["pass"] for row in out.values()))
+        rows = judge_batch_checks(str(self.image), [RESULT, CONTACT], lambda p, a: out)
+        self.assertEqual({r.status for r in rows}, {"FAIL"})
+
+    def test_sparse_inventory_is_verified_and_unconfirmed_conditions_fail(self):
+        sparse = [{"id": "o1", "kind": "object", "text": "uniform grey surface, no objects"}]
+        no = lambda aspect: {"aspect": aspect, "claim": "x", "observation_ids": [], "quote": "", "holds": False}
+        verify = {"results": [
+            {"id": RESULT.id, "conditions": [no("problem_state"), no("changed_state")]},
+            {"id": CONTACT.id, "conditions": [no("problem_state"), no("contact_action")]}]}
+        judge, calls = self.judge({"observations": sparse}, verify)
+        out, _ = judge(self.image, [RESULT, CONTACT])
+        self.assertEqual(len(calls), 2)
+        self.assertFalse(any(row["pass"] for row in out.values()))
+        self.assertEqual(set(out), {RESULT.id, CONTACT.id})
+
+    def test_analyst_prompt_uses_neutral_state_change_language(self):
+        from cme.adapters.openrouter import ANALYST_SYSTEM
+        self.assertIn("appeared, disappeared, moved, filled, changed state", ANALYST_SYSTEM)
+        self.assertNotIn("visible mess or material disappeared", ANALYST_SYSTEM)
+
+    def test_trace_file_records_inventory_and_decisions_only_when_enabled(self):
+        import os
+        from unittest import mock
+        verify = {"results": [{"id": RESULT.id, "conditions": [
+            {"aspect": "problem_state", "claim": "starting state", "observation_ids": ["o2"],
+             "quote": "grains cover the right half", "holds": True},
+            {"aspect": "changed_state", "claim": "result state", "observation_ids": ["o3"],
+             "quote": "clear strip lies where the tool passed beside untouched grains", "holds": True}]}]}
+        judge, _ = self.judge({"observations": OBS_FULL}, verify)
+        judge(self.image, [RESULT])
+        self.assertFalse((Path(self.temp.name) / "trace.jsonl").exists())
+        trace = Path(self.temp.name) / "trace.jsonl"
+        with mock.patch.dict(os.environ, {"CME_JUDGE_TRACE": str(trace)}):
+            judge(self.image, [RESULT])
+        record = json.loads(trace.read_text(encoding="utf-8").splitlines()[0])
+        self.assertEqual(record["atoms"], [RESULT.id])
+        self.assertEqual(len(record["observations"]), 4)
+        self.assertTrue(record["decided"][RESULT.id]["pass"])
 
     def test_partial_verify_leaves_missing_atom_not_run(self):
         verify = {"results": [{"id": RESULT.id, "conditions": [
