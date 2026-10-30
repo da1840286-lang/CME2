@@ -209,6 +209,21 @@ jobs:
             printf '{"version":1,"entries":{}}\n' > "${RUNNER_TEMP}/cme-find-state/seen.json"
           fi
 
+      - name: Restore verified product-reference cache
+        if: inputs.stage == 'frame' || inputs.stage == 'all'
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/cme-reference-cache
+          key: cme-reference-cache-${{ runner.os }}-${{ hashFiles('examples/**', 'cme/branding.py') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            cme-reference-cache-${{ runner.os }}-${{ hashFiles('examples/**', 'cme/branding.py') }}-
+      - name: Initialize verified product-reference cache
+        if: inputs.stage == 'frame' || inputs.stage == 'all'
+        shell: bash
+        run: |
+          mkdir -p "${RUNNER_TEMP}/cme-reference-cache"
+          echo "CME_REFERENCE_CACHE_DIR=${RUNNER_TEMP}/cme-reference-cache" >> "$GITHUB_ENV"
+
       - name: Install project dependencies
         timeout-minutes: 5
         run: python -m pip install --disable-pip-version-check --retries 1 --timeout 20 -r requirements.txt
@@ -1437,6 +1452,26 @@ jobs:
         with:
           path: ${{ runner.temp }}/cme-find-state
           key: cme-find-state-${{ runner.os }}-${{ github.ref_name }}-${{ github.run_id }}
+
+      - name: Check verified product-reference cache before saving
+        id: reference_cache_persist
+        if: always() && (inputs.stage == 'frame' || inputs.stage == 'all')
+        shell: bash
+        run: |
+          cache_dir="${RUNNER_TEMP}/cme-reference-cache"
+          should_save=false
+          if [[ -d "$cache_dir" ]] && find "$cache_dir" -maxdepth 1 -type f -name '*.prep.json' -print -quit | grep -q .; then
+            should_save=true
+          fi
+          echo "should_save=$should_save" >> "$GITHUB_OUTPUT"
+          echo "Verified product-reference cache persistence: $should_save"
+
+      - name: Save verified product-reference cache
+        if: always() && (inputs.stage == 'frame' || inputs.stage == 'all') && steps.reference_cache_persist.outputs.should_save == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/cme-reference-cache
+          key: cme-reference-cache-${{ runner.os }}-${{ hashFiles('examples/**', 'cme/branding.py') }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Remove raw source-transfer input from downloadable artifacts
         if: always() && inputs.stage != 'frame' && inputs.stage != 'analyze'

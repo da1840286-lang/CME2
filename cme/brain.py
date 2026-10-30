@@ -840,6 +840,38 @@ def _negative_gate_mechanism_contradiction(decision) -> str:
         "compatible target merely because optional source features are unsupported."
     )
 
+_EVIDENCE_GAP = re.compile(
+    r"cannot\s+be\s+(?:verified|confirmed)|can(?:not|'t)\s+(?:verify|confirm)|not\s+(?:verified|confirmed|evidenced|supported)|"
+    r"unverified|without\s+(?:any\s+)?(?:target|offer)\s+(?:evidence|verification|support)|"
+    r"no\s+(?:target|offer)\s+evidence|lacks?\s+(?:target\s+|offer\s+)?evidence", re.IGNORECASE)
+_EVIDENCE_GAP_ERROR = "NEGATIVE_TRANSFER_EVIDENCE_GAP"
+
+
+def _negative_gate_evidence_gap(decision) -> str:
+    """A rejection whose every dropped element is justified only by missing target evidence for a source feature.
+
+    Missing evidence for a feature (a readout, a rating, a spec number) is a data gap, not proof that the target
+    product class cannot perform the source's causal action. The model gets one extra round to name a real
+    incompatibility; this never turns a rejection into an approval.
+    """
+    if not isinstance(decision, dict) or decision.get("transferable") is not False:
+        return ""
+    dropped = decision.get("source_elements_dropped")
+    if not isinstance(dropped, list) or not dropped:
+        return ""
+    reasons = [str(item.get("why") or "") for item in dropped if isinstance(item, dict)]
+    if not reasons or not all(_EVIDENCE_GAP.search(reason) for reason in reasons):
+        return ""
+    return (
+        f"{_EVIDENCE_GAP_ERROR}: every dropped element is justified only by missing or unverified target evidence "
+        "for a source feature. A missing target claim for a feature that does not change the causal action or its "
+        "observable result (display readouts, power ratings, spec numbers, accessories) is not an incompatibility: "
+        "omit that feature from the creative and keep the elements it does not define as preserved. Set "
+        "transferable=false only if the target product class cannot perform the source's causal action at all, and "
+        "then name that essential missing capability in each dropped element's why instead of citing unverified evidence."
+    )
+
+
 def request_transfer_fit(offer, brief: str, source_transfer: dict, call, trace_out=None, max_rounds: int = 2) -> dict:
     """Run the pre-generation fit gate, allowing one correction for invalid model output.
 
@@ -876,6 +908,7 @@ def request_transfer_fit(offer, brief: str, source_transfer: dict, call, trace_o
             "For transferable=true, target_evidence must contain 1-3 verbatim excerpts copied from OfferCard name, product_type, product_category, verified_claims, or confirmations. No source-ad text and no invented target facts.",
             "A target_evidence excerpt shorter than 8 characters is allowed only when it exactly matches a complete OfferCard field; do not use a short fragment from a longer field.",
             "A shared generic desire (easy, fast, fewer cables, convenient) is not sufficient. Map the core causal action and observable result the target can plausibly demonstrate; do not reject it merely because optional specs or supporting shots are unverified. Choose transferable=false only when an essential target capability is unsupported, the core intervention cannot be demonstrated, or material uncertainty remains about that essential capability.",
+            "ESSENTIAL VERSUS OPTIONAL FEATURES: a source feature is essential only if removing it changes the causal action or its observable result (a device without suction cannot demonstrate suction). A display readout, a power rating, a spec number or an accessory that does not change what visibly happens is optional: omit it from the creative, keep every element it does not define as preserved, and do not cite its missing target evidence as the reason for rejection.",
             "ELEMENT ACCOUNT (required): account for EVERY name in required_source_elements exactly once, either in source_elements_preserved (element, source_form = what it is in the source, target_form = how it appears with the target product, evidence_t_sec = timestamps selected from source_evidence_refs) or in source_elements_dropped (element, why). Do not list an element as preserved when its target_form is only a generic demo of the target product. If source_evidence_refs are supplied, every preserved element must cite 1-3 exact supplied timestamps that support the source observation; do not invent timestamps.",
             "MECHANISM IS NON-NEGOTIABLE: transferable=true is impossible unless the source element 'mechanism' is in source_elements_preserved. Preserving only the hook, visual style, result, or product action is not a mechanism transfer. If the causal mechanism cannot be carried to the target honestly, set transferable=false.",
             "demo_form_source and demo_form_target name the demonstration shape of the source and of your target plan (comparison, before_after, demonstration, testimonial, tutorial, other). A comparison or before_after source must keep a comparison or before_after target. Code rejects a missing source mechanism and rejects a comparison downgraded to an ordinary demonstration, whatever transferable says.",
@@ -885,7 +918,11 @@ def request_transfer_fit(offer, brief: str, source_transfer: dict, call, trace_o
 
     previous_errors = []
     last_errors = []
-    for round_number in range(1, max_rounds + 1):
+    gap_round_granted = False
+    gap_decision = None
+    round_number = 0
+    while round_number < max_rounds:
+        round_number += 1
         request = dict(base_request)
         request["rules"] = list(base_request["rules"])
         if previous_errors:
@@ -919,6 +956,7 @@ def request_transfer_fit(offer, brief: str, source_transfer: dict, call, trace_o
             for contradiction in (
                 _source_evidence_contradiction(decision, source_transfer),
                 _negative_gate_mechanism_contradiction(decision),
+                _negative_gate_evidence_gap(decision),
             ):
                 if contradiction:
                     errors.append(contradiction)
@@ -927,6 +965,11 @@ def request_transfer_fit(offer, brief: str, source_transfer: dict, call, trace_o
             record["validation_errors"] = errors
             previous_errors = list(errors)
             last_errors = errors
+            gap_only = len(errors) == 1 and errors[0].startswith(_EVIDENCE_GAP_ERROR)
+            gap_decision = decision if gap_only else None
+            if gap_only and not gap_round_granted and round_number >= max_rounds:
+                gap_round_granted = True   # one extra round to name a real incompatibility, or reconsider
+                max_rounds += 1
             continue
 
         result = {key: decision[key] for key in GATE_DECISION_KEYS}
@@ -940,6 +983,16 @@ def request_transfer_fit(offer, brief: str, source_transfer: dict, call, trace_o
                              "rejected_by_code": bool(result.get("rejected_by_code"))}
         return result
 
+    if gap_decision is not None and len(last_errors) == 1 and last_errors[0].startswith(_EVIDENCE_GAP_ERROR):
+        # The model kept rejecting on missing target evidence after being told that is not an incompatibility.
+        # The rejection stands (nothing is approved) and is reported as a data gap the operator can close by
+        # adding verified claims to the OfferCard, so the source loop may still try the next candidate.
+        final = {key: gap_decision[key] for key in GATE_DECISION_KEYS}
+        final["rejection_basis"] = "EVIDENCE_GAP"
+        if trace_out is not None:
+            trace_out.append({"phase": "target_fit_gate", "verdict": {
+                "transferable": False, "rejection_basis": "EVIDENCE_GAP", "reason": final["reason"]}})
+        return final
     raise BrainError({"#transfer_fit": last_errors or ["target-fit gate failed without a validated response"]})
 
 

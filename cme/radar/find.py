@@ -883,9 +883,25 @@ def _query_offer_conflict(keywords: list[str], offer: dict[str, str]) -> dict | 
         overlap = anchors & target_specific
         union = anchors | target_specific
         similarity = len(overlap) / len(union) if union else 0.0
-        checked.append({"query": keyword, "anchors": sorted(anchors), "similarity": round(similarity, 3)})
+        # Keep one explicit use-case exception: "pet hair" is a contiguous qualifier for a vacuum,
+        # although both words occur in the product-query vocabulary as part of "pet hair remover".
+        # Any other extra product anchor (e.g. "blender" in "blender car vacuum") is a second product,
+        # even when the target's single anchor makes the Jaccard similarity look high.
+        extras = anchors - target_specific
+        tokens = re.findall(r"[a-z0-9]+", str(keyword or "").casefold())
+        extra_positions = [i for i, token in enumerate(tokens) if token in extras]
+        contiguous = extra_positions == list(range(extra_positions[0], extra_positions[0] + len(extra_positions))) \
+            if extra_positions else True
+        extra_phrase = [tokens[i] for i in extra_positions]
+        use_case_exception = extras == {"pet", "hair"} and extra_phrase == ["pet", "hair"] and contiguous
+        contains_offer = bool(target_specific) and overlap == target_specific and (not extras or use_case_exception)
+        # A complete target match is accepted only with no other product anchor or the explicit use-case phrase.
+        # Partial matches retain the previous similarity threshold.
+        compatible = contains_offer if overlap == target_specific else similarity >= 0.35
+        checked.append({"query": keyword, "anchors": sorted(anchors), "similarity": round(similarity, 3),
+                        "contains_offer_anchors": contains_offer, "compatible": compatible})
 
-    if not checked or any(row["similarity"] >= 0.35 for row in checked):
+    if not checked or any(row["compatible"] for row in checked):
         return None
     query_list = ", ".join(repr(row["query"]) for row in checked)
     return {

@@ -6,7 +6,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from .compiler import BudgetError, compile_image_prompt
-from .branding import NO_BRANDING, prepare_unbranded_reference, resolved_brand_marks
+from .branding import NO_BRANDING, SWEEP_ANGLES, prepare_unbranded_reference, reference_lettering_rule, resolved_brand_marks
+from .reference_cache import ReferenceVerificationCache
 from .qa import check_reference_unbranded, PRODUCT_IDENTITY_CHECK_ID, SYSTEM_NO_TEXT_ID
 from .atoms import check_claims, check_language
 from .receipt import assert_exact_payload, attach_qa, build_receipt, overall
@@ -191,9 +192,16 @@ def produce_shot(*, offer, atoms, shot, contract_id, state, out_dir, image_provi
     provider_product_refs = list(offer.photos)
     preparation_reports = []
     if offer.branding_policy == NO_BRANDING:
+        verdict_cache = ReferenceVerificationCache.from_env(reference_lettering_rule(), len(SWEEP_ANGLES))
         for index, source in enumerate(offer.photos, start=1):
             destination = out / "reference_inputs" / f"target_product_unbranded_{index:02d}.png"
+            cache_restored = bool(verdict_cache and verdict_cache.restore(source, destination))
             report = prepare_unbranded_reference(source, destination)
+            # A cached file may be restored but rejected by the preparation-version check. Treat it as a miss
+            # in that case so the newly prepared PASS is written back under the current algorithm version.
+            cache_hit = bool(cache_restored and report.get("cached") is True)
+            if cache_hit and report.get("verification"):
+                report["verification_cache"] = "HIT"
             preparation_reports.append(report)
             if report.get("status") in {"OCR_UNAVAILABLE", "OCR_FAILED"}:
                 detail = (
@@ -230,6 +238,8 @@ def produce_shot(*, offer, atoms, shot, contract_id, state, out_dir, image_provi
                     sidecar.write_text(json.dumps(cached, ensure_ascii=False, indent=1), encoding="utf-8")
                 except (OSError, ValueError):
                     pass
+            if verdict_cache and report["verification"]["status"] == "PASS" and not cache_hit:
+                verdict_cache.store(source, destination)
             provider_product_refs[index-1] = report["path"]
 
     receipt = build_receipt(contract_id, state.run_id, shot, attempt, atoms, compiled.text)

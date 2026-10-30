@@ -195,17 +195,56 @@ def _target_is_promoted(body: str, anchor: str) -> bool:
 
 
 
+_STRONG_PURCHASE = re.compile(
+    r"\b(?:buy|shop\s+now|order|get\s+yours|grab\s+(?:this|yours)|add\s+to\s+cart|free\s+shipping|"
+    r"discount|sale|deal|link\s+in\s+bio|available\s+now|use\s+code)\b", re.IGNORECASE)
+
+
+def _anchor_only_as_owned_tool(record: dict, view: dict, anchor: str) -> bool:
+    """True when the target noun appears only as the viewer's existing tool or as a verb, with no commercial signal.
+
+    Advice such as "...your <tool> can pull out debris... then <tool> for a deeper clean" talks about a tool the
+    viewer already owns; it is not an ad for that product. The rule is deliberately narrow so real ads stay
+    targets: it never applies when the noun is also a hashtag, when any strong commercial signal exists
+    (commerce hashtag, landing page, product spec, explicit purchase wording), or when any mention is an
+    ordinary noun use.
+    """
+    body = view.get("body") or ""
+    if not anchor or not body:
+        return False
+    occurrences = list(re.finditer(r"\b" + re.escape(anchor) + r"(?:s|es)?\b", body, re.IGNORECASE))
+    if not occurrences:
+        return False
+    if _anchor_present(anchor, {"body_tokens": [], "hashtags": view.get("hashtags") or []}):
+        return False
+    if (set(_promo_signals(record, view)) & {"commerce_hashtag", "landing_page", "product_spec"}
+            or _STRONG_PURCHASE.search(view.get("text") or body)):
+        return False
+    for match in occurrences:
+        before = body[max(0, match.start() - 40):match.start()]
+        after = body[match.end():match.end() + 20]
+        owned = re.search(r"\byour\s+(?:[\w'-]+\s+){0,2}$", before, re.IGNORECASE)
+        verb = (re.search(r"\b(?:then|to|will|can|gonna|would|should|you|we|they|i)\s+$", before, re.IGNORECASE)
+                or re.match(r"(?:ed)?\s+(?:it|them|up|away|out)\b", after, re.IGNORECASE))
+        if not (owned or verb):
+            return False
+    return True
+
+
 def _paid_inventory_corroborates(record: dict, view: dict, anchor: str, contexts: set, mention_source: str) -> bool:
     """Paid-ad inventory + target noun in the post's own text + an independent corroborator.
 
-    Corroborators: target use context in the text (e.g. "car" for a car vacuum) or the noun also in the
-    post's hashtags. Passing mentions ("vacuum sealed", "before vacuuming") have neither and stay out.
+    Corroborators: a use-context word taken from the product type itself, or the noun also in the post's
+    hashtags. Passing or verb-form mentions of the noun have neither and stay out.
     """
     if not anchor or not mention_source:
         return False
     if str((record or {}).get("discovery_source") or "").strip().lower() not in _PAID_INVENTORY_SOURCES:
         return False
-    # Verb use ("then vacuum it away", "to vacuum") names an action, not the advertised product.
+    if _anchor_only_as_owned_tool(record, view, anchor):
+        return False
+    # Verb use ("then <noun> it away", "to <noun>") names an action, not the advertised product.
+    # English forms only; other languages fall back to the corroborator requirement above.
     verb_use = re.compile(
         r"\b(?:then|to|will|can|gonna|would|should)\s+" + re.escape(anchor) + r"\b|"
         r"\b" + re.escape(anchor) + r"(?:ed)?\s+(?:it|them|up|away|out)\b", re.IGNORECASE)
@@ -238,7 +277,9 @@ def match_source_to_product_query(record: dict, query: str) -> dict:
     linked = _target_is_promoted(view["body"], anchor)
     if mention_source == "hashtag" and _promo_signals(record, view):
         linked = True
-    if not linked and _paid_inventory_corroborates(record, view, anchor, _target_contexts(query), mention_source):
+    if linked and mention_source == "body" and _anchor_only_as_owned_tool(record, view, anchor):
+        linked = False
+    elif not linked and _paid_inventory_corroborates(record, view, anchor, _target_contexts(query), mention_source):
         linked = True
     if not linked:
         return {
@@ -268,12 +309,15 @@ def classify_source_role(record: dict, *, product_type: str = "", product_catego
     # A hashtag can identify the target product when the source body independently promotes/demonstrates it.
     if target_source == "hashtag" and promo:
         target_promoted = True
+    owned_tool_only = False
+    if target_source == "body" and target_promoted and _anchor_only_as_owned_tool(record, view, anchor):
+        target_promoted, owned_tool_only = False, True
     promoted = bool(promotion_match or promo)
     contexts = _target_contexts(product_type, product_category, target_offer)
     context_verified = _context_verified(contexts, view)
 
-    # Paid-inventory corroboration: a product-naming title such as "Handheld Cordless Car Vacuum
-    # cleaner!" carries no verb or CTA, yet is exactly what a seller's ad looks like.
+    # Paid-inventory corroboration: a bare product-naming title (noun phrase, no verb or CTA) is exactly
+    # what a seller's ad often looks like.
     paid_target_ok = False
     if target_source and not (target_promoted and promoted) and _paid_inventory_corroborates(
             record, view, anchor, contexts, target_source):
@@ -296,6 +340,8 @@ def classify_source_role(record: dict, *, product_type: str = "", product_catego
         role, confidence = OFF_TOPIC, "NONE"
         if not source_text:
             reason = "No source-body title/caption; search metadata is not evidence."
+        elif owned_tool_only:
+            reason = "Target noun appears only as a tool the viewer already owns or as a verb; this is advice, not a promoted product."
         elif target_source and not target_promoted:
             reason = "Target noun appears in context but is not independently shown as the promoted product."
         elif detected and not promoted:
