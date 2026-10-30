@@ -38,14 +38,16 @@ def _video_duration_filter_reason(record: dict, selected_range: str = "all") -> 
 
 LEGACY_ERROR = ""
 try:
-    from .legacy.discover import _ordered_supply_queries, canonical_source_identity_keys, discover_and_rank
+    from .legacy.discover import (
+        _ordered_supply_queries, _source_market_relevance, canonical_source_identity_keys, discover_and_rank,
+    )
     from .legacy.arbitrage import score_tiktok_candidate
     from .legacy.discovery.tiktok_socialcrawl import SocialCrawlError, SocialCrawlTikTokTopAds
     from .socialcrawl_client import RetryingSocialCrawlTikTokTopAds
     from .legacy.verticals import classify_vertical
 except Exception as e:  # e.g. the 'requests' package is missing
     LEGACY_ERROR = f"{type(e).__name__}: {e}"
-    discover_and_rank = canonical_source_identity_keys = _ordered_supply_queries = SocialCrawlTikTokTopAds = RetryingSocialCrawlTikTokTopAds = classify_vertical = score_tiktok_candidate = None
+    discover_and_rank = canonical_source_identity_keys = _ordered_supply_queries = _source_market_relevance = SocialCrawlTikTokTopAds = RetryingSocialCrawlTikTokTopAds = classify_vertical = score_tiktok_candidate = None
 
     class SocialCrawlError(Exception):
         pass
@@ -1269,6 +1271,10 @@ def _run_mechanism_find(*, request: dict, offer: dict, keywords: list[str], clie
             record, str(record.get("discovery_query") or "")
         )
         record["query_product_match"] = query_product_match
+        market = _source_market_relevance(record, country) if _source_market_relevance else {
+            "status": "UNKNOWN", "reason": "source-market verifier unavailable", "evidence": {},
+        }
+        record["source_market_relevance"] = market
         attention = attention_rank(record, period_days=period, now=parsed_now)
         record["source_role_info"], record["attention_score"] = role, attention
         video = record.get("video_url_540p") or record.get("video_url") or record.get("video_url_360p")
@@ -1279,6 +1285,8 @@ def _run_mechanism_find(*, request: dict, offer: dict, keywords: list[str], clie
             reason = "HARD_EXCLUDED_BY_SOURCE_CHECK"
         elif not video:
             reason = "NO_PLAYABLE_VIDEO"
+        elif market.get("status") == "MISMATCH":
+            reason = "SOURCE_MARKET_MISMATCH"
         elif not query_product_match.get("matches"):
             reason = str(query_product_match.get("reason") or "QUERY_PRODUCT_UNVERIFIED")
         elif role.get("role") != accept_role:
@@ -1302,6 +1310,10 @@ def _run_mechanism_find(*, request: dict, offer: dict, keywords: list[str], clie
                 "title": str(record.get("title") or "")[:160], "reason": reason,
                 "role": role.get("role"), "query_product_anchor": query_product_match.get("query_anchor"),
                 "query_product_reason": query_product_match.get("reason"),
+                "product_match_reason": query_product_match.get("reason"),
+                "source_market_status": market.get("status"),
+                "source_market_reason": market.get("reason"),
+                "source_market_evidence": market.get("evidence") or {},
                 "attention_score": attention.get("score"),
                 "attention_coverage": attention.get("coverage"),
             })
@@ -1349,8 +1361,12 @@ def _run_mechanism_find(*, request: dict, offer: dict, keywords: list[str], clie
         "request_budget": max_requests, "unique_ads": unique_rows, "raw_ads_returned": raw_count,
         "fresh_unique_ads": unique_rows,
         "seen_before_ads": reason_counts.get("SEEN_WITHIN_TTL", 0),
-        "product_relevant_ads": sum(1 for row in rows_by_identity.values()
-                                    if (row.get("source_role_info") or {}).get("role") == "TARGET_PRODUCT"),
+        "product_relevant_ads": sum(
+            1 for row in rows_by_identity.values()
+            if (row.get("source_role_info") or {}).get("role") == "TARGET_PRODUCT"
+            and (row.get("source_market_relevance") or {}).get("status") != "MISMATCH"
+        ),
+        "source_market_mismatch_ads": reason_counts.get("SOURCE_MARKET_MISMATCH", 0),
         "adjacent_mechanism_ads": len(qualified), "auto_shortlist_ads": len(selected),
         "video_duration_filter": duration_gate,
         "performance_lane_reserved": False,
@@ -1377,10 +1393,27 @@ def _run_mechanism_find(*, request: dict, offer: dict, keywords: list[str], clie
             "rejected_examples": rejected[:50], "by_reason": dict(sorted(reason_counts.items())),
             "examples": rejected[:50],
         },
+        "product_selection_gate": {
+            "applied": target_lane,
+            "raw_candidates": unique_rows,
+            "accepted_candidates": len(qualified),
+            "rejected_candidates": len(rejected),
+            "rejected_by_reason": dict(sorted(reason_counts.items())),
+            "rejected_examples": rejected[:50],
+        },
     }
+    target_role_count = sum(
+        1 for row in rows_by_identity.values()
+        if (row.get("source_role_info") or {}).get("role") == "TARGET_PRODUCT"
+    )
+    market_mismatch_count = reason_counts.get("SOURCE_MARKET_MISMATCH", 0)
+    no_target_relevance = target_lane and (
+        target_role_count == 0 or market_mismatch_count >= target_role_count
+    )
     diagnostics = {
         "outcome": "CANDIDATES_FOUND" if candidates else (
             "NO_API_ROWS" if raw_count == 0
+            else "NO_TARGET_RELEVANCE" if no_target_relevance
             else "NO_TARGET_PRODUCT_AD" if target_lane else "NO_QUALIFIED_ADJACENT_MECHANISM"),
         "explanation": (
             "Playable, promoted sources whose body advertises the configured target product passed. "
@@ -1397,6 +1430,8 @@ def _run_mechanism_find(*, request: dict, offer: dict, keywords: list[str], clie
         "expanded_relevant_ads": 0, "target_relevant_ads": stats["product_relevant_ads"],
         "adjacent_mechanism_ads": len(qualified), "unverified_ads": 0,
         "hard_excluded_ads": reason_counts.get("HARD_EXCLUDED_BY_SOURCE_CHECK", 0),
+        "source_market_mismatch_ads": market_mismatch_count,
+        "product_selection_gate": stats["product_selection_gate"],
         "source_selection_diagnostics": stats["source_selection_diagnostics"],
         "search_queries_executed": [call["keyword"] for call in calls],
         "request_sources": ["sponsored_search" for _ in calls], "performance_calls_used": 0,
@@ -1421,7 +1456,7 @@ def _run_mechanism_find(*, request: dict, offer: dict, keywords: list[str], clie
             "provider_contract": contract_summary(),
             "interpretation": (
                 "Requested playback metrics were not executed as boards: the provider cannot return them for a "
-                "product-targeted ad. Candidates carry labeled attention-proxy evidence only."
+                "product-targeted ad. No substitute metric or engagement proxy was used as performance evidence."
             ),
         }
         stats["performance_metric_availability"] = availability
@@ -1468,9 +1503,12 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
         requested_performance_order_bys, include_retention, requested_max_requests,
         performance_plan=performance_plan,
     )
-    # Product mode uses target-aware Sponsored Search by default. Ads Top remains
-    # available only through an explicit legacy_ads_top performance_plan.
-    contract_aware = selection_mode == "product" and plan_uses_contract(performance_plan)
+    discovery_mode = str(params.get("discovery_mode") or "auto").strip().lower()
+    # Autonomous Product FIND defaults to target-aware Sponsored Search.
+    # Explicit strict/manual Radar review keeps its legacy operator-review route.
+    contract_aware = (
+        selection_mode == "product" and discovery_mode == "auto" and plan_uses_contract(performance_plan)
+    )
     if contract_aware:
         include_retention = False  # not executed: retention cannot be product-targeted
     user_keywords = _clean_terms(params.get("keywords"))

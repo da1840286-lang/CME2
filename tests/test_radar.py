@@ -253,7 +253,7 @@ class VendoredCodeIsTheRealOne(Env):
             item["post"]["ext"]["ad"]["industry"] = "Entertainment"
             return FakeResp(synthetic_response([item]))
         with mock.patch.object(T.requests, "get", fake_get):
-            res = F.run_find({"country": "US", "max_requests": 3, "keywords": ["car vacuum"],
+            res = F.run_find({"performance_plan": "legacy_ads_top", "country": "US", "max_requests": 3, "keywords": ["car vacuum"],
                               "offer": {"name": "Fanttik V8 Mate Cordless Car Vacuum",
                                         "product_type": "cordless handheld car vacuum"}},
                              client=T.SocialCrawlTikTokTopAds(api_key="TESTKEY"))
@@ -292,7 +292,7 @@ class VendoredCodeIsTheRealOne(Env):
             return FakeResp(synthetic_response([item]))
         with mock.patch.object(T.requests, "get", fake_get):
             result = F.run_find(
-                {"country": "US", "max_requests": 2, "max_ads": 1, "keywords": ["car vacuum"],
+                {"performance_plan": "legacy_ads_top", "country": "US", "max_requests": 2, "max_ads": 1, "keywords": ["car vacuum"],
                  "offer": {"name": "Fanttik V8 Mate Cordless Car Vacuum",
                            "product_type": "cordless handheld car vacuum"}},
                 client=T.SocialCrawlTikTokTopAds(api_key="TESTKEY"),
@@ -343,7 +343,7 @@ class VendoredCodeIsTheRealOne(Env):
 
         with mock.patch.object(T.requests, "get", fake_get):
             result = F.run_find(
-                {"country": "US", "max_requests": 10, "max_ads": 10, "keywords": ["car vacuum"],
+                {"performance_plan": "legacy_ads_top", "country": "US", "max_requests": 10, "max_ads": 10, "keywords": ["car vacuum"],
                  "offer": {"name": "Fanttik V8 Mate Cordless Car Vacuum",
                            "product_type": "cordless handheld car vacuum"}},
                 client=T.SocialCrawlTikTokTopAds(api_key="TESTKEY"),
@@ -407,7 +407,7 @@ class VendoredCodeIsTheRealOne(Env):
 
         with mock.patch.object(T.requests, "get", fake_get):
             result = F.run_find(
-                {"country": "US", "max_requests": 2, "max_ads": 10, "keywords": ["car vacuum"],
+                {"performance_plan": "legacy_ads_top", "country": "US", "max_requests": 2, "max_ads": 10, "keywords": ["car vacuum"],
                  "offer": {"name": "Fanttik V8 Mate Cordless Car Vacuum",
                            "product_type": "cordless handheld car vacuum"}},
                 client=T.SocialCrawlTikTokTopAds(api_key="TESTKEY"),
@@ -519,9 +519,9 @@ class VendoredCodeIsTheRealOne(Env):
 
         self.assertEqual(result["candidates"], [])
         by_reason = result["diagnostics"]["source_selection_diagnostics"]["by_reason"]
-        self.assertIn("PRODUCT_TYPE_MISMATCH", by_reason)
+        self.assertIn("QUERY_PRODUCT_NOT_PROMOTED", by_reason)
         row = result["stats"]["source_selection_diagnostics"]["examples"][0]
-        self.assertIn("product hashtag lacks independent source-body product evidence", row["product_match_reason"])
+        self.assertEqual(row["product_match_reason"], "QUERY_PRODUCT_NOT_PROMOTED")
 
     def test_auto_rejects_product_with_explicit_non_target_market(self):
         uganda = synthetic_post(
