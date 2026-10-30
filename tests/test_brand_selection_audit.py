@@ -24,38 +24,35 @@ def atom(i, text, kind="qa_check", ch="qa", prio="MUST", shot=1):
 
 
 class SelectionOrderTests(unittest.TestCase):
-    def test_automatic_transfer_excludes_candidates_rejected_by_commercial_gate(self):
-        ordered, skipped = rank_transfer_candidates([cand("a", 60.1, "EXPANDED"), cand("b", 28.3, gate=False, action="REJECT"),
-                                                     cand("c", 51.6, gate=False, action="REJECT")])
-        self.assertEqual([c["id"] for c in ordered], ["a"])
-        self.assertEqual(len(skipped), 2)
-        self.assertTrue(any("REJECT" in reason for reason in skipped))
+    def test_money_gate_and_scorer_reject_do_not_block_pattern_extraction(self):
+        candidates = [
+            cand("a", 60.1, "EXPANDED"),
+            cand("b", 28.3, gate=False, action="REJECT"),
+            cand("c", 51.6, gate=False, action="REJECT"),
+        ]
+        ordered, skipped = rank_transfer_candidates(candidates)
+        self.assertEqual([c["id"] for c in ordered], ["a", "b", "c"])
+        self.assertEqual(skipped, [])
 
-    def test_high_score_cannot_override_a_commercial_rejection(self):
-        ordered, skipped = rank_transfer_candidates([cand("strong", 55.6, "EXPANDED"), cand("weak_high", 61.7, gate=False, action="REJECT")])
-        self.assertEqual([c["id"] for c in ordered], ["strong"])
-        self.assertEqual(len(skipped), 1)
-        self.assertIn("REJECT", skipped[0])
-
-    def test_commercial_pass_breaks_a_close_call(self):
-        ordered, _ = rank_transfer_candidates([cand("weak", 52.0, gate=False, action="REJECT"), cand("strong", 49.0)])
-        self.assertEqual(ordered[0]["id"], "strong")
-
-    def test_relevance_breaks_equal_scores_and_find_order_the_rest(self):
-        ordered, _ = rank_transfer_candidates([cand("exp", 50.0, "EXPANDED"), cand("dir", 50.0, "DIRECT"), cand("dir2", 50.0, "DIRECT")])
-        self.assertEqual([c["id"] for c in ordered], ["dir", "dir2", "exp"])
+    def test_scores_and_relevance_labels_do_not_reorder_find_output(self):
+        candidates = [cand("exp", 80.0, "EXPANDED"), cand("dir", 10.0, "DIRECT"),
+                      cand("dir2", 99.0, "DIRECT", gate=False, action="REJECT")]
+        ordered, skipped = rank_transfer_candidates(candidates)
+        self.assertEqual([c["id"] for c in ordered], ["exp", "dir", "dir2"])
+        self.assertEqual(skipped, [])
 
     def test_unusable_sources_are_still_skipped_with_a_reason(self):
         novideo = {**cand("nv", 90.0), "video_url": ""}
         chosen, skipped = select_transfer_candidate([novideo, cand("ok", 10.0)])
         self.assertEqual(chosen["id"], "ok")
         self.assertEqual(len(skipped), 1)
+        self.assertIn("video", skipped[0])
 
-    def test_no_candidate_is_selected_when_every_source_fails_commercial_gate(self):
-        chosen, skipped = select_transfer_candidate([cand("rejected", 95.0, gate=False, action="REJECT")])
-        self.assertIsNone(chosen)
-        self.assertEqual(len(skipped), 1)
-        self.assertIn("REJECT", skipped[0])
+    def test_money_gate_failure_alone_does_not_empty_the_pattern_pool(self):
+        chosen, skipped = select_transfer_candidate(
+            [cand("rejected", 95.0, gate=False, action="REJECT")])
+        self.assertEqual(chosen["id"], "rejected")
+        self.assertEqual(skipped, [])
 
 
 class SystemOwnedChecksTests(unittest.TestCase):

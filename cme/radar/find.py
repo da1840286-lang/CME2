@@ -19,6 +19,7 @@ from .seen import SeenLedger, build_scope
 from .provider_contract import (
     CONTRACT_AWARE_MODE, contract_summary, plan_uses_contract, ordered_target_queries,
 )
+from .select import VIDEO_DURATION_RANGES, pattern_source_reason, video_duration_filter_reason
 
 DATA_DIR = Path(__file__).resolve().parent / "data"
 # Search-only seeds for the live Sponsored Search lane. Keep separate from the
@@ -31,37 +32,9 @@ METRIC_FIELDS = ("views", "likes", "comments", "shares", "ctr", "cvr", "play_2s_
                  "retention_2s", "retention_6s", "retention_curve",
                  "rank", "cost_score", "like_tier", "estimated_reach", "engagement_rate")
 PERIODS = (7, 30, 180)
-VIDEO_DURATION_RANGES = ("all", "up_to_40", "40_to_60", "60_to_90", "over_90")
-
-
 def _video_duration_filter_reason(record: dict, selected_range: str = "all") -> str | None:
-    """Return why a candidate fails the operator-selected duration range.
-
-    Unknown duration remains eligible in the default all-range mode, but is excluded
-    from a specific range rather than silently treated as a short video.
-    """
-    selected_range = str(selected_range or "all").strip().lower()
-    if selected_range not in VIDEO_DURATION_RANGES:
-        raise ValueError(f"video_duration_range must be one of {VIDEO_DURATION_RANGES}")
-    if selected_range == "all":
-        return None
-    record = record if isinstance(record, dict) else {}
-    raw = record.get("duration_seconds")
-    if isinstance(raw, bool) or raw in (None, "", []):
-        return "VIDEO_DURATION_UNKNOWN"
-    try:
-        duration = float(raw)
-    except (TypeError, ValueError, OverflowError):
-        return "VIDEO_DURATION_UNKNOWN"
-    if not math.isfinite(duration) or duration <= 0:
-        return "VIDEO_DURATION_UNKNOWN"
-    matches = {
-        "up_to_40": duration <= 40,
-        "40_to_60": 40 < duration <= 60,
-        "60_to_90": 60 < duration <= 90,
-        "over_90": duration > 90,
-    }[selected_range]
-    return None if matches else "VIDEO_DURATION_OUT_OF_RANGE"
+    """Compatibility wrapper around the shared FIND/ALL duration contract."""
+    return video_duration_filter_reason(record, selected_range)
 
 LEGACY_ERROR = ""
 try:
@@ -774,6 +747,7 @@ def to_candidate(item: dict, request: dict, collected_at: str, origin: str, sour
                          "scope": rec.get("discovery_scope")},
         "source_score": score,
         "product_relevance": rec.get("product_relevance") or {},
+        "query_product_match": rec.get("query_product_match") or {},
         "performance_evidence": rec.get("performance_evidence") or {},
         "commercial_evidence": classify_commercial_evidence(
             rec, score, rec.get("performance_evidence") or {}
@@ -783,7 +757,7 @@ def to_candidate(item: dict, request: dict, collected_at: str, origin: str, sour
                 "performance_evidence": rec.get("performance_evidence") or {},
                 "selection_reason": rec.get("auto_selection_reason") or ""},
         "discovered_at": collected_at,
-        "request": {k: request.get(k) for k in ("country", "period", "order_bys", "keywords", "vertical", "selection_mode", "video_duration_range")},
+        "request": {k: request.get(k) for k in ("country", "period", "order_bys", "keywords", "vertical", "selection_mode", "video_duration_range", "minimum_attention_coverage", "attention_floor")},
         "legacy_record": rec,
     }
     role = rec.get("source_role_info")
@@ -796,12 +770,6 @@ def to_candidate(item: dict, request: dict, collected_at: str, origin: str, sour
     attention = rec.get("attention_score")
     if not isinstance(attention, dict):
         attention = attention_absolute_v1(rec, period_days=c.get("period_days") or request.get("period") or 30)
-    hard_excluded = bool(rel.get("excluded")) or str(rel.get("classification") or "").upper() == "HARD_EXCLUDE"
-    source_gate_eligible = bool(c.get("video_url")) and not hard_excluded
-    c["stage"] = "PATTERN_CANDIDATE" if source_gate_eligible else "SOURCE_REJECTED"
-    c["source_gate_eligible"] = source_gate_eligible
-    # Deprecated compatibility field: source-gate eligibility only, never Target-Fit approval.
-    c["transfer_eligible"] = source_gate_eligible
     c["target_fit_status"] = "NOT_EVALUATED"
     c["source_selection"] = {
         "mode": request.get("selection_mode") or "product",
@@ -822,6 +790,17 @@ def to_candidate(item: dict, request: dict, collected_at: str, origin: str, sour
         "decision": rec.get("selection_decision") or "RANKED_BY_LEGACY_DISCOVERY",
         "reason": rec.get("selection_reason") or "",
     }
+    eligibility_reason = pattern_source_reason(c)
+    source_gate_eligible = not bool(eligibility_reason)
+    c["analysis_eligibility"] = {
+        "contract": "PATTERN_SOURCE_V1",
+        "eligible": source_gate_eligible,
+        "reason": eligibility_reason or None,
+    }
+    c["stage"] = "PATTERN_CANDIDATE" if source_gate_eligible else "SOURCE_REJECTED"
+    c["source_gate_eligible"] = source_gate_eligible
+    # Deprecated compatibility field: pattern-source admission only, never Target-Fit approval.
+    c["transfer_eligible"] = source_gate_eligible
     c["id"] = stable_id(c)
     return c
 
@@ -1217,6 +1196,8 @@ def _run_mechanism_find(*, request: dict, offer: dict, keywords: list[str], clie
     # metadata, not a quality gate; a fixed floor removed relevant car-vacuum ads at 80-140k views. The
     # coverage gate still requires real engagement fields, and an operator may set attention_floor.
     floor = (0.0 if target_lane else MECHANISM_ATTENTION_FLOOR) if attention_floor is None else float(attention_floor)
+    request["minimum_attention_coverage"] = MECHANISM_MIN_COVERAGE
+    request["attention_floor"] = floor
     date_posted = {7: "this-week", 30: "this-month", 180: "last-6-months"}[period]
     calls, raw_records, qualified, rejected = [], [], [], []
     rows_by_identity, identity_keys_seen = {}, set()

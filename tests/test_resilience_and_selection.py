@@ -166,18 +166,18 @@ class SourceThresholdTests(unittest.TestCase):
     @staticmethod
     def product_candidate(*, role="TARGET_PRODUCT", promoted=True, target_promoted=True,
                           legacy_classification="UNVERIFIED", action="DEEP", money_pass=True):
+        mode = "mechanism" if role == "ADJACENT_MECHANISM" else "product"
         return {
             "id": "find-product",
             "video_url": "https://example.invalid/source.mp4",
             "source_check": {"classification": legacy_classification, "excluded": False},
             "source_selection": {
-                "role": role,
+                "mode": mode, "role": role,
                 "promotion_evidence": promoted,
                 "target_promotion_evidence": target_promoted,
             },
             "source_score": {
-                "final_score": 76.0,
-                "action": action,
+                "final_score": 76.0, "action": action,
                 "source_value_type": "COMMERCIAL_WINNER" if money_pass else "NONE",
                 "mechanism_source_score": 0,
                 "components": {
@@ -187,72 +187,100 @@ class SourceThresholdTests(unittest.TestCase):
             },
         }
 
-    def test_verified_target_product_role_resolves_legacy_unverified_relevance(self):
-        candidate = self.product_candidate()
+    def ids(self, items):
+        return [x["id"] for x in items]
+
+    def test_verified_target_product_role_overrides_legacy_unverified_relevance(self):
+        candidate = self.product_candidate(action="REJECT", money_pass=False)
         self.assertEqual(effective_source_classification(candidate), "DIRECT")
         self.assertEqual(block_reason(candidate), "")
         ranked, skipped = rank_transfer_candidates([candidate])
         self.assertEqual([item["id"] for item in ranked], ["find-product"])
         self.assertEqual(skipped, [])
 
-    def test_verified_adjacent_product_role_resolves_legacy_unverified_as_expanded(self):
+    def test_verified_adjacent_product_role_is_valid_only_in_mechanism_mode(self):
         candidate = self.product_candidate(role="ADJACENT_MECHANISM", target_promoted=False)
         self.assertEqual(effective_source_classification(candidate), "EXPANDED")
         self.assertEqual(block_reason(candidate), "")
+        candidate["source_selection"]["mode"] = "product"
+        self.assertIn("not TARGET_PRODUCT", block_reason(candidate))
 
-    def test_unverified_legacy_label_is_not_upgraded_without_promotion_proof(self):
-        candidate = self.product_candidate(target_promoted=False)
-        self.assertEqual(effective_source_classification(candidate), "UNVERIFIED")
-        self.assertIn("UNVERIFIED", block_reason(candidate))
+    def test_target_product_without_promotion_evidence_is_blocked(self):
+        candidate = self.product_candidate(promoted=False)
+        self.assertIn("independent promotion", block_reason(candidate))
 
-    def test_verified_role_never_overrides_hard_exclude_or_legacy_scorer_reject(self):
+    def test_hard_exclusion_blocks_but_scorer_reject_is_diagnostic(self):
         candidate = self.product_candidate(legacy_classification="HARD_EXCLUDE")
         candidate["source_check"]["excluded"] = True
         self.assertIn("hard-excluded", block_reason(candidate))
-        candidate = self.product_candidate(action="REJECT", legacy_classification="UNVERIFIED")
-        self.assertIn("REJECT", block_reason(candidate))
+        candidate = self.product_candidate(action="REJECT", legacy_classification="UNVERIFIED", money_pass=False)
+        self.assertEqual(block_reason(candidate), "")
 
-    def ids(self, items):
-        return [x["id"] for x in items]
+    def test_query_mismatch_and_explicit_duration_filter_remain_hard_constraints(self):
+        candidate = self.product_candidate()
+        candidate["query_product_match"] = {"matches": False, "reason": "QUERY_PRODUCT_MISMATCH"}
+        self.assertIn("QUERY_PRODUCT_MISMATCH", block_reason(candidate))
+        candidate.pop("query_product_match")
+        candidate["duration_seconds"] = 55
+        candidate["request"] = {"video_duration_range": "up_to_40"}
+        self.assertIn("selected range up_to_40", block_reason(candidate))
 
-    def test_without_a_bar_nothing_changes(self):
+    def test_unknown_duration_is_rejected_only_when_operator_selected_a_range(self):
+        candidate = self.product_candidate()
+        candidate["request"] = {"video_duration_range": "up_to_40"}
+        candidate["duration_seconds"] = None
+        self.assertIn("requires a known video duration", block_reason(candidate))
+        candidate["request"]["video_duration_range"] = "all"
+        self.assertEqual(block_reason(candidate), "")
+
+    def test_find_attention_coverage_and_requested_floor_are_preserved(self):
+        candidate = self.product_candidate()
+        candidate["request"] = {"minimum_attention_coverage": 0.35, "attention_floor": 30}
+        candidate["source_selection"]["attention"] = {"coverage": 0.2, "score": 40}
+        self.assertIn("attention coverage", block_reason(candidate))
+        candidate["source_selection"]["attention"] = {"coverage": 0.5, "score": 20}
+        self.assertIn("attention score", block_reason(candidate))
+        candidate["source_selection"]["attention"] = {"coverage": 0.5, "score": 40}
+        self.assertEqual(block_reason(candidate), "")
+
+    def test_without_a_bar_find_order_is_preserved(self):
         ordered, skipped = rank_transfer_candidates(self.POOL)
-        self.assertEqual(self.ids(ordered), ["a", "c", "b"])
+        self.assertEqual(self.ids(ordered), ["a", "b", "c"])
         self.assertEqual(skipped, [])
-        self.assertEqual(self.ids(rank_transfer_candidates(self.POOL, SourceThreshold())[0]), ["a", "c", "b"])
+        self.assertEqual(self.ids(rank_transfer_candidates(self.POOL, SourceThreshold())[0]), ["a", "b", "c"])
         self.assertEqual(weak_source_reasons(self.POOL[1], SourceThreshold()), [])
 
-    def test_flag_mode_keeps_weak_sources_but_ranks_them_last(self):
+    def test_flag_mode_does_not_reorder_candidates_and_reports_weakness(self):
         bar = SourceThreshold(min_final_score=60.0, allowed_actions=("DEEP",), mode="flag")
         ordered, skipped = rank_transfer_candidates(self.POOL, bar)
-        self.assertEqual(self.ids(ordered), ["a", "c", "b"])  # a clears the bar; c and b are weak and follow by score
+        self.assertEqual(self.ids(ordered), ["a", "b", "c"])
         self.assertEqual(skipped, [])
         self.assertEqual(weak_source_reasons(self.POOL[0], bar), [])
-        self.assertIn("below the bar", weak_source_reasons(self.POOL[1], bar)[0])
-        self.assertIn("action WATCH", weak_source_reasons(self.POOL[2], bar)[0])
+        self.assertIn("diagnostic bar", weak_source_reasons(self.POOL[1], bar)[0])
+        self.assertIn("diagnostic set", weak_source_reasons(self.POOL[2], bar)[0])
         self.assertEqual(select_transfer_candidate(self.POOL, bar)[0]["id"], "a")
 
-    def test_flag_mode_puts_a_strong_lower_ranked_source_before_a_weak_higher_scored_one(self):
+    def test_score_based_ordering_is_never_used(self):
         pool = [cand("watch", 70.0, action="WATCH"), cand("deep", 62.0)]
         bar = SourceThreshold(allowed_actions=("DEEP",))
-        self.assertEqual(self.ids(rank_transfer_candidates(pool, bar)[0]), ["deep", "watch"])
+        self.assertEqual(self.ids(rank_transfer_candidates(pool, bar)[0]), ["watch", "deep"])
 
-    def test_enforce_mode_drops_weak_sources_with_a_reason(self):
+    def test_enforce_setting_is_diagnostic_and_never_drops_pattern_sources(self):
         bar = SourceThreshold(min_final_score=65.0, mode="enforce")
         ordered, skipped = rank_transfer_candidates(self.POOL, bar)
-        self.assertEqual(self.ids(ordered), ["a"])
-        self.assertEqual(len(skipped), 2)
-        self.assertTrue(all("WEAK_SOURCE" in x for x in skipped))
+        self.assertEqual(self.ids(ordered), ["a", "b", "c"])
+        self.assertEqual(skipped, [])
+        self.assertTrue(weak_source_reasons(self.POOL[1], bar))
 
-    def test_hard_conditions_still_win_over_any_bar(self):
-        rejected = cand("r", 99.0, gate=False, action="REJECT")
-        ordered, skipped = rank_transfer_candidates([rejected], SourceThreshold(min_final_score=1.0))
-        self.assertEqual(ordered, [])
-        self.assertIn("REJECT", skipped[0])
+    def test_money_gate_and_scorer_reject_do_not_block_under_any_threshold(self):
+        rejected = cand("r", 1.0, gate=False, action="REJECT")
+        ordered, skipped = rank_transfer_candidates([rejected], SourceThreshold(min_final_score=99.0, mode="enforce"))
+        self.assertEqual([item["id"] for item in ordered], ["r"])
+        self.assertEqual(skipped, [])
 
 
 class LedgerTests(unittest.TestCase):
-    def test_every_candidate_gets_a_row_with_the_facts_we_need_to_pick_a_bar_later(self):
+    def test_every_candidate_gets_a_row_with_commercial_fields_as_diagnostics(self):
         pool = [cand("a", 66.0), cand("b", 57.0), cand("x", 40.0, gate=False, action="REJECT")]
         bar = SourceThreshold(min_final_score=60.0)
         rows = build_ledger(
@@ -266,9 +294,10 @@ class LedgerTests(unittest.TestCase):
         self.assertEqual((by_id["b"]["rank"], by_id["b"]["weak_source"]), (2, True))
         self.assertEqual((by_id["b"]["gate_verdict"], by_id["b"]["qa_verdict"], by_id["b"]["outcome"]),
                          ("ACCEPTED", "PASS", "DELIVERED_PASS"))
-        self.assertFalse(by_id["x"]["eligible"])
-        self.assertIsNone(by_id["x"]["rank"])
-        self.assertIn("REJECT", by_id["x"]["block_reason"])
+        self.assertTrue(by_id["x"]["eligible"])
+        self.assertEqual(by_id["x"]["rank"], 3)
+        self.assertIsNone(by_id["x"]["block_reason"])
+        self.assertEqual(by_id["x"]["admission_contract"], "PATTERN_SOURCE_V1")
         self.assertEqual(by_id["x"]["gate_verdict"], "NOT_REACHED")
         self.assertEqual(by_id["x"]["analysis_status"], "NOT_TRIED")
 
@@ -333,18 +362,15 @@ class WorkflowThresholdIntegrationTests(unittest.TestCase):
         self.assertIn("below the bar", live["weak_source_reasons"][0])
         self.assertTrue(all(r["weak_source"] for r in ledger["candidates"]))
 
-    def test_enforce_mode_stops_honestly_when_nothing_qualifies(self):
+    def test_enforce_setting_is_diagnostic_and_does_not_block_all(self):
         done, live, ledger = self.run_workflow(
             {"analysis": {}, "produce": {"a": self.OK, "b": self.OK, "c": self.OK}},
             source_selection={"min_final_score": 75, "mode": "enforce"})
-        self.assertEqual(done.returncode, 4)
-        self.assertIn("NO_QUALIFIED_SOURCE", done.stderr)
-        self.assertEqual(live["failure_class"], "NO_QUALIFIED_SOURCE")
-        self.assertEqual(live["provider_calls_made"], 0)
-        self.assertEqual(len(live["skipped_candidates"]), 3)
-        self.assertTrue(all("WEAK_SOURCE" in x for x in live["skipped_candidates"]))
-        self.assertTrue(all(r["rank"] is None for r in ledger["candidates"]))
-        self.assertTrue(all(r["analysis_status"] == "NOT_TRIED" for r in ledger["candidates"]))
+        self.assertEqual(done.returncode, 0, done.stderr[-800:])
+        self.assertEqual(live["candidate_id"], "a")
+        self.assertTrue(live["weak_source"])
+        self.assertTrue(all(row["eligible"] for row in ledger["candidates"]))
+        self.assertTrue(all(row["rank"] is not None for row in ledger["candidates"]))
 
     def test_no_eligible_source_at_all_is_also_no_qualified_source(self):
         done, live, _ = self.run_workflow({"analysis": {}, "produce": {}}, scores=())

@@ -1,25 +1,27 @@
-"""Source selection for automatic transfer production.
+"""Canonical source admission for pattern extraction and downstream ALL handoff.
 
-Automatic transfer candidates must pass the strict source-commercial gate. Separate pattern-extraction
-helpers remain available for explicitly selected/manual analysis flows.
+PATTERN_SOURCE_V1 decides whether a FIND result may be inspected for its creative
+mechanism. Scorer action, money-gate labels and performance proxies are audit
+evidence, not admission criteria. Target-Fit remains the later transferability gate.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 
 from .fit import ADJACENT_MECHANISM, TARGET_PRODUCT
 
 AUTO_ALLOWED_CLASSES = ("DIRECT", "EXPANDED")
+VIDEO_DURATION_RANGES = ("all", "up_to_40", "40_to_60", "60_to_90", "over_90")
+PATTERN_SOURCE_CONTRACT = "PATTERN_SOURCE_V1"
 
 
 @dataclass(frozen=True)
 class SourceThreshold:
-    """Optional strength bar for automatic sources. OFF by default: no number is hard-wired.
+    """Legacy score threshold retained as a diagnostic-only WEAK_SOURCE flag.
 
-    Hard conditions in block_reason (video, scorer not REJECT, no hard-exclude, ...) always apply.
-    This bar is only about how strong a *usable* source looks. In "flag" mode a source below the bar is kept
-    and marked WEAK_SOURCE (and ranked after the qualified ones); in "enforce" mode it is dropped, and when
-    nothing is left the run stops honestly with NO_QUALIFIED_SOURCE instead of producing a weak creative.
+    Historical settings remain readable. Even mode='enforce' no longer creates
+    a second gate or changes FIND order.
     """
     min_final_score: float | None = None
     allowed_actions: tuple = ()
@@ -37,7 +39,7 @@ class SourceThreshold:
 
 
 def weak_source_reasons(candidate: dict, threshold: SourceThreshold | None) -> list:
-    """Reasons a usable source is below the configured bar. Empty when no bar is set or the source clears it."""
+    """Return score/action observations only; never used to determine eligibility."""
     if threshold is None or not threshold.active or not isinstance(candidate, dict):
         return []
     score = candidate.get("source_score") or {}
@@ -46,35 +48,57 @@ def weak_source_reasons(candidate: dict, threshold: SourceThreshold | None) -> l
     if threshold.min_final_score is not None:
         value = score.get("final_score")
         if isinstance(value, bool) or not isinstance(value, (int, float)):
-            reasons.append(f"final_score {value!r} is missing or not a number (bar {threshold.min_final_score:g})")
+            reasons.append(f"final_score {value!r} is missing or not a number (diagnostic bar {threshold.min_final_score:g})")
         elif value < threshold.min_final_score:
-            reasons.append(f"final_score {value:g} is below the bar {threshold.min_final_score:g}")
+            reasons.append(f"final_score {value:g} is below the diagnostic bar {threshold.min_final_score:g}")
     if threshold.allowed_actions:
         action = str(score.get("action") or "").upper()
         if action not in threshold.allowed_actions:
-            reasons.append(f"scorer action {action or 'MISSING'} is not in {', '.join(threshold.allowed_actions)}")
+            reasons.append(f"scorer action {action or 'MISSING'} is not in diagnostic set {', '.join(threshold.allowed_actions)}")
     return reasons
+
+
+def video_duration_filter_reason(record: dict, selected_range: str = "all") -> str | None:
+    """Shared implementation of the operator-selected FIND duration filter."""
+    selected_range = str(selected_range or "all").strip().lower()
+    if selected_range not in VIDEO_DURATION_RANGES:
+        raise ValueError(f"video_duration_range must be one of {VIDEO_DURATION_RANGES}")
+    if selected_range == "all":
+        return None
+    record = record if isinstance(record, dict) else {}
+    raw = record.get("duration_seconds")
+    if isinstance(raw, bool) or raw in (None, "", []):
+        return "VIDEO_DURATION_UNKNOWN"
+    try:
+        duration = float(raw)
+    except (TypeError, ValueError, OverflowError):
+        return "VIDEO_DURATION_UNKNOWN"
+    if not math.isfinite(duration) or duration <= 0:
+        return "VIDEO_DURATION_UNKNOWN"
+    matches = {
+        "up_to_40": duration <= 40,
+        "40_to_60": 40 < duration <= 60,
+        "60_to_90": 60 < duration <= 90,
+        "over_90": duration > 90,
+    }[selected_range]
+    return None if matches else "VIDEO_DURATION_OUT_OF_RANGE"
 
 
 def effective_source_classification(candidate: dict) -> str:
     """Resolve a verified FIND product role against the legacy relevance label.
 
-    The legacy label remains unchanged unless FIND supplies positive source-body promotion
-    evidence. A verified target product maps to DIRECT; a verified adjacent product maps to
-    EXPANDED. Missing or incomplete role evidence never upgrades an UNVERIFIED source.
+    Kept for diagnostics and reports only. It is not a pattern-admission score.
     """
     check = candidate.get("source_check") or {}
     classification = str(check.get("classification") or "").upper()
     if check.get("excluded") or classification == "HARD_EXCLUDE":
         return classification or "HARD_EXCLUDE"
-
     role_info = candidate.get("source_selection")
     if not isinstance(role_info, dict):
         return classification
     role = str(role_info.get("role") or "").upper()
     promoted = role_info.get("promotion_evidence") is True
     target_promoted = role_info.get("target_promotion_evidence") is True
-
     if role == TARGET_PRODUCT and promoted and target_promoted:
         return "DIRECT"
     if role == ADJACENT_MECHANISM and promoted:
@@ -82,112 +106,99 @@ def effective_source_classification(candidate: dict) -> str:
     return classification
 
 
-def block_reason(candidate: dict, allowed_classes=AUTO_ALLOWED_CLASSES, min_final_score=None) -> str:
-    """Empty string when the candidate passes the legacy strict source-commercial gate."""
-    if not candidate.get("video_url"):
-        return "no video URL"
-
-    check = candidate.get("source_check") or {}
-    classification = str(check.get("classification") or "").upper()
-    if check.get("excluded") or classification == "HARD_EXCLUDE":
-        return "hard-excluded by the legacy source check"
-    classification = effective_source_classification(candidate)
-    if allowed_classes is not None and classification not in allowed_classes:
-        return f"source relevance {classification or 'MISSING'} is not one of {', '.join(allowed_classes)}"
-
-    score = candidate.get("source_score") or {}
-    if not isinstance(score, dict):
-        score = {}
-    action = str(score.get("action") or "").upper()
-    tags_raw = score.get("tags") or []
-    if isinstance(tags_raw, str):
-        tags = {tags_raw}
-    elif isinstance(tags_raw, (list, tuple, set)):
-        tags = {str(tag) for tag in tags_raw}
-    else:
-        tags = set()
-
-    components = score.get("components") or {}
-    components = components if isinstance(components, dict) else {}
-    money_gate = components.get("money_signal_gate") or {}
-    money_gate = money_gate if isinstance(money_gate, dict) else {}
-    duration = components.get("duration") or {}
-    duration = duration if isinstance(duration, dict) else {}
-
-    source_value_type = str(score.get("source_value_type") or "").upper()
-    try:
-        mechanism_score = float(score.get("mechanism_source_score") or 0)
-    except (TypeError, ValueError):
-        mechanism_score = 0.0
-    mechanism_pass = (
-        source_value_type in {"MECHANISM_SOURCE", "BOTH"} and mechanism_score >= 70.0
-    ) or "long_source_allowed_for_mechanism" in tags
-
-    # A scorer's explicit rejection is terminal. Mechanism-source is a separate path only
-    # when the scorer itself did not reject the candidate.
-    if action == "REJECT":
-        return "legacy scorer action is REJECT"
-
-    money_hard_block = money_gate.get("hard_block") is True or "money_signal_hard_block" in tags
-    if money_hard_block and not mechanism_pass:
-        return "money-signal hard block; no mechanism-source exception"
-
-    duration_hard_block = duration.get("hard_block") is True or "duration_over_60_hard_block" in tags
-    if duration_hard_block and not mechanism_pass:
-        return "duration hard block; no mechanism-source exception"
-
-    money_pass = money_gate.get("pass") is True or "money_signal_pass" in tags
-    if not money_pass and not mechanism_pass:
-        return "no explicit money-gate pass or mechanism-source score >= 70"
-
-    final_score = score.get("final_score")
-    if isinstance(final_score, (int, float)) and not isinstance(final_score, bool):
-        if final_score <= 0 and not mechanism_pass:
-            return f"final_score {final_score!r} is zero or below"
-        if min_final_score is not None and final_score < min_final_score:
-            return f"final_score {final_score!r} is below the required {min_final_score}"
-    elif min_final_score is not None:
-        return f"final_score {final_score!r} is below the required {min_final_score}"
-
-    return ""
-
-
-def select_candidate(candidates, allowed_classes=AUTO_ALLOWED_CLASSES, min_final_score=None):
-    """Return the first candidate passing the legacy strict source-commercial gate."""
-    skipped = []
-    for item in candidates or []:
-        reason = block_reason(item, allowed_classes, min_final_score)
-        if not reason:
-            return item, skipped
-        skipped.append(f"{item.get('id')}: {reason}")
-    return None, skipped
-
-
-
 def pattern_source_reason(candidate: dict) -> str:
-    """Return a blocker only when a source cannot safely be used to extract a pattern.
+    """Return the canonical PATTERN_SOURCE_V1 admission decision.
 
-    Deliberately does not check scorer action, money signals, score floors, duration,
-    or relevance labels. Those fields remain evidence/ranking metadata; they do not prove
-    whether a new target-native creative can be made from the source's pattern.
+    The contract checks media, source exclusion, FIND's verified role/promotion,
+    product-query match, attention coverage/floor when FIND records them, and the
+    operator's duration filter. It intentionally ignores commercial score/action,
+    Money Gate pass/hard-block flags, and all heuristic profitability proxies.
+    Older records without source_selection require a verified DIRECT/EXPANDED label.
     """
     if not isinstance(candidate, dict):
         return "candidate record is missing or invalid"
     if not candidate.get("video_url"):
-        return "no video URL"
+        return "no playable video URL"
 
     check = candidate.get("source_check") or {}
     if not isinstance(check, dict):
         check = {}
     classification = str(check.get("classification") or "").upper()
     if check.get("excluded") or classification == "HARD_EXCLUDE":
-        return "hard-excluded by the legacy source check"
+        return "hard-excluded by source verification"
+
+    selection = candidate.get("source_selection")
+    request = candidate.get("request") or {}
+    if not isinstance(request, dict):
+        request = {}
+    if isinstance(selection, dict):
+        mode = str(selection.get("mode") or request.get("selection_mode") or "product").strip().lower()
+        role = str(selection.get("role") or "").strip().upper()
+        promoted = selection.get("promotion_evidence") is True
+        if mode == "product":
+            if role != TARGET_PRODUCT:
+                return f"source role {role or 'MISSING'} is not TARGET_PRODUCT"
+            if not promoted:
+                return "target product lacks independent promotion evidence"
+        elif mode == "mechanism":
+            if role != ADJACENT_MECHANISM:
+                return f"source role {role or 'MISSING'} is not ADJACENT_MECHANISM"
+            if not promoted:
+                return "adjacent product lacks independent promotion evidence"
+        else:
+            return f"unsupported source-selection mode {mode!r}"
+
+        minimum_coverage = request.get("minimum_attention_coverage")
+        if minimum_coverage not in (None, ""):
+            attention = selection.get("attention") or {}
+            coverage = attention.get("coverage") if isinstance(attention, dict) else None
+            if isinstance(coverage, bool) or not isinstance(coverage, (int, float)):
+                return "FIND attention coverage is missing"
+            if coverage < float(minimum_coverage):
+                return f"attention coverage {coverage:g} is below the FIND minimum {float(minimum_coverage):g}"
+
+        attention_floor = request.get("attention_floor")
+        if attention_floor not in (None, ""):
+            attention = selection.get("attention") or {}
+            score = attention.get("score") if isinstance(attention, dict) else None
+            if isinstance(score, bool) or not isinstance(score, (int, float)):
+                return "FIND attention score is missing for the configured floor"
+            if score < float(attention_floor):
+                return f"attention score {score:g} is below the configured FIND floor {float(attention_floor):g}"
+    elif classification not in AUTO_ALLOWED_CLASSES:
+        return f"legacy source relevance {classification or 'MISSING'} is not verified"
+
+    legacy_record = candidate.get("legacy_record") or {}
+    query_match = candidate.get("query_product_match")
+    if not isinstance(query_match, dict) and isinstance(legacy_record, dict):
+        query_match = legacy_record.get("query_product_match")
+    if isinstance(query_match, dict) and query_match.get("matches") is not True:
+        return str(query_match.get("reason") or "source does not match the requested product query")
+
+    duration_range = str(request.get("video_duration_range") or "all").strip().lower()
+    duration_reason = video_duration_filter_reason(
+        {"duration_seconds": candidate.get("duration_seconds")}, duration_range
+    )
+    if duration_reason == "VIDEO_DURATION_UNKNOWN":
+        return f"selected duration range {duration_range} requires a known video duration"
+    if duration_reason == "VIDEO_DURATION_OUT_OF_RANGE":
+        return f"video duration does not match selected range {duration_range}"
 
     return ""
 
 
+def block_reason(candidate: dict, allowed_classes=AUTO_ALLOWED_CLASSES, min_final_score=None) -> str:
+    """Backward-compatible name for PATTERN_SOURCE_V1; legacy score arguments are ignored."""
+    return pattern_source_reason(candidate)
+
+
+def select_candidate(candidates, allowed_classes=AUTO_ALLOWED_CLASSES, min_final_score=None):
+    """Backward-compatible selector using PATTERN_SOURCE_V1 in FIND order."""
+    return select_pattern_candidate(candidates)
+
+
 def select_pattern_candidate(candidates):
-    """Choose the first playable, non-hard-excluded source in the existing FIND order."""
+    """Choose the first candidate passing PATTERN_SOURCE_V1, preserving input order."""
     skipped = []
     for item in candidates or []:
         reason = pattern_source_reason(item)
@@ -198,51 +209,37 @@ def select_pattern_candidate(candidates):
     return None, skipped
 
 
-RELEVANCE_TIEBREAK = {"DIRECT": 2, "EXPANDED": 1}
+def rank_pattern_candidates(candidates, threshold: SourceThreshold | None = None):
+    """Filter only on PATTERN_SOURCE_V1; preserve FIND order exactly.
 
-
-def _score(item) -> float:
-    score = (item.get("source_score") or {}) if isinstance(item, dict) else {}
-    try:
-        return float(score.get("final_score") or 0.0)
-    except (TypeError, ValueError):
-        return 0.0
-
-
-def rank_transfer_candidates(candidates, threshold: SourceThreshold | None = None):
-    """Return only commercially eligible transfer sources, ordered by score and relevance.
-
-    With an active threshold, sources that clear it rank first. Weak sources follow (flag mode) or are
-    dropped with a WEAK_SOURCE reason (enforce mode). Without a threshold the order is unchanged.
+    Threshold is accepted for backward compatibility and is diagnostic only.
+    Scores, scorer actions, commercial gates and relevance tie-breaks cannot
+    reorder or remove candidates before ANALYZE.
     """
-    usable, skipped = [], []
-    for position, item in enumerate(candidates or []):
-        reason = block_reason(item)
+    eligible, skipped = [], []
+    for item in candidates or []:
+        reason = pattern_source_reason(item)
         if reason:
             candidate_id = item.get("id") if isinstance(item, dict) else "<invalid>"
             skipped.append(f"{candidate_id}: {reason}")
-            continue
-        weak = weak_source_reasons(item, threshold)
-        if weak and threshold is not None and threshold.mode == "enforce":
-            skipped.append(f"{item.get('id')}: WEAK_SOURCE: " + "; ".join(weak))
-            continue
-        relevance = RELEVANCE_TIEBREAK.get(effective_source_classification(item), 0)
-        usable.append((1 if weak else 0, -_score(item), -relevance, position, item))
-    usable.sort(key=lambda row: row[:4])
-    return [row[4] for row in usable], skipped
+        else:
+            eligible.append(item)
+    return eligible, skipped
+
+
+def rank_transfer_candidates(candidates, threshold: SourceThreshold | None = None):
+    """Deprecated compatibility alias; automatic analysis is not commercial approval."""
+    return rank_pattern_candidates(candidates, threshold)
+
 
 def select_transfer_candidate(candidates, threshold: SourceThreshold | None = None):
-    """Select the highest-ranked candidate passing the strict commercial eligibility gate."""
-    ordered, skipped = rank_transfer_candidates(candidates, threshold)
+    """Deprecated compatibility alias for the first PATTERN_SOURCE_V1 candidate."""
+    ordered, skipped = rank_pattern_candidates(candidates, threshold)
     return (ordered[0] if ordered else None), skipped
 
 
 def analysis_review_reason(candidate: dict, allowed_classes=None) -> str:
-    """Backward-compatible alias for the former analysis-only gate.
-
-    allowed_classes is accepted for older callers but intentionally does not gate
-    pattern extraction. Relevance labels and commercial scores remain visible as evidence.
-    """
+    """Backward-compatible alias for the canonical pattern-source contract."""
     return pattern_source_reason(candidate)
 
 

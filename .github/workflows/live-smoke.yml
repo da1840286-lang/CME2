@@ -744,7 +744,7 @@ jobs:
                            "title": c.get("title"), "source_url": c.get("source_url"),
                            "video_url_present": bool(c.get("video_url")),
                            "final_score": score.get("final_score") if isinstance(score, dict) else None,
-                           "source_check": c.get("source_check"), "stage": c.get("stage"), "source_gate_eligible": c.get("source_gate_eligible"), "target_fit_status": c.get("target_fit_status"), "source_selection": c.get("source_selection") or {},
+                           "source_check": c.get("source_check"), "stage": c.get("stage"), "source_gate_eligible": c.get("source_gate_eligible"), "analysis_eligibility": c.get("analysis_eligibility") or {}, "target_fit_status": c.get("target_fit_status"), "source_selection": c.get("source_selection") or {},
                            "performance_evidence": c.get("performance_evidence") or {},
                            "commercial_evidence": c.get("commercial_evidence") or {},
                            "playback_metrics": {k: (c.get("metrics") or {}).get(k, {}).get("value")
@@ -840,7 +840,6 @@ jobs:
           gate = gate if isinstance(gate, dict) else {}
           out_selected = {"candidate_id": cid, "stage": "analyze", "decision": "PATTERN_EXTRACTION_ONLY",
                           "source_use_policy": "PATTERN_EXTRACTION_NOT_COMMERCIAL_APPROVAL",
-                          "commercial_gate_passed": bool(gate.get("pass")),
                           "brand": candidate.get("brand_name") or candidate.get("brand"),
                           "title": candidate.get("title"), "source_url": candidate.get("source_url"),
                           "source_check": candidate.get("source_check"), "source_score": score}
@@ -882,7 +881,6 @@ jobs:
               analysis = {"candidate_id": cid, "analysis_id": status.get("analysis_id"), "status": status.get("status"),
                           "selection_mode": "manual_from_prior_find", "decision": "PATTERN_EXTRACTION_ONLY",
                           "source_use_policy": "PATTERN_EXTRACTION_NOT_COMMERCIAL_APPROVAL",
-                          "commercial_gate_passed": bool(gate.get("pass")),
                           "source_relevance": source_check.get("classification", "UNKNOWN"),
                           "source_score": score.get("final_score"),
                           "source_evidence_scope": "six sampled video frames only; mechanism and transferability remain hypotheses",
@@ -899,7 +897,6 @@ jobs:
               if status.get("status") != "OK":
                   raise SystemExit(5 if status.get("status") in {"API_ERROR", "INVALID_OUTPUT"} else 4)
               source_contract = {"status": "OK", "candidate_id": cid, "analysis_id": status.get("analysis_id"),
-                                 "result": saved.get("result"), "commercial_gate_passed": bool(gate.get("pass")),
                                  "source_use_policy": "PATTERN_EXTRACTION_NOT_COMMERCIAL_APPROVAL",
                                  "review_status": "PATTERN_EXTRACTED_COMMERCIAL_PERFORMANCE_UNVERIFIED",
                                  "source_scope": "sampled frames only; mechanism and transferability remain hypotheses"}
@@ -915,22 +912,21 @@ jobs:
           from cme.radar.server import ROOT, RadarApp
 
           out = Path("out").resolve()
-          from cme.radar.select import pattern_source_reason, select_transfer_candidate
-          from cme.radar.select import rank_transfer_candidates
+          from cme.radar.select import pattern_source_reason, rank_pattern_candidates
           from cme.radar.source_loop import analyze_with_invalid_output_retry
           from cme.radar.select import SourceThreshold, weak_source_reasons
           from cme.radar.ledger import build_ledger
           from cme.registry import load_settings
           import sys
 
-          # Optional strength bar from settings.json (source_selection). OFF unless configured: a weak source is
-          # flagged WEAK_SOURCE ("flag") or dropped ("enforce"), never silently accepted or silently hidden.
+          # Legacy source_selection bars are diagnostics only; they never veto or reorder ANALYZE admission.
           _settings_file = ROOT / "settings.json"
           threshold = (SourceThreshold.from_settings(load_settings(_settings_file))
                        if _settings_file.is_file() else SourceThreshold())
           threshold_info = {"active": threshold.active, "mode": threshold.mode,
                             "min_final_score": threshold.min_final_score,
-                            "allowed_actions": list(threshold.allowed_actions)}
+                            "allowed_actions": list(threshold.allowed_actions),
+                            "effect": "diagnostic_only; does not block or reorder pattern analysis"}
 
           def write_ledger(all_candidates, **facts):
               rows = build_ledger(all_candidates, threshold, **facts)
@@ -1023,13 +1019,9 @@ jobs:
                           brand = str(c.get("brand") or "unknown brand")[:80]
                           url = c.get("source_url") if isinstance(c.get("source_url"), str) and str(c.get("source_url")).startswith("https://") else ""
                           summary.write(f"- candidate_id: {c['id']} — {brand}: {title}; score={c.get('final_score')}; video={'yes' if c.get('video_url_present') else 'no'}; performance={(c.get('performance_evidence') or {}).get('basis', 'unknown')}; commercial_evidence={(c.get('commercial_evidence') or {}).get('level', 'unknown')}; playback={ {k: (c.get('metrics') or {}).get(k, {}).get('value') for k in ('ctr', 'cvr', 'play_2s_rate', 'play_6s_rate') if k in (c.get('metrics') or {})} }; {url}\n")
-                      summary.write("\nFIND shortlist admission uses product-type relevance and the strongest available performance evidence. Playback rates remain optional; commercial_evidence describes observed signals and is not a profitability forecast. Automatic stage=all still enforces source-commercial/mechanism and Target-Fit transfer gates; an explicit candidate_id permits source inspection, not a commercial-success claim.\n")
+                      summary.write("\nFIND applies source-role, promotion, query, attention and explicit operator filters, then records PATTERN_SOURCE_V1 eligibility. ALL consumes the shortlist in FIND order. Commercial metrics and scorer actions are diagnostics only; Target-Fit decides transferability downstream.\n")
               candidates = json.loads(candidates_file.read_text(encoding="utf-8")).get("candidates", [])
-              candidate, skipped = select_transfer_candidate(candidates, threshold)
-              candidate_pool, ranked_skipped = rank_transfer_candidates(candidates, threshold)
-              if candidate is not None:
-                  candidate_pool = [candidate] + [item for item in candidate_pool if item.get("id") != candidate.get("id")]
-              skipped = ranked_skipped
+              candidate_pool, skipped = rank_pattern_candidates(candidates)
               if not candidate_pool:
                   stats = json.loads(candidates_file.read_text(encoding="utf-8")).get("stats") or {}
                   diag = json.loads(candidates_file.read_text(encoding="utf-8")).get("diagnostics") or {}
@@ -1043,9 +1035,9 @@ jobs:
                                f"hard_excluded={stats.get('pre_visual_verification_hard_excluded_ads', 0)}; "
                                f"sponsored_queries={tried}. ")
                   skip_text = "; ".join(skipped[:5]) or "FIND returned no ranked candidates to evaluate."
-                  message = ("NO_QUALIFIED_SOURCE: FIND returned no commercially eligible transfer source (requires a video, no hard exclusion, "
-                             "a strict source-commercial pass" + (" and the configured source_selection bar" if threshold.active and threshold.mode == "enforce" else "")
-                             + "): " + skip_text + " " + diagnosis + "No analyst/generator calls were made.")
+                  message = ("NO_QUALIFIED_SOURCE: FIND returned no source eligible for pattern extraction (requires a playable video, no hard exclusion, "
+                             "and verified source-role/promotion evidence when role metadata is present): "
+                             + skip_text + " " + diagnosis + "No analyst/generator calls were made.")
                   write_ledger(candidates, failure_class="NO_QUALIFIED_SOURCE")
                   (out / "live_result.json").write_text(json.dumps(
                       {"status": "NO_QUALIFIED_SOURCE", "failure_class": "NO_QUALIFIED_SOURCE", "exit_code": 4,
@@ -1055,7 +1047,7 @@ jobs:
                       summary.write("## No qualified source\n\n" + message[:1500] + "\n\nSee candidates_ledger.json for every candidate and why it was not used.\n\n")
                   print(message, file=sys.stderr)
                   raise SystemExit(4)
-              selection_mode = "automatic_best_valid_ranked"
+              selection_mode = "automatic_find_order"
 
           work = Path("radar-work").resolve()
           if work.exists():
@@ -1107,8 +1099,8 @@ jobs:
                       money_gate = money_gate if isinstance(money_gate, dict) else {}
                       analysis = {"candidate_id": cid, "analysis_id": status.get("analysis_id"),
                                   "status": status.get("status"), "selection_mode": selection_mode,
-                                  "source_use_policy": "STRICT_COMMERCIAL_ELIGIBILITY_FOR_AUTO_TRANSFER",
-                                  "commercial_gate_passed": bool(money_gate.get("pass")),
+                                  "source_use_policy": "PATTERN_EXTRACTION_NOT_COMMERCIAL_APPROVAL",
+                                  "commercial_evidence": source.get("commercial_evidence") or {"level": "UNKNOWN"},
                                   "source_relevance": (source.get("source_check") or {}).get("classification", "UNKNOWN"),
                                   "source_score": score.get("final_score"),
                                   "source_evidence_scope": "six sampled video frames only; mechanism and transferability remain hypotheses",
@@ -1224,7 +1216,7 @@ jobs:
                   analysis_next = {"candidate_id": source_id, "analysis_id": status_next.get("analysis_id"),
                                    "status": status_next.get("status"), "selection_mode": selection_mode,
                                    "source_use_policy": "PATTERN_EXTRACTION_NOT_COMMERCIAL_APPROVAL",
-                                   "commercial_gate_passed": bool(money_next.get("pass")),
+                                   "commercial_evidence": source.get("commercial_evidence") or {"level": "UNKNOWN"},
                                    "source_relevance": (source.get("source_check") or {}).get("classification", "UNKNOWN"),
                                    "source_score": score_next.get("final_score"),
                                    "source_evidence_scope": "six sampled video frames only; mechanism and transferability remain hypotheses",
