@@ -200,6 +200,7 @@ class SourceThresholdTests(unittest.TestCase):
 
     def test_verified_adjacent_product_role_is_valid_only_in_mechanism_mode(self):
         candidate = self.product_candidate(role="ADJACENT_MECHANISM", target_promoted=False)
+        candidate["query_product_match"] = {"matches": True, "query_anchor": "air duster"}
         self.assertEqual(effective_source_classification(candidate), "EXPANDED")
         self.assertEqual(block_reason(candidate), "")
         candidate["source_selection"]["mode"] = "product"

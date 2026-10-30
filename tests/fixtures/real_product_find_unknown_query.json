@@ -1,0 +1,647 @@
+{
+  "source_run_id": 41090668585,
+  "source_commit": "b4d843a1b51025e0ababb71ebe68c8f8688156d7",
+  "target_offer": "Fanttik V8 Mate Cordless Car Vacuum",
+  "candidates": [
+    {
+      "id": "tiktok:ad:7636958303137860887",
+      "title": "Just ordered this vacuum, can’t believe how cheap it is. Totally impressed.#carcleaning #car #aspiradora #CordlessVacuumCleaner #CarCleaningTips ",
+      "brand": "belibuyappliances",
+      "brand_name": "BELIBUY appliances",
+      "country": "US",
+      "period_days": 180,
+      "source_url": "https://www.tiktok.com/@belibuyappliances/video/7636958303137860887",
+      "video_url": "https://fixture.invalid/source-video.mp4",
+      "duration_seconds": 35.852,
+      "source_check": {
+        "status": "UNKNOWN",
+        "classification": "UNVERIFIED",
+        "score": 5.0,
+        "excluded": [],
+        "reason": "brand=belibuyappliances belibuy appliances domain=tiktok.com industry= observed_direct_brands=[] direct_brands=[] direct_domains=[] identity=[] strong=[] topical=['car'] adjacent=[] hard_brand=[] hard_domain=[] excluded=[] industry_conflict=False software_industry=False context_required_brand_hits=[] classification=UNVERIFIED mode=strict. Target context intentionally excluded from source classification.",
+        "product_relevance": {},
+        "scope": null
+      },
+      "source_selection": {
+        "mode": "product",
+        "role": "TARGET_PRODUCT",
+        "role_reason": "Target product noun is tied to source-body promotion/action. Target use context is present.",
+        "source_body_evidence": "Just ordered this vacuum, can’t believe how cheap it is. Totally impressed.#carcleaning #car #aspiradora #CordlessVacuumCleaner #CarCleaningTips",
+        "target_anchor": "vacuum",
+        "target_mention_source": "body",
+        "matched_target_terms": [
+          "vacuum"
+        ],
+        "detected_product_nouns": [
+          "vacuum"
+        ],
+        "promotion_evidence": true,
+        "target_promotion_evidence": true,
+        "promo_signals": [
+          "paid_ad_inventory"
+        ],
+        "context_verified": true,
+        "confidence": "MEDIUM",
+        "attention": {
+          "version": "attention_rank_v1",
+          "score": 64.84,
+          "rank": 64.84,
+          "base_score": 64.84,
+          "coverage": 1.0,
+          "components": {
+            "reach": 100.0,
+            "amplification": 100.0,
+            "save_rate": 18.31,
+            "share_rate": 47.14,
+            "like_rate": 15.61,
+            "recency": 50.94
+          },
+          "available_fields": [
+            "author_followers",
+            "likes",
+            "published_at",
+            "saves",
+            "shares",
+            "views"
+          ],
+          "missing_components": [],
+          "period_days": 180,
+          "age_days": 176.62,
+          "is_commercial_proof": false,
+          "warning": "Attention proxy only; not sales, conversion, profit, or causal-mechanism evidence."
+        },
+        "attention_is_commercial_proof": false,
+        "decision": "SELECTED_TARGET_PRODUCT",
+        "reason": "Promoted target-class product passed the source-body, media, and attention-proxy gates. The existing legacy pre-video source score is attached; attention and score are not proof of sales or profit. Causal mechanism, transferability, and independent Target-Fit remain downstream."
+      },
+      "legacy_record": {
+        "ad_id": "7636958303137860887",
+        "video_id": null,
+        "source_url": "https://www.tiktok.com/@belibuyappliances/video/7636958303137860887",
+        "video_url": "https://fixture.invalid/source-video.mp4",
+        "title": "Just ordered this vacuum, can’t believe how cheap it is. Totally impressed.#carcleaning #car #aspiradora #CordlessVacuumCleaner #CarCleaningTips ",
+        "duration_seconds": 35.852,
+        "brand": "belibuyappliances",
+        "brand_name": "BELIBUY appliances",
+        "industry": null,
+        "discovery_source": "tiktok_sponsored_search",
+        "discovery_boards": [
+          "sponsored_search"
+        ],
+        "discovery_keywords": [
+          "car vacuum"
+        ],
+        "raw": {
+          "post": {
+            "content": {
+              "text": "Just ordered this vacuum, can’t believe how cheap it is. Totally impressed.#carcleaning #car #aspiradora #CordlessVacuumCleaner #CarCleaningTips "
+            }
+          }
+        },
+        "source_role_info": {
+          "role": "TARGET_PRODUCT",
+          "reason": "Target product noun is tied to source-body promotion/action. Target use context is present.",
+          "source_body_evidence": "Just ordered this vacuum, can’t believe how cheap it is. Totally impressed.#carcleaning #car #aspiradora #CordlessVacuumCleaner #CarCleaningTips",
+          "target_anchor": "vacuum",
+          "target_mention_source": "body",
+          "matched_target_terms": [
+            "vacuum"
+          ],
+          "detected_product_nouns": [
+            "vacuum"
+          ],
+          "promotion_evidence": true,
+          "target_promotion_evidence": true,
+          "promo_signals": [
+            "paid_ad_inventory"
+          ],
+          "context_verified": true,
+          "confidence": "MEDIUM"
+        },
+        "attention_score": {
+          "version": "attention_rank_v1",
+          "score": 64.84,
+          "rank": 64.84,
+          "base_score": 64.84,
+          "coverage": 1.0,
+          "components": {
+            "reach": 100.0,
+            "amplification": 100.0,
+            "save_rate": 18.31,
+            "share_rate": 47.14,
+            "like_rate": 15.61,
+            "recency": 50.94
+          },
+          "available_fields": [
+            "author_followers",
+            "likes",
+            "published_at",
+            "saves",
+            "shares",
+            "views"
+          ],
+          "missing_components": [],
+          "period_days": 180,
+          "age_days": 176.62,
+          "is_commercial_proof": false,
+          "warning": "Attention proxy only; not sales, conversion, profit, or causal-mechanism evidence."
+        }
+      },
+      "request": {
+        "country": "US",
+        "period": 180,
+        "selection_mode": "product",
+        "video_duration_range": "all",
+        "target_offer": "Fanttik V8 Mate Cordless Car Vacuum",
+        "product_type": "cordless handheld car vacuum",
+        "product_category": "vacuum"
+      },
+      "stage": "PATTERN_CANDIDATE",
+      "source_gate_eligible": true,
+      "transfer_eligible": true,
+      "target_fit_status": "NOT_EVALUATED"
+    },
+    {
+      "id": "tiktok:ad:7649093627372653837",
+      "title": "Mini cordless vacuum cleaner for my car  . . . . . . #vacuumcleaner #cordlessvacuum #carvacuum #dealsforyoudays ",
+      "brand": "molly_poppinss",
+      "brand_name": "Poppinss🇳🇬💕",
+      "country": "US",
+      "period_days": 180,
+      "source_url": "https://www.tiktok.com/@molly_poppinss/video/7649093627372653837",
+      "video_url": "https://fixture.invalid/source-video.mp4",
+      "duration_seconds": 38.0,
+      "source_check": {
+        "status": "UNKNOWN",
+        "classification": "UNVERIFIED",
+        "score": 11.0,
+        "excluded": [],
+        "reason": "brand=molly_poppinss poppinss🇳🇬💕 domain=tiktok.com industry= observed_direct_brands=[] direct_brands=[] direct_domains=[] identity=[] strong=[] topical=['car', 'cleaner'] adjacent=['cleaner'] hard_brand=[] hard_domain=[] excluded=[] industry_conflict=False software_industry=False context_required_brand_hits=[] classification=UNVERIFIED mode=strict. Target context intentionally excluded from source classification.",
+        "product_relevance": {},
+        "scope": null
+      },
+      "source_selection": {
+        "mode": "product",
+        "role": "TARGET_PRODUCT",
+        "role_reason": "Target product noun is tied to source-body promotion/action. Target use context is present.",
+        "source_body_evidence": "Mini cordless vacuum cleaner for my car . . . . . . #vacuumcleaner #cordlessvacuum #carvacuum #dealsforyoudays",
+        "target_anchor": "vacuum",
+        "target_mention_source": "body",
+        "matched_target_terms": [
+          "car",
+          "vacuum"
+        ],
+        "detected_product_nouns": [
+          "vacuum",
+          "cleaner"
+        ],
+        "promotion_evidence": true,
+        "target_promotion_evidence": true,
+        "promo_signals": [
+          "paid_ad_inventory"
+        ],
+        "context_verified": true,
+        "confidence": "MEDIUM",
+        "attention": {
+          "version": "attention_rank_v1",
+          "score": 64.78,
+          "rank": 64.78,
+          "base_score": 64.78,
+          "coverage": 1.0,
+          "components": {
+            "reach": 98.67,
+            "amplification": 42.01,
+            "save_rate": 58.02,
+            "share_rate": 41.38,
+            "like_rate": 59.62,
+            "recency": 60.02
+          },
+          "available_fields": [
+            "author_followers",
+            "likes",
+            "published_at",
+            "saves",
+            "shares",
+            "views"
+          ],
+          "missing_components": [],
+          "period_days": 180,
+          "age_days": 143.92,
+          "is_commercial_proof": false,
+          "warning": "Attention proxy only; not sales, conversion, profit, or causal-mechanism evidence."
+        },
+        "attention_is_commercial_proof": false,
+        "decision": "SELECTED_TARGET_PRODUCT",
+        "reason": "Promoted target-class product passed the source-body, media, and attention-proxy gates. The existing legacy pre-video source score is attached; attention and score are not proof of sales or profit. Causal mechanism, transferability, and independent Target-Fit remain downstream."
+      },
+      "legacy_record": {
+        "ad_id": "7649093627372653837",
+        "video_id": null,
+        "source_url": "https://www.tiktok.com/@molly_poppinss/video/7649093627372653837",
+        "video_url": "https://fixture.invalid/source-video.mp4",
+        "title": "Mini cordless vacuum cleaner for my car  . . . . . . #vacuumcleaner #cordlessvacuum #carvacuum #dealsforyoudays ",
+        "duration_seconds": 38.0,
+        "brand": "molly_poppinss",
+        "brand_name": "Poppinss🇳🇬💕",
+        "industry": null,
+        "discovery_source": "tiktok_sponsored_search",
+        "discovery_boards": [
+          "sponsored_search"
+        ],
+        "discovery_keywords": [
+          "car vacuum"
+        ],
+        "raw": {
+          "post": {
+            "content": {
+              "text": "Mini cordless vacuum cleaner for my car  . . . . . . #vacuumcleaner #cordlessvacuum #carvacuum #dealsforyoudays "
+            }
+          }
+        },
+        "source_role_info": {
+          "role": "TARGET_PRODUCT",
+          "reason": "Target product noun is tied to source-body promotion/action. Target use context is present.",
+          "source_body_evidence": "Mini cordless vacuum cleaner for my car . . . . . . #vacuumcleaner #cordlessvacuum #carvacuum #dealsforyoudays",
+          "target_anchor": "vacuum",
+          "target_mention_source": "body",
+          "matched_target_terms": [
+            "car",
+            "vacuum"
+          ],
+          "detected_product_nouns": [
+            "vacuum",
+            "cleaner"
+          ],
+          "promotion_evidence": true,
+          "target_promotion_evidence": true,
+          "promo_signals": [
+            "paid_ad_inventory"
+          ],
+          "context_verified": true,
+          "confidence": "MEDIUM"
+        },
+        "attention_score": {
+          "version": "attention_rank_v1",
+          "score": 64.78,
+          "rank": 64.78,
+          "base_score": 64.78,
+          "coverage": 1.0,
+          "components": {
+            "reach": 98.67,
+            "amplification": 42.01,
+            "save_rate": 58.02,
+            "share_rate": 41.38,
+            "like_rate": 59.62,
+            "recency": 60.02
+          },
+          "available_fields": [
+            "author_followers",
+            "likes",
+            "published_at",
+            "saves",
+            "shares",
+            "views"
+          ],
+          "missing_components": [],
+          "period_days": 180,
+          "age_days": 143.92,
+          "is_commercial_proof": false,
+          "warning": "Attention proxy only; not sales, conversion, profit, or causal-mechanism evidence."
+        }
+      },
+      "request": {
+        "country": "US",
+        "period": 180,
+        "selection_mode": "product",
+        "video_duration_range": "all",
+        "target_offer": "Fanttik V8 Mate Cordless Car Vacuum",
+        "product_type": "cordless handheld car vacuum",
+        "product_category": "vacuum"
+      },
+      "stage": "PATTERN_CANDIDATE",
+      "source_gate_eligible": true,
+      "transfer_eligible": true,
+      "target_fit_status": "NOT_EVALUATED"
+    },
+    {
+      "id": "tiktok:ad:7694926331196280086",
+      "title": "Annoying crumbs and pet hair all over your seats? This cordless vacuum helps keep your car tidy with ease 🚗 #carvacuumcleaner #carcleaning #GapCleaning #tiktokshop #fyp",
+      "brand": "lznn2832pg0",
+      "brand_name": "CarWashBlowHero0",
+      "country": "US",
+      "period_days": 180,
+      "source_url": "https://www.tiktok.com/@lznn2832pg0/video/7694926331196280086",
+      "video_url": "https://fixture.invalid/source-video.mp4",
+      "duration_seconds": 64.634,
+      "source_check": {
+        "status": "UNKNOWN",
+        "classification": "UNVERIFIED",
+        "score": 11.0,
+        "excluded": [],
+        "reason": "brand=lznn2832pg0 carwashblowhero0 domain=tiktok.com industry= observed_direct_brands=[] direct_brands=[] direct_domains=[] identity=[] strong=[] topical=['pet', 'car'] adjacent=['pet'] hard_brand=[] hard_domain=[] excluded=[] industry_conflict=False software_industry=False context_required_brand_hits=[] classification=UNVERIFIED mode=strict. Target context intentionally excluded from source classification.",
+        "product_relevance": {},
+        "scope": null
+      },
+      "source_selection": {
+        "mode": "product",
+        "role": "TARGET_PRODUCT",
+        "role_reason": "Target product noun is tied to source-body promotion/action. Target use context is present.",
+        "source_body_evidence": "Annoying crumbs and pet hair all over your seats? This cordless vacuum helps keep your car tidy with ease 🚗 #carvacuumcleaner #carcleaning #GapCleaning #tiktokshop #fyp",
+        "target_anchor": "vacuum",
+        "target_mention_source": "body",
+        "matched_target_terms": [
+          "car",
+          "vacuum"
+        ],
+        "detected_product_nouns": [
+          "vacuum"
+        ],
+        "promotion_evidence": true,
+        "target_promotion_evidence": true,
+        "promo_signals": [
+          "commerce_hashtag"
+        ],
+        "context_verified": true,
+        "confidence": "MEDIUM",
+        "attention": {
+          "version": "attention_rank_v1",
+          "score": 55.62,
+          "rank": 55.62,
+          "base_score": 55.62,
+          "coverage": 1.0,
+          "components": {
+            "reach": 84.97,
+            "amplification": 84.03,
+            "save_rate": 16.74,
+            "share_rate": 30.36,
+            "like_rate": 7.04,
+            "recency": 94.35
+          },
+          "available_fields": [
+            "author_followers",
+            "likes",
+            "published_at",
+            "saves",
+            "shares",
+            "views"
+          ],
+          "missing_components": [],
+          "period_days": 180,
+          "age_days": 20.32,
+          "is_commercial_proof": false,
+          "warning": "Attention proxy only; not sales, conversion, profit, or causal-mechanism evidence."
+        },
+        "attention_is_commercial_proof": false,
+        "decision": "SELECTED_TARGET_PRODUCT",
+        "reason": "Promoted target-class product passed the source-body, media, and attention-proxy gates. The existing legacy pre-video source score is attached; attention and score are not proof of sales or profit. Causal mechanism, transferability, and independent Target-Fit remain downstream."
+      },
+      "legacy_record": {
+        "ad_id": "7694926331196280086",
+        "video_id": null,
+        "source_url": "https://www.tiktok.com/@lznn2832pg0/video/7694926331196280086",
+        "video_url": "https://fixture.invalid/source-video.mp4",
+        "title": "Annoying crumbs and pet hair all over your seats? This cordless vacuum helps keep your car tidy with ease 🚗 #carvacuumcleaner #carcleaning #GapCleaning #tiktokshop #fyp",
+        "duration_seconds": 64.634,
+        "brand": "lznn2832pg0",
+        "brand_name": "CarWashBlowHero0",
+        "industry": null,
+        "discovery_source": "tiktok_sponsored_search",
+        "discovery_boards": [
+          "sponsored_search"
+        ],
+        "discovery_keywords": [
+          "car vacuum"
+        ],
+        "raw": {
+          "post": {
+            "content": {
+              "text": "Annoying crumbs and pet hair all over your seats? This cordless vacuum helps keep your car tidy with ease 🚗 #carvacuumcleaner #carcleaning #GapCleaning #tiktokshop #fyp"
+            }
+          }
+        },
+        "source_role_info": {
+          "role": "TARGET_PRODUCT",
+          "reason": "Target product noun is tied to source-body promotion/action. Target use context is present.",
+          "source_body_evidence": "Annoying crumbs and pet hair all over your seats? This cordless vacuum helps keep your car tidy with ease 🚗 #carvacuumcleaner #carcleaning #GapCleaning #tiktokshop #fyp",
+          "target_anchor": "vacuum",
+          "target_mention_source": "body",
+          "matched_target_terms": [
+            "car",
+            "vacuum"
+          ],
+          "detected_product_nouns": [
+            "vacuum"
+          ],
+          "promotion_evidence": true,
+          "target_promotion_evidence": true,
+          "promo_signals": [
+            "commerce_hashtag"
+          ],
+          "context_verified": true,
+          "confidence": "MEDIUM"
+        },
+        "attention_score": {
+          "version": "attention_rank_v1",
+          "score": 55.62,
+          "rank": 55.62,
+          "base_score": 55.62,
+          "coverage": 1.0,
+          "components": {
+            "reach": 84.97,
+            "amplification": 84.03,
+            "save_rate": 16.74,
+            "share_rate": 30.36,
+            "like_rate": 7.04,
+            "recency": 94.35
+          },
+          "available_fields": [
+            "author_followers",
+            "likes",
+            "published_at",
+            "saves",
+            "shares",
+            "views"
+          ],
+          "missing_components": [],
+          "period_days": 180,
+          "age_days": 20.32,
+          "is_commercial_proof": false,
+          "warning": "Attention proxy only; not sales, conversion, profit, or causal-mechanism evidence."
+        }
+      },
+      "request": {
+        "country": "US",
+        "period": 180,
+        "selection_mode": "product",
+        "video_duration_range": "all",
+        "target_offer": "Fanttik V8 Mate Cordless Car Vacuum",
+        "product_type": "cordless handheld car vacuum",
+        "product_category": "vacuum"
+      },
+      "stage": "PATTERN_CANDIDATE",
+      "source_gate_eligible": true,
+      "transfer_eligible": true,
+      "target_fit_status": "NOT_EVALUATED"
+    },
+    {
+      "id": "tiktok:ad:7639989473530432798",
+      "title": "This is the best Cordless Vacuum Cleaner I’ve ever used lightweight,powerful,and so convenient🚗 #vacuumcleaner #carcleaning #tiktokshopdeals #portablevacuum#car ",
+      "brand": "tonyfrost6028",
+      "brand_name": "RottenLily",
+      "country": "US",
+      "period_days": 180,
+      "source_url": "https://www.tiktok.com/@tonyfrost6028/video/7639989473530432798",
+      "video_url": "https://fixture.invalid/source-video.mp4",
+      "duration_seconds": 11.734,
+      "source_check": {
+        "status": "UNKNOWN",
+        "classification": "UNVERIFIED",
+        "score": 11.0,
+        "excluded": [],
+        "reason": "brand=tonyfrost6028 rottenlily domain=tiktok.com industry= observed_direct_brands=[] direct_brands=[] direct_domains=[] identity=[] strong=[] topical=['car', 'cleaner'] adjacent=['cleaner'] hard_brand=[] hard_domain=[] excluded=[] industry_conflict=False software_industry=False context_required_brand_hits=[] classification=UNVERIFIED mode=strict. Target context intentionally excluded from source classification.",
+        "product_relevance": {},
+        "scope": null
+      },
+      "source_selection": {
+        "mode": "product",
+        "role": "TARGET_PRODUCT",
+        "role_reason": "Target product noun is tied to source-body promotion/action. Target use context is present.",
+        "source_body_evidence": "This is the best Cordless Vacuum Cleaner I’ve ever used lightweight,powerful,and so convenient🚗 #vacuumcleaner #carcleaning #tiktokshopdeals #portablevacuum#car",
+        "target_anchor": "vacuum",
+        "target_mention_source": "body",
+        "matched_target_terms": [
+          "vacuum"
+        ],
+        "detected_product_nouns": [
+          "vacuum",
+          "cleaner"
+        ],
+        "promotion_evidence": true,
+        "target_promotion_evidence": true,
+        "promo_signals": [
+          "paid_ad_inventory"
+        ],
+        "context_verified": true,
+        "confidence": "MEDIUM",
+        "attention": {
+          "version": "attention_rank_v1",
+          "score": 52.94,
+          "rank": 52.94,
+          "base_score": 52.94,
+          "coverage": 1.0,
+          "components": {
+            "reach": 99.68,
+            "amplification": 90.79,
+            "save_rate": 2.91,
+            "share_rate": 7.38,
+            "like_rate": 5.26,
+            "recency": 53.21
+          },
+          "available_fields": [
+            "author_followers",
+            "likes",
+            "published_at",
+            "saves",
+            "shares",
+            "views"
+          ],
+          "missing_components": [],
+          "period_days": 180,
+          "age_days": 168.45,
+          "is_commercial_proof": false,
+          "warning": "Attention proxy only; not sales, conversion, profit, or causal-mechanism evidence."
+        },
+        "attention_is_commercial_proof": false,
+        "decision": "SELECTED_TARGET_PRODUCT",
+        "reason": "Promoted target-class product passed the source-body, media, and attention-proxy gates. The existing legacy pre-video source score is attached; attention and score are not proof of sales or profit. Causal mechanism, transferability, and independent Target-Fit remain downstream."
+      },
+      "legacy_record": {
+        "ad_id": "7639989473530432798",
+        "video_id": null,
+        "source_url": "https://www.tiktok.com/@tonyfrost6028/video/7639989473530432798",
+        "video_url": "https://fixture.invalid/source-video.mp4",
+        "title": "This is the best Cordless Vacuum Cleaner I’ve ever used lightweight,powerful,and so convenient🚗 #vacuumcleaner #carcleaning #tiktokshopdeals #portablevacuum#car ",
+        "duration_seconds": 11.734,
+        "brand": "tonyfrost6028",
+        "brand_name": "RottenLily",
+        "industry": null,
+        "discovery_source": "tiktok_sponsored_search",
+        "discovery_boards": [
+          "sponsored_search"
+        ],
+        "discovery_keywords": [
+          "car vacuum"
+        ],
+        "raw": {
+          "post": {
+            "content": {
+              "text": "This is the best Cordless Vacuum Cleaner I’ve ever used lightweight,powerful,and so convenient🚗 #vacuumcleaner #carcleaning #tiktokshopdeals #portablevacuum#car "
+            }
+          }
+        },
+        "source_role_info": {
+          "role": "TARGET_PRODUCT",
+          "reason": "Target product noun is tied to source-body promotion/action. Target use context is present.",
+          "source_body_evidence": "This is the best Cordless Vacuum Cleaner I’ve ever used lightweight,powerful,and so convenient🚗 #vacuumcleaner #carcleaning #tiktokshopdeals #portablevacuum#car",
+          "target_anchor": "vacuum",
+          "target_mention_source": "body",
+          "matched_target_terms": [
+            "vacuum"
+          ],
+          "detected_product_nouns": [
+            "vacuum",
+            "cleaner"
+          ],
+          "promotion_evidence": true,
+          "target_promotion_evidence": true,
+          "promo_signals": [
+            "paid_ad_inventory"
+          ],
+          "context_verified": true,
+          "confidence": "MEDIUM"
+        },
+        "attention_score": {
+          "version": "attention_rank_v1",
+          "score": 52.94,
+          "rank": 52.94,
+          "base_score": 52.94,
+          "coverage": 1.0,
+          "components": {
+            "reach": 99.68,
+            "amplification": 90.79,
+            "save_rate": 2.91,
+            "share_rate": 7.38,
+            "like_rate": 5.26,
+            "recency": 53.21
+          },
+          "available_fields": [
+            "author_followers",
+            "likes",
+            "published_at",
+            "saves",
+            "shares",
+            "views"
+          ],
+          "missing_components": [],
+          "period_days": 180,
+          "age_days": 168.45,
+          "is_commercial_proof": false,
+          "warning": "Attention proxy only; not sales, conversion, profit, or causal-mechanism evidence."
+        }
+      },
+      "request": {
+        "country": "US",
+        "period": 180,
+        "selection_mode": "product",
+        "video_duration_range": "all",
+        "target_offer": "Fanttik V8 Mate Cordless Car Vacuum",
+        "product_type": "cordless handheld car vacuum",
+        "product_category": "vacuum"
+      },
+      "stage": "PATTERN_CANDIDATE",
+      "source_gate_eligible": true,
+      "transfer_eligible": true,
+      "target_fit_status": "NOT_EVALUATED"
+    }
+  ]
+}

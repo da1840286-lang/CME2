@@ -19,7 +19,7 @@ from .seen import SeenLedger, build_scope
 from .provider_contract import (
     CONTRACT_AWARE_MODE, contract_summary, plan_uses_contract, ordered_target_queries,
 )
-from .select import VIDEO_DURATION_RANGES, pattern_source_reason, video_duration_filter_reason
+from .select import VIDEO_DURATION_RANGES, sync_pattern_source_status, video_duration_filter_reason
 
 DATA_DIR = Path(__file__).resolve().parent / "data"
 # Search-only seeds for the live Sponsored Search lane. Keep separate from the
@@ -747,7 +747,7 @@ def to_candidate(item: dict, request: dict, collected_at: str, origin: str, sour
                          "scope": rec.get("discovery_scope")},
         "source_score": score,
         "product_relevance": rec.get("product_relevance") or {},
-        "query_product_match": rec.get("query_product_match") or {},
+        "query_product_match": rec.get("query_product_match") if isinstance(rec.get("query_product_match"), dict) else None,
         "performance_evidence": rec.get("performance_evidence") or {},
         "commercial_evidence": classify_commercial_evidence(
             rec, score, rec.get("performance_evidence") or {}
@@ -790,17 +790,7 @@ def to_candidate(item: dict, request: dict, collected_at: str, origin: str, sour
         "decision": rec.get("selection_decision") or "RANKED_BY_LEGACY_DISCOVERY",
         "reason": rec.get("selection_reason") or "",
     }
-    eligibility_reason = pattern_source_reason(c)
-    source_gate_eligible = not bool(eligibility_reason)
-    c["analysis_eligibility"] = {
-        "contract": "PATTERN_SOURCE_V1",
-        "eligible": source_gate_eligible,
-        "reason": eligibility_reason or None,
-    }
-    c["stage"] = "PATTERN_CANDIDATE" if source_gate_eligible else "SOURCE_REJECTED"
-    c["source_gate_eligible"] = source_gate_eligible
-    # Deprecated compatibility field: pattern-source admission only, never Target-Fit approval.
-    c["transfer_eligible"] = source_gate_eligible
+    sync_pattern_source_status(c)
     c["id"] = stable_id(c)
     return c
 
@@ -1089,6 +1079,7 @@ def _apply_product_selection_gates(candidates: list[dict], request: dict) -> tup
             source_selection = candidate.get("source_selection")
             source_selection = dict(source_selection) if isinstance(source_selection, dict) else {}
             source_selection.update({
+                "mode": str(request.get("selection_mode") or "product").strip().lower(),
                 "role": role.get("role") or "OFF_TOPIC", "role_reason": role.get("reason") or "",
                 "source_body_evidence": role.get("source_body_evidence") or "",
                 "target_anchor": role.get("target_anchor"),
@@ -1107,6 +1098,9 @@ def _apply_product_selection_gates(candidates: list[dict], request: dict) -> tup
                 and bool(role.get("promotion_evidence"))
                 and bool(role.get("target_promotion_evidence"))
             )
+            # This gate refreshes role evidence after to_candidate(). Recompute the
+            # canonical admission receipt now, before the object crosses to ALL.
+            contract_reason = sync_pattern_source_status(candidate)
             if not eligible_role:
                 reason = str(role.get("role") or "OFF_TOPIC").upper()
                 if reason == TARGET_PRODUCT and not role.get("target_promotion_evidence"):
@@ -1119,6 +1113,15 @@ def _apply_product_selection_gates(candidates: list[dict], request: dict) -> tup
                     "id": candidate.get("id"), "ad_id": record.get("ad_id"),
                     "title": str(record.get("title") or candidate.get("title") or "")[:180],
                     "role": role.get("role"), "reason": reason,
+                })
+                continue
+            if contract_reason:
+                role_gate["rejected_candidates"] += 1
+                role_gate["rejected_by_reason"][contract_reason] = role_gate["rejected_by_reason"].get(contract_reason, 0) + 1
+                role_rejected.append({
+                    "id": candidate.get("id"), "ad_id": record.get("ad_id"),
+                    "title": str(record.get("title") or candidate.get("title") or "")[:180],
+                    "role": role.get("role"), "reason": contract_reason,
                 })
                 continue
         role_eligible_count += 1
@@ -1289,6 +1292,8 @@ def _run_mechanism_find(*, request: dict, offer: dict, keywords: list[str], clie
             reason = str(role.get("role") or "OFF_TOPIC")
         elif not role.get("promotion_evidence"):
             reason = "NO_INDEPENDENT_PROMOTION_EVIDENCE"
+        elif target_lane and not role.get("target_promotion_evidence"):
+            reason = "TARGET_PRODUCT_NOT_PROMOTED"
         elif attention["coverage"] < MECHANISM_MIN_COVERAGE:
             reason = "LOW_ATTENTION_COVERAGE"
         elif attention["score"] < floor:

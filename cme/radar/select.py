@@ -110,9 +110,11 @@ def pattern_source_reason(candidate: dict) -> str:
     """Return the canonical PATTERN_SOURCE_V1 admission decision.
 
     The contract checks media, source exclusion, FIND's verified role/promotion,
-    product-query match, attention coverage/floor when FIND records them, and the
-    operator's duration filter. It intentionally ignores commercial score/action,
-    Money Gate pass/hard-block flags, and all heuristic profitability proxies.
+    mode-specific product-query evidence, attention coverage/floor when FIND records
+    them, and the operator's duration filter. Product mode may treat an absent query
+    match as UNKNOWN because the legacy Product discovery path does not always emit
+    that field; an explicit mismatch still blocks. Mechanism mode requires an explicit
+    positive query match. Commercial score/action and Money Gate are diagnostics only.
     Older records without source_selection require a verified DIRECT/EXPANDED label.
     """
     if not isinstance(candidate, dict):
@@ -131,8 +133,14 @@ def pattern_source_reason(candidate: dict) -> str:
     request = candidate.get("request") or {}
     if not isinstance(request, dict):
         request = {}
+    mode = str(
+        (selection.get("mode") if isinstance(selection, dict) else None)
+        or request.get("selection_mode") or "product"
+    ).strip().lower()
+    if mode not in {"product", "mechanism"}:
+        return f"unsupported source-selection mode {mode!r}"
+
     if isinstance(selection, dict):
-        mode = str(selection.get("mode") or request.get("selection_mode") or "product").strip().lower()
         role = str(selection.get("role") or "").strip().upper()
         promoted = selection.get("promotion_evidence") is True
         if mode == "product":
@@ -140,13 +148,13 @@ def pattern_source_reason(candidate: dict) -> str:
                 return f"source role {role or 'MISSING'} is not TARGET_PRODUCT"
             if not promoted:
                 return "target product lacks independent promotion evidence"
-        elif mode == "mechanism":
+            if selection.get("target_promotion_evidence") is not True:
+                return "target product lacks target-specific promotion evidence"
+        else:
             if role != ADJACENT_MECHANISM:
                 return f"source role {role or 'MISSING'} is not ADJACENT_MECHANISM"
             if not promoted:
                 return "adjacent product lacks independent promotion evidence"
-        else:
-            return f"unsupported source-selection mode {mode!r}"
 
         minimum_coverage = request.get("minimum_attention_coverage")
         if minimum_coverage not in (None, ""):
@@ -170,9 +178,15 @@ def pattern_source_reason(candidate: dict) -> str:
 
     legacy_record = candidate.get("legacy_record") or {}
     query_match = candidate.get("query_product_match")
-    if not isinstance(query_match, dict) and isinstance(legacy_record, dict):
-        query_match = legacy_record.get("query_product_match")
-    if isinstance(query_match, dict) and query_match.get("matches") is not True:
+    if (not isinstance(query_match, dict) or "matches" not in query_match) and isinstance(legacy_record, dict):
+        legacy_query_match = legacy_record.get("query_product_match")
+        if isinstance(legacy_query_match, dict) and "matches" in legacy_query_match:
+            query_match = legacy_query_match
+
+    if mode == "mechanism":
+        if not isinstance(query_match, dict) or query_match.get("matches") is not True:
+            return "mechanism source requires an explicit positive product-query match"
+    elif isinstance(query_match, dict) and query_match.get("matches") is False:
         return str(query_match.get("reason") or "source does not match the requested product query")
 
     duration_range = str(request.get("video_duration_range") or "all").strip().lower()
@@ -185,6 +199,29 @@ def pattern_source_reason(candidate: dict) -> str:
         return f"video duration does not match selected range {duration_range}"
 
     return ""
+
+
+def sync_pattern_source_status(candidate: dict) -> str:
+    """Recalculate all legacy admission fields from PATTERN_SOURCE_V1.
+
+    FIND may enrich or reclassify a candidate after initial construction. Keep the
+    stage, eligibility receipt and compatibility flag coherent with the final
+    source-selection evidence before the candidate is handed to ALL.
+    """
+    if not isinstance(candidate, dict):
+        return "candidate record is missing or invalid"
+    reason = pattern_source_reason(candidate)
+    eligible = not bool(reason)
+    candidate["analysis_eligibility"] = {
+        "contract": PATTERN_SOURCE_CONTRACT,
+        "eligible": eligible,
+        "reason": reason or None,
+    }
+    candidate["stage"] = "PATTERN_CANDIDATE" if eligible else "SOURCE_REJECTED"
+    candidate["source_gate_eligible"] = eligible
+    # Deprecated compatibility field: this is source admission, never Target-Fit approval.
+    candidate["transfer_eligible"] = eligible
+    return reason
 
 
 def block_reason(candidate: dict, allowed_classes=AUTO_ALLOWED_CLASSES, min_final_score=None) -> str:

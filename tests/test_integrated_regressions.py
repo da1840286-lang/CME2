@@ -50,6 +50,8 @@ class IntegratedFindGateTests(unittest.TestCase):
     def candidate(self, record):
         return {
             "id": "candidate-" + record["ad_id"], "title": record["title"],
+            "video_url": record.get("video_url"),
+            "duration_seconds": record.get("duration_seconds"),
             "legacy_record": dict(record),
             "metrics": {"views": {"value": 700000}, "likes": {"value": 20000}},
             "performance_evidence": {"basis": "ENGAGEMENT_PROXY", "performance_boards": []},
