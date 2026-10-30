@@ -1,3 +1,4 @@
+# A documentation-only change to this workflow intentionally triggers a fresh, fixed-sample QA judge calibration.
 name: CME QA Judge Calibration
 run-name: QA calibration — ${{ github.ref_name }}
 
