@@ -12,7 +12,10 @@ from unittest.mock import patch
 import cme.registry as registry
 from cme.providers import CallLog, InfraError, ProviderCallError, ProviderPolicyError
 from cme.radar.ledger import build_ledger
-from cme.radar.select import SourceThreshold, rank_transfer_candidates, select_transfer_candidate, weak_source_reasons
+from cme.radar.select import (
+    SourceThreshold, block_reason, effective_source_classification, rank_transfer_candidates,
+    select_transfer_candidate, weak_source_reasons,
+)
 from cme.registry import AdapterSpec, Settings, SettingsError, load_settings, make_brain_call
 from tests.test_brand_selection_audit import cand
 from tests.test_source_loop import _FAKE_RADAR_APP, _embedded_all_stage_script
@@ -159,6 +162,55 @@ class TransientRetryTests(unittest.TestCase):
 
 class SourceThresholdTests(unittest.TestCase):
     POOL = [cand("a", 66.0), cand("b", 57.0), cand("c", 63.0, action="WATCH")]
+
+    @staticmethod
+    def product_candidate(*, role="TARGET_PRODUCT", promoted=True, target_promoted=True,
+                          legacy_classification="UNVERIFIED", action="DEEP", money_pass=True):
+        return {
+            "id": "find-product",
+            "video_url": "https://example.invalid/source.mp4",
+            "source_check": {"classification": legacy_classification, "excluded": False},
+            "source_selection": {
+                "role": role,
+                "promotion_evidence": promoted,
+                "target_promotion_evidence": target_promoted,
+            },
+            "source_score": {
+                "final_score": 76.0,
+                "action": action,
+                "source_value_type": "COMMERCIAL_WINNER" if money_pass else "NONE",
+                "mechanism_source_score": 0,
+                "components": {
+                    "money_signal_gate": {"pass": money_pass, "hard_block": not money_pass},
+                    "duration": {"hard_block": False},
+                },
+            },
+        }
+
+    def test_verified_target_product_role_resolves_legacy_unverified_relevance(self):
+        candidate = self.product_candidate()
+        self.assertEqual(effective_source_classification(candidate), "DIRECT")
+        self.assertEqual(block_reason(candidate), "")
+        ranked, skipped = rank_transfer_candidates([candidate])
+        self.assertEqual([item["id"] for item in ranked], ["find-product"])
+        self.assertEqual(skipped, [])
+
+    def test_verified_adjacent_product_role_resolves_legacy_unverified_as_expanded(self):
+        candidate = self.product_candidate(role="ADJACENT_MECHANISM", target_promoted=False)
+        self.assertEqual(effective_source_classification(candidate), "EXPANDED")
+        self.assertEqual(block_reason(candidate), "")
+
+    def test_unverified_legacy_label_is_not_upgraded_without_promotion_proof(self):
+        candidate = self.product_candidate(target_promoted=False)
+        self.assertEqual(effective_source_classification(candidate), "UNVERIFIED")
+        self.assertIn("UNVERIFIED", block_reason(candidate))
+
+    def test_verified_role_never_overrides_hard_exclude_or_legacy_scorer_reject(self):
+        candidate = self.product_candidate(legacy_classification="HARD_EXCLUDE")
+        candidate["source_check"]["excluded"] = True
+        self.assertIn("hard-excluded", block_reason(candidate))
+        candidate = self.product_candidate(action="REJECT", legacy_classification="UNVERIFIED")
+        self.assertIn("REJECT", block_reason(candidate))
 
     def ids(self, items):
         return [x["id"] for x in items]

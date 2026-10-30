@@ -35,12 +35,13 @@ PERIODS = (7, 30, 180)
 LEGACY_ERROR = ""
 try:
     from .legacy.discover import _ordered_supply_queries, canonical_source_identity_keys, discover_and_rank
+    from .legacy.arbitrage import score_tiktok_candidate
     from .legacy.discovery.tiktok_socialcrawl import SocialCrawlError, SocialCrawlTikTokTopAds
     from .socialcrawl_client import RetryingSocialCrawlTikTokTopAds
     from .legacy.verticals import classify_vertical
 except Exception as e:  # e.g. the 'requests' package is missing
     LEGACY_ERROR = f"{type(e).__name__}: {e}"
-    discover_and_rank = canonical_source_identity_keys = _ordered_supply_queries = SocialCrawlTikTokTopAds = RetryingSocialCrawlTikTokTopAds = classify_vertical = None
+    discover_and_rank = canonical_source_identity_keys = _ordered_supply_queries = SocialCrawlTikTokTopAds = RetryingSocialCrawlTikTokTopAds = classify_vertical = score_tiktok_candidate = None
 
     class SocialCrawlError(Exception):
         pass
@@ -1299,18 +1300,57 @@ def _run_mechanism_find(*, request: dict, offer: dict, keywords: list[str], clie
         -float((record.get("attention_score") or {}).get("coverage") or 0),
         str(record.get("ad_id") or record.get("video_id") or ""),
     ))
-    selected = qualified[:max_ads]
-    for record in selected:
+    # Product-first FIND uses the same pre-video scorer as legacy discover_and_rank.
+    # Keep its full provider-result cohort as the comparison population; the attention
+    # ranking and all role/query gates above remain unchanged.
+    scored_qualified = []
+    scoring_failed = 0
+    if target_lane and qualified and score_tiktok_candidate is None:
+        raise FindUnavailable(
+            "SCORER_UNAVAILABLE",
+            LEGACY_ERROR or "legacy score_tiktok_candidate could not be imported",
+        )
+    comparison_population = list(rows_by_identity.values())
+    for record in qualified:
+        decision = None
+        if target_lane:
+            try:
+                decision = score_tiktok_candidate(
+                    record, comparison_population,
+                    target_offer=offer.get("target_offer") or "",
+                    prelander=offer.get("prelander") or "",
+                    landing_page=offer.get("landing_page") or "",
+                    vertical=VERTICAL,
+                )
+            except Exception as exc:
+                scoring_failed += 1
+                rejected.append({
+                    "ad_id": str(record.get("ad_id") or record.get("video_id") or ""),
+                    "title": str(record.get("title") or "")[:160],
+                    "reason": "LEGACY_SCORING_FAILED",
+                    "detail": f"{type(exc).__name__}: {exc}"[:240],
+                    "role": (record.get("source_role_info") or {}).get("role"),
+                })
+                continue
+        scored_qualified.append((record, decision))
+
+    selected = scored_qualified[:max_ads]
+    for record, _decision in selected:
         record["selection_decision"] = "SELECTED_TARGET_PRODUCT" if target_lane else "SELECTED_ADJACENT_MECHANISM"
         record["selection_reason"] = (
             ("Promoted target-class product" if target_lane else "Promoted adjacent product")
             + " passed the source-body, media, and attention-proxy gates. "
-            "Causal mechanism, transferability, and commercial value remain unevaluated."
+            + ("The existing legacy pre-video source score is attached; attention and score are not proof of sales or profit. "
+               if target_lane else "")
+            + "Causal mechanism, transferability, and independent Target-Fit remain downstream."
         )
-    for record in qualified[max_ads:]:
+    for record, _decision in scored_qualified[max_ads:]:
         record["selection_decision"] = "QUALIFIED_NOT_SELECTED_LIMIT"
         record["selection_reason"] = "Passed role and attention gates but exceeded max_ads."
-    candidates = [to_candidate({"record": record, "decision": None}, request, stamp, "found") for record in selected]
+    candidates = [
+        to_candidate({"record": record, "decision": decision}, request, stamp, "found")
+        for record, decision in selected
+    ]
     query_history_before = ledger.recent_queries(scope)
     ledger.remember(scope, raw_records, queries=[call.get("keyword") for call in calls])
 
@@ -1344,7 +1384,8 @@ def _run_mechanism_find(*, request: dict, offer: dict, keywords: list[str], clie
             "seen_ttl_days": 30, "prior_query_history": query_history_before,
         },
         "source_selection_diagnostics": {
-            "qualified_count": len(qualified), "selected_count": len(selected),
+            "qualified_count": len(qualified), "scored_count": len(scored_qualified),
+            "scoring_failed_count": scoring_failed, "selected_count": len(selected),
             "rejected_count": len(rejected), "rejected_by_reason": dict(sorted(reason_counts.items())),
             "rejected_examples": rejected[:50], "by_reason": dict(sorted(reason_counts.items())),
             "examples": rejected[:50],
@@ -1353,6 +1394,7 @@ def _run_mechanism_find(*, request: dict, offer: dict, keywords: list[str], clie
     diagnostics = {
         "outcome": "CANDIDATES_FOUND" if candidates else (
             "NO_API_ROWS" if raw_count == 0
+            else "SCORING_FAILED" if target_lane and qualified and not scored_qualified
             else "NO_TARGET_RELEVANCE" if target_lane else "NO_QUALIFIED_ADJACENT_MECHANISM"),
         "explanation": (
             "Adjacent-product sources passed text, media, and fixed-weight attention-proxy checks. This is not commercial proof; "

@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .fit import ADJACENT_MECHANISM, TARGET_PRODUCT
+
 AUTO_ALLOWED_CLASSES = ("DIRECT", "EXPANDED")
 
 
@@ -54,6 +56,32 @@ def weak_source_reasons(candidate: dict, threshold: SourceThreshold | None) -> l
     return reasons
 
 
+def effective_source_classification(candidate: dict) -> str:
+    """Resolve a verified FIND product role against the legacy relevance label.
+
+    The legacy label remains unchanged unless FIND supplies positive source-body promotion
+    evidence. A verified target product maps to DIRECT; a verified adjacent product maps to
+    EXPANDED. Missing or incomplete role evidence never upgrades an UNVERIFIED source.
+    """
+    check = candidate.get("source_check") or {}
+    classification = str(check.get("classification") or "").upper()
+    if check.get("excluded") or classification == "HARD_EXCLUDE":
+        return classification or "HARD_EXCLUDE"
+
+    role_info = candidate.get("source_selection")
+    if not isinstance(role_info, dict):
+        return classification
+    role = str(role_info.get("role") or "").upper()
+    promoted = role_info.get("promotion_evidence") is True
+    target_promoted = role_info.get("target_promotion_evidence") is True
+
+    if role == TARGET_PRODUCT and promoted and target_promoted:
+        return "DIRECT"
+    if role == ADJACENT_MECHANISM and promoted:
+        return "EXPANDED"
+    return classification
+
+
 def block_reason(candidate: dict, allowed_classes=AUTO_ALLOWED_CLASSES, min_final_score=None) -> str:
     """Empty string when the candidate passes the legacy strict source-commercial gate."""
     if not candidate.get("video_url"):
@@ -63,6 +91,7 @@ def block_reason(candidate: dict, allowed_classes=AUTO_ALLOWED_CLASSES, min_fina
     classification = str(check.get("classification") or "").upper()
     if check.get("excluded") or classification == "HARD_EXCLUDE":
         return "hard-excluded by the legacy source check"
+    classification = effective_source_classification(candidate)
     if allowed_classes is not None and classification not in allowed_classes:
         return f"source relevance {classification or 'MISSING'} is not one of {', '.join(allowed_classes)}"
 
@@ -197,7 +226,7 @@ def rank_transfer_candidates(candidates, threshold: SourceThreshold | None = Non
         if weak and threshold is not None and threshold.mode == "enforce":
             skipped.append(f"{item.get('id')}: WEAK_SOURCE: " + "; ".join(weak))
             continue
-        relevance = RELEVANCE_TIEBREAK.get(str((item.get("source_check") or {}).get("classification", "")).upper(), 0)
+        relevance = RELEVANCE_TIEBREAK.get(effective_source_classification(item), 0)
         usable.append((1 if weak else 0, -_score(item), -relevance, position, item))
     usable.sort(key=lambda row: row[:4])
     return [row[4] for row in usable], skipped

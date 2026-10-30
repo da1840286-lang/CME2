@@ -155,6 +155,20 @@ class ContractAwareFindTests(unittest.TestCase):
             self.assertEqual(evidence["requested_metric_status"], "NOT_OBTAINABLE_FOR_PRODUCT_QUERY")
             self.assertEqual(candidate["source_selection"]["role"], TARGET_PRODUCT)
 
+    def test_product_first_candidates_receive_the_existing_legacy_source_score(self):
+        result, _ = self.run_find(RELEVANT + IRRELEVANT)
+        self.assertEqual(len(result["candidates"]), len(RELEVANT))
+        for candidate in result["candidates"]:
+            score = candidate["source_score"]
+            self.assertIsInstance(score, dict)
+            self.assertIsInstance(score.get("final_score"), (int, float))
+            self.assertIn(score.get("action"), {"DEEP", "SHALLOW", "REJECT"})
+            self.assertIn("money_signal_gate", score.get("components", {}))
+            self.assertEqual(candidate["performance_evidence"]["basis"], "ATTENTION_PROXY_ONLY")
+            self.assertFalse(candidate["performance_evidence"]["is_commercial_proof"])
+            self.assertEqual(candidate["commercial_evidence"]["level"], "ATTENTION_ONLY")
+            self.assertEqual(candidate["source_selection"]["role"], TARGET_PRODUCT)
+
     def test_relevant_ads_are_not_cut_by_a_pool_relative_floor(self):
         # 5 relevant ads with very different reach: all pass an absolute attention floor; none is cut
         # because irrelevant rows with more views sit above them.
