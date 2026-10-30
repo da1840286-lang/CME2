@@ -15,5 +15,6 @@
   "min_final_score": null,
   "allowed_actions": [],
   "mode": "flag"
- }
+ },
+ "analyst_fallback_adapter": "openrouter_free_analyst_reserve"
 }

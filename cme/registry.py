@@ -59,10 +59,11 @@ class Settings:
     judge_adapter: str = ""
     allow_unverified: bool = False    # first live test of a freshly configured adapter
     max_attempts_per_shot: int = 3
-    analyst_adapter: str = ""          # Creative Radar: manual ad analysis
-    # Resilience for Brain / Target-Fit Gate / Judge. Only transient infrastructure errors (429, 5xx, network)
-    # are retried; malformed or negative model answers are never retried here.
-    brain_fallback_adapter: str = ""   # optional reserve model of kind "brain", used after retries are exhausted
+    analyst_adapter: str = ""          # Creative Radar source-video analysis
+    analyst_fallback_adapter: str = ""  # optional reserve vision model for Analyst
+    # Only transient infrastructure errors (429, 5xx, network) are retried; malformed/negative
+    # model answers are not retried by this provider policy.
+    brain_fallback_adapter: str = ""   # optional reserve model of kind "brain"
     judge_fallback_adapter: str = ""   # optional reserve model of kind "judge"
     transient_retries: int = 1         # extra attempts on the same model after a transient error (0-3)
     retry_delay_seconds: float = 0.0   # pause before a retry; 0 keeps offline tests instant
@@ -95,7 +96,7 @@ def load_settings(path) -> Settings:
     if type(attempts) is not int or attempts < 1:
         raise SettingsError("max_attempts_per_shot must be a positive integer")
     names = ("image_adapter", "fallback_adapter", "brain_adapter", "judge_adapter", "analyst_adapter",
-             "brain_fallback_adapter", "judge_fallback_adapter")
+             "brain_fallback_adapter", "judge_fallback_adapter", "analyst_fallback_adapter")
     for key in names:
         if key in d and not isinstance(d[key], str):
             raise SettingsError(f"{key} must be a string")
@@ -121,6 +122,7 @@ def load_settings(path) -> Settings:
                     allow_free=d.get("allow_free", False), brain_adapter=d.get("brain_adapter", ""),
                     judge_adapter=d.get("judge_adapter", ""), allow_unverified=d.get("allow_unverified", False),
                     max_attempts_per_shot=attempts, analyst_adapter=d.get("analyst_adapter", ""),
+                    analyst_fallback_adapter=d.get("analyst_fallback_adapter", ""),
                     brain_fallback_adapter=d.get("brain_fallback_adapter", ""),
                     judge_fallback_adapter=d.get("judge_fallback_adapter", ""),
                     transient_retries=retries, retry_delay_seconds=float(delay),
@@ -187,9 +189,9 @@ def make_image_provider(settings: Settings, catalog: dict, log: CallLog, run_id:
     return provider
 
 
-# Kinds whose transient infrastructure errors are retried on the same model. The Target-Fit Gate shares the
-# Brain call, so it is covered by "brain". Analyst failures are handled by the Radar source loop instead.
-_RETRY_KINDS = {"brain", "judge"}
+# Model-backed tasks may retry transient provider failures. Analyst processes source-video
+# frames and uses the same bounded 429/5xx/network policy.
+_RETRY_KINDS = {"brain", "judge", "analyst"}
 _sleep = time.sleep  # module-level so tests can replace it
 
 
@@ -220,7 +222,6 @@ def _make_llm(adapter_name, kind, settings, catalog, log, run_id, fallback_name=
     retrying = kind in _RETRY_KINDS
     attempts = 1 + max(0, int(getattr(settings, "transient_retries", 1))) if retrying else 1
     delay = float(getattr(settings, "retry_delay_seconds", 0.0) or 0.0)
-    component = "qa_judge_resilience" if kind == "judge" else f"{kind}_resilience"
 
     def run(*args):
         def make_go(used_spec, used_fn):
@@ -230,27 +231,37 @@ def _make_llm(adapter_name, kind, settings, catalog, log, run_id, fallback_name=
                 return out, meta
             return go
 
-        # Retry only a transient infrastructure failure on the same explicit model.
-        # Never retry malformed/negative answers, policy errors, or non-transient provider errors.
-        last = None
-        for attempt in range(1, attempts + 1):
-            try:
-                return call_with_policy(spec.ref, make_go(spec, fn), log, run_id, allow_free=settings.allow_free)
-            except InfraError as e:
-                last = e
-                if not retrying:
-                    raise
-                final = attempt == attempts
-                log.write(run_id=run_id, component=component, attempt=attempt, max_attempts=attempts,
-                          status="exhausted" if final else "retry", error=str(e)[:300])
-                if not final and delay > 0:
-                    _sleep(delay)
-        if fb_spec is not None:
-            # The reserve model is declared in settings; it is used only after the primary's retries are exhausted.
-            log.write(run_id=run_id, component=f"{kind}_fallback", status="switching",
-                      from_model=spec.model_id, to_model=fb_spec.model_id, error=str(last)[:300])
-            return call_with_policy(fb_spec.ref, make_go(fb_spec, fb_fn), log, run_id, allow_free=settings.allow_free)
-        raise last
+        def call_with_retries(used_spec, used_fn, component):
+            last = None
+            for attempt in range(1, attempts + 1):
+                try:
+                    return call_with_policy(
+                        used_spec.ref, make_go(used_spec, used_fn), log, run_id,
+                        allow_free=settings.allow_free,
+                    )
+                except InfraError as exc:
+                    last = exc
+                    final = (not retrying) or attempt == attempts
+                    log.write(
+                        run_id=run_id, component=component, attempt=attempt, max_attempts=attempts,
+                        status="exhausted" if final else "retry", error=str(exc)[:300],
+                    )
+                    if final:
+                        raise
+                    if delay > 0:
+                        _sleep(delay)
+            raise last
+
+        try:
+            return call_with_retries(spec, fn, f"{kind}_resilience")
+        except InfraError as primary_error:
+            if fb_spec is None:
+                raise
+            log.write(
+                run_id=run_id, component=f"{kind}_fallback", status="switching",
+                from_model=spec.model_id, to_model=fb_spec.model_id, error=str(primary_error)[:300],
+            )
+            return call_with_retries(fb_spec, fb_fn, f"{kind}_fallback_resilience")
 
     run.info = {}
     return run
@@ -269,5 +280,6 @@ def make_judge(settings, catalog, log, run_id, **ctx):
 
 
 def make_analyst(settings, catalog, log, run_id, **ctx):
-    """analyst(frames, context) -> ({'data', 'raw_excerpt'}), for the Creative Radar manual analysis."""
-    return _make_llm(settings.analyst_adapter, "analyst", settings, catalog, log, run_id, **ctx)
+    """analyst(frames, context) -> ({'data', 'raw_excerpt'}), with bounded retry and reserve vision model."""
+    return _make_llm(settings.analyst_adapter, "analyst", settings, catalog, log, run_id,
+                     fallback_name=settings.analyst_fallback_adapter, **ctx)

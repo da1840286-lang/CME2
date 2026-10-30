@@ -786,8 +786,9 @@ def to_candidate(item: dict, request: dict, collected_at: str, origin: str, sour
         "context_verified": role.get("context_verified"),
         "confidence": role.get("confidence") or "UNKNOWN",
         "attention": attention,
+        "attention_is_selection_signal": False,
         "attention_is_commercial_proof": False,
-        "decision": rec.get("selection_decision") or "RANKED_BY_LEGACY_DISCOVERY",
+        "decision": rec.get("selection_decision") or "RANKED_BY_SOURCE_RELEVANCE",
         "reason": rec.get("selection_reason") or "",
     }
     sync_pattern_source_status(c)
@@ -926,9 +927,6 @@ def _find_diagnostics(stats: dict, candidate_count: int) -> dict:
     direct = int(stats.get("direct_relevant_ads") or 0)
     expanded = int(stats.get("expanded_relevant_ads") or 0)
     target_relevant = int(stats.get("target_relevant_ads") or 0)
-    money_ready = int(stats.get("money_ready_source_ads") or 0)
-    mechanism_ready = int(stats.get("mechanism_ready_source_ads") or 0)
-    analysis_ready = int(stats.get("analysis_ready_source_ads") or 0)
     hard_excluded = int(stats.get("pre_visual_verification_hard_excluded_ads") or 0)
     selection_details = stats.get("source_selection_diagnostics") or {}
     performance_ready = int(stats.get("performance_ready_source_ads") or 0)
@@ -937,8 +935,9 @@ def _find_diagnostics(stats: dict, candidate_count: int) -> dict:
     if candidate_count:
         outcome = "CANDIDATES_FOUND"
         explanation = (
-            "FIND shortlisted sources only after product-role and requested-performance evidence checks. "
-            "Attention metrics are not proof of sales; commercial/mechanism and Target-Fit remain downstream gates."
+            "FIND shortlisted playable, promoted target-product sources from source-body evidence. "
+            "Views and engagement are metadata only; commercial results, causal mechanism and Target-Fit "
+            "are evaluated in later stages."
         )
     elif raw_returned == 0:
         outcome = "NO_API_ROWS"
@@ -989,9 +988,6 @@ def _find_diagnostics(stats: dict, candidate_count: int) -> dict:
         "target_relevant_ads": target_relevant,
         "product_relevant_ads": int(stats.get("product_relevant_ads") or target_relevant),
         "performance_ready_source_ads": performance_ready,
-        "money_ready_source_ads": money_ready,
-        "mechanism_ready_source_ads": mechanism_ready,
-        "analysis_ready_source_ads": analysis_ready,
         "unverified_ads": int(stats.get("unverified_ads") or 0),
         "hard_excluded_ads": hard_excluded,
         "source_selection_diagnostics": selection_details,
@@ -1189,18 +1185,15 @@ def _run_mechanism_find(*, request: dict, offer: dict, keywords: list[str], clie
                         attention_floor: float | None = None,
                         requested_metric_status: dict | None = None,
                         video_duration_range: str = "all") -> dict:
-    """Sponsored-Search-only selection; no Ads Top lane, no pool-relative percentile.
+    """Sponsored-Search-only discovery. Engagement is descriptive metadata, never a selection signal.
 
-    lane="mechanism": adjacent-product sources (explicit keywords).
-    lane="target_product": same gates for the target product class (contract-aware product mode).
+    Product mode requires a playable ad, source-body product match, and promotion evidence.
+    Mechanism mode applies the same evidence discipline to explicitly searched adjacent products.
+    Neither lane uses views, likes, comments, or shares to admit, reject, or rank candidates.
     """
     target_lane = lane == "target_product"
-    # Target lane: attention ranks candidates but does not cut them by default (floor 0.0). Reach is priority
-    # metadata, not a quality gate; a fixed floor removed relevant car-vacuum ads at 80-140k views. The
-    # coverage gate still requires real engagement fields, and an operator may set attention_floor.
-    floor = (0.0 if target_lane else MECHANISM_ATTENTION_FLOOR) if attention_floor is None else float(attention_floor)
-    request["minimum_attention_coverage"] = MECHANISM_MIN_COVERAGE
-    request["attention_floor"] = floor
+    request.pop("minimum_attention_coverage", None)
+    request["attention_floor"] = None
     date_posted = {7: "this-week", 30: "this-month", 180: "last-6-months"}[period]
     calls, raw_records, qualified, rejected = [], [], [], []
     rows_by_identity, identity_keys_seen = {}, set()
@@ -1217,7 +1210,7 @@ def _run_mechanism_find(*, request: dict, offer: dict, keywords: list[str], clie
         try:
             response = client.fetch_sponsored_search(
                 query=query, region=country, date_posted=date_posted,
-                sort_by="most-liked", relevance="filter", limit=limit_per_board,
+                sort_by="relevance", relevance="filter", limit=limit_per_board,
             )
         except SocialCrawlError as exc:
             raise FindUnavailable("UNAVAILABLE", str(exc)) from exc
@@ -1294,10 +1287,6 @@ def _run_mechanism_find(*, request: dict, offer: dict, keywords: list[str], clie
             reason = "NO_INDEPENDENT_PROMOTION_EVIDENCE"
         elif target_lane and not role.get("target_promotion_evidence"):
             reason = "TARGET_PRODUCT_NOT_PROMOTED"
-        elif attention["coverage"] < MECHANISM_MIN_COVERAGE:
-            reason = "LOW_ATTENTION_COVERAGE"
-        elif attention["score"] < floor:
-            reason = "BELOW_ATTENTION_PROXY_FLOOR"
         else:
             duration_gate["considered_candidates"] += 1
             reason = _video_duration_filter_reason(record, video_duration_range)
@@ -1319,8 +1308,7 @@ def _run_mechanism_find(*, request: dict, offer: dict, keywords: list[str], clie
             record["selection_decision"], record["selection_reason"] = "REJECTED", reason
             continue
         record["performance_evidence"] = {
-            "basis": "ATTENTION_PROXY_ONLY", "score": attention["score"],
-            "coverage": attention["coverage"], "is_commercial_proof": False,
+            "basis": "NOT_AVAILABLE", "is_selection_signal": False, "is_commercial_proof": False,
         }
         if requested_metric_status:
             record["performance_evidence"].update(requested_metric_status)
@@ -1328,58 +1316,22 @@ def _run_mechanism_find(*, request: dict, offer: dict, keywords: list[str], clie
         record["selection_decision"] = "QUALIFIED_TARGET_PRODUCT" if target_lane else "QUALIFIED_ADJACENT_MECHANISM"
         qualified.append(record)
 
-    qualified.sort(key=lambda record: (
-        -float((record.get("attention_score") or {}).get("score") or 0),
-        -float((record.get("attention_score") or {}).get("coverage") or 0),
-        str(record.get("ad_id") or record.get("video_id") or ""),
-    ))
-    # Product-first FIND uses the same pre-video scorer as legacy discover_and_rank.
-    # Keep its full provider-result cohort as the comparison population; the attention
-    # ranking and all role/query gates above remain unchanged.
-    scored_qualified = []
-    scoring_failed = 0
-    if target_lane and qualified and score_tiktok_candidate is None:
-        raise FindUnavailable(
-            "SCORER_UNAVAILABLE",
-            LEGACY_ERROR or "legacy score_tiktok_candidate could not be imported",
-        )
-    comparison_population = list(rows_by_identity.values())
-    for record in qualified:
-        decision = None
-        if target_lane:
-            try:
-                decision = score_tiktok_candidate(
-                    record, comparison_population,
-                    target_offer=offer.get("target_offer") or "",
-                    prelander=offer.get("prelander") or "",
-                    landing_page=offer.get("landing_page") or "",
-                    vertical=VERTICAL,
-                )
-            except Exception as exc:
-                scoring_failed += 1
-                rejected.append({
-                    "ad_id": str(record.get("ad_id") or record.get("video_id") or ""),
-                    "title": str(record.get("title") or "")[:160],
-                    "reason": "LEGACY_SCORING_FAILED",
-                    "detail": f"{type(exc).__name__}: {exc}"[:240],
-                    "role": (record.get("source_role_info") or {}).get("role"),
-                })
-                continue
-        scored_qualified.append((record, decision))
-
-    selected = scored_qualified[:max_ads]
+    # Preserve provider relevance order. Legacy pre-video money/mechanism scores used
+    # social-engagement proxies and do not establish commercial success or causal mechanism.
+    selected = [(record, None) for record in qualified[:max_ads]]
     for record, _decision in selected:
         record["selection_decision"] = "SELECTED_TARGET_PRODUCT" if target_lane else "SELECTED_ADJACENT_MECHANISM"
         record["selection_reason"] = (
-            ("Promoted target-class product" if target_lane else "Promoted adjacent product")
-            + " passed the source-body, media, and attention-proxy gates. "
-            + ("The existing legacy pre-video source score is attached; attention and score are not proof of sales or profit. "
-               if target_lane else "")
-            + "Causal mechanism, transferability, and independent Target-Fit remain downstream."
+            "Passed source-body product match, promotion, playable-video and hard-exclusion checks. "
+            "Social engagement is metadata only; commercial result, mechanism and transfer fit are checked downstream."
+            if target_lane else
+            "Passed explicit-query product match, promotion, playable-video and hard-exclusion checks. "
+            "Social engagement is metadata only; causal mechanism and target fit are checked downstream."
         )
-    for record, _decision in scored_qualified[max_ads:]:
+    for record in qualified[max_ads:]:
         record["selection_decision"] = "QUALIFIED_NOT_SELECTED_LIMIT"
-        record["selection_reason"] = "Passed role and attention gates but exceeded max_ads."
+        record["selection_reason"] = "Passed source-body and media eligibility checks but exceeded max_ads."
+
     candidates = [
         to_candidate({"record": record, "decision": decision}, request, stamp, "found")
         for record, decision in selected
@@ -1413,13 +1365,14 @@ def _run_mechanism_find(*, request: dict, offer: dict, keywords: list[str], clie
                 "executed because the provider cannot return them for a product-targeted ad."
                 if target_lane else
                 "Explicit-keyword Sponsored Search only; Ads Top/performance ordering disabled."),
-            "attention_floor": floor, "requested_metric_status": requested_metric_status or None,
-            "attention_proxy_version": "attention_absolute_v1", "attention_is_commercial_proof": False,
+            "attention_floor": None, "attention_proxy_version": "attention_absolute_v1",
+            "attention_is_selection_signal": False, "attention_is_commercial_proof": False,
+            "engagement_fields_policy": "METADATA_ONLY_NOT_USED_FOR_ADMISSION_OR_RANKING",
+            "requested_metric_status": requested_metric_status or None,
             "seen_ttl_days": 30, "prior_query_history": query_history_before,
         },
         "source_selection_diagnostics": {
-            "qualified_count": len(qualified), "scored_count": len(scored_qualified),
-            "scoring_failed_count": scoring_failed, "selected_count": len(selected),
+            "qualified_count": len(qualified), "selected_count": len(selected),
             "rejected_count": len(rejected), "rejected_by_reason": dict(sorted(reason_counts.items())),
             "rejected_examples": rejected[:50], "by_reason": dict(sorted(reason_counts.items())),
             "examples": rejected[:50],
@@ -1428,14 +1381,16 @@ def _run_mechanism_find(*, request: dict, offer: dict, keywords: list[str], clie
     diagnostics = {
         "outcome": "CANDIDATES_FOUND" if candidates else (
             "NO_API_ROWS" if raw_count == 0
-            else "SCORING_FAILED" if target_lane and qualified and not scored_qualified
-            else "NO_TARGET_RELEVANCE" if target_lane else "NO_QUALIFIED_ADJACENT_MECHANISM"),
+            else "NO_TARGET_PRODUCT_AD" if target_lane else "NO_QUALIFIED_ADJACENT_MECHANISM"),
         "explanation": (
-            "Adjacent-product sources passed text, media, and fixed-weight attention-proxy checks. This is not commercial proof; "
-            "the causal mechanism and independent Target-Fit remain downstream."
+            "Playable, promoted sources whose body advertises the configured target product passed. "
+            "Social engagement did not influence admission or order; commercial results and causal transfer remain unverified."
+            if candidates and target_lane else
+            "Playable, promoted adjacent-product sources passed source-body and query-match checks. "
+            "Social engagement did not influence admission or order; causal mechanism and target fit remain downstream."
             if candidates else
-            "No adjacent-product source passed source-body, media, attention-coverage, and attention-floor rules. "
-            "Search queries were not used as source-body evidence."
+            "No source passed source-body product match, promotion, playable-video and hard-exclusion checks. "
+            "Search queries alone were not treated as product-advertising evidence."
         ),
         "search_lane": "tiktok_sponsored_search_only", "requests_executed": len(calls),
         "raw_ads_returned": raw_count, "unique_ads": unique_rows, "direct_relevant_ads": 0,
@@ -1445,7 +1400,7 @@ def _run_mechanism_find(*, request: dict, offer: dict, keywords: list[str], clie
         "source_selection_diagnostics": stats["source_selection_diagnostics"],
         "search_queries_executed": [call["keyword"] for call in calls],
         "request_sources": ["sponsored_search" for _ in calls], "performance_calls_used": 0,
-        "commercial_evidence_note": "Attention proxy is not commercial proof; Target-Fit remains NOT_EVALUATED.",
+        "commercial_evidence_note": "Views/likes/comments/shares are metadata only; they do not establish sales, profit or transferability. Target-Fit remains NOT_EVALUATED.",
     }
     stats["total_credits_reported"] = sum(
         int(call.get("credits_used") or 0) for call in calls if isinstance(call.get("credits_used"), (int, float)))
@@ -1513,7 +1468,9 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
         requested_performance_order_bys, include_retention, requested_max_requests,
         performance_plan=performance_plan,
     )
-    contract_aware = retention_strategy.get("mode") == CONTRACT_AWARE_MODE
+    # Product mode uses target-aware Sponsored Search by default. Ads Top remains
+    # available only through an explicit legacy_ads_top performance_plan.
+    contract_aware = selection_mode == "product" and plan_uses_contract(performance_plan)
     if contract_aware:
         include_retention = False  # not executed: retention cannot be product-targeted
     user_keywords = _clean_terms(params.get("keywords"))
@@ -1587,20 +1544,24 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
         request["provider_request_plan"] = {
             "target_sponsored_search_queries": len(queries), "targeted_playback_boards": [],
             "unfiltered_retention_calls": 0, "unrequested_performance_fallbacks": False,
-            "requested_metric_status": retention_strategy["requested_metric_status"],
+            "requested_metric_status": retention_strategy.get("requested_metric_status"),
         }
-        raw_floor = params.get("attention_floor")
+        metric_status = retention_strategy.get("requested_metric_status")
+        if requested_performance_order_bys and not metric_status:
+            metric_status = "NOT_OBTAINABLE_FOR_PRODUCT_QUERY"
+        requested_metric_info = (
+            {"requested_metrics": list(requested_performance_order_bys),
+             "requested_metric_status": metric_status}
+            if requested_performance_order_bys else None
+        )
         return _run_mechanism_find(
             request=request, offer=offer, keywords=queries, client=client,
             ledger=ledger, scope=scope, prior_seen_keys=prior_seen_keys, stamp=stamp,
             country=country, period=period, max_requests=len(queries), max_ads=max_ads,
             limit_per_board=limit_per_board, accept_role=TARGET_PRODUCT, lane="target_product",
-            attention_floor=(None if raw_floor in (None, "") else float(raw_floor)),
+            attention_floor=None,
             video_duration_range=video_duration_range,
-            requested_metric_status={
-                "requested_metrics": list(requested_performance_order_bys),
-                "requested_metric_status": retention_strategy["requested_metric_status"],
-            },
+            requested_metric_status=requested_metric_info,
         )
     search_terms = _rotate_query_terms(search_terms, prior_query_history)
     request["search_terms"] = list(search_terms)

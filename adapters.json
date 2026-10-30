@@ -29,7 +29,9 @@
     "response_format_mode": "json_object",
     "temperature": 0,
     "max_tokens": 1500,
-    "reasoning": {"enabled": false}
+    "reasoning": {
+     "enabled": false
+    }
    },
    "price_hint": "free; rate limited",
    "notes": "Independent vision judge, deliberately different from the Brain/Analyst model to reduce correlated errors. Free model availability and rate limits may change; every MUST visual atom is required."
@@ -48,6 +50,24 @@
    },
    "price_hint": "free; rate limited",
    "notes": "Creative Radar manual analysis: sends a few video frames. Free models may be weak at timing details; switch the adapter name in settings to a paid vision model when you have a key."
+  },
+  {
+   "name": "openrouter_free_analyst_reserve",
+   "kind": "analyst",
+   "provider": "openrouter",
+   "model_id": "google/gemma-4-31b-it:free",
+   "tier": "free",
+   "verified": false,
+   "params": {
+    "response_format_mode": "json_object",
+    "temperature": 0.2,
+    "max_tokens": 3000,
+    "reasoning": {
+     "enabled": false
+    }
+   },
+   "price_hint": "$0 via OpenRouter free endpoint; rate-limited",
+   "notes": "Reserve vision Analyst: accepts text/images, returns text, supports JSON response format but not JSON Schema enforcement. Unverified until first live CME call."
   },
   {
    "name": "hf_zerogpu_flux2_klein",

@@ -16,7 +16,7 @@ from cme.radar.select import (
     SourceThreshold, block_reason, effective_source_classification, rank_transfer_candidates,
     select_transfer_candidate, weak_source_reasons,
 )
-from cme.registry import AdapterSpec, Settings, SettingsError, load_settings, make_brain_call
+from cme.registry import AdapterSpec, Settings, SettingsError, load_settings, make_brain_call, make_analyst
 from tests.test_brand_selection_audit import cand
 from tests.test_source_loop import _FAKE_RADAR_APP, _embedded_all_stage_script
 
@@ -33,6 +33,10 @@ def catalog():
         "b": AdapterSpec("b", "brain", "openrouter", "vendor/primary:free", "free", {}, verified=True),
         "b2": AdapterSpec("b2", "brain", "openrouter", "vendor/reserve:free", "free", {}, verified=True),
         "j": AdapterSpec("j", "judge", "openrouter", "vendor/judge:free", "free", {}, verified=True),
+        "a": AdapterSpec("a", "analyst", "openrouter", "vendor/analyst-primary:free", "free",
+                         {"response_format_mode": "json_object", "max_tokens": 3000}, verified=True),
+        "a2": AdapterSpec("a2", "analyst", "openrouter", "vendor/analyst-reserve:free", "free",
+                          {"response_format_mode": "json_object", "max_tokens": 3000}, verified=True),
     }
 
 
@@ -49,6 +53,49 @@ class TransientRetryTests(unittest.TestCase):
 
     def rows(self, path):
         return [json.loads(x) for x in path.read_text(encoding="utf-8").splitlines()]
+
+    def build_analyst(self, directory, transport, **settings):
+        log = CallLog(Path(directory) / "analyst-calls.jsonl")
+        base = {"analyst_adapter": "a", "allow_free": True}
+        base.update(settings)
+        call = make_analyst(Settings(**base), catalog(), log, "analyst-run",
+                            transport=transport, openrouter_key="k")
+        return call, Path(directory) / "analyst-calls.jsonl"
+
+    def test_analyst_retries_primary_then_uses_declared_free_vision_reserve(self):
+        sent = []
+        def transport(method, url, headers, payload):
+            sent.append(payload["model"])
+            if payload["model"] == "vendor/analyst-primary:free":
+                return ERR_502
+            return 200, completion('{"mechanism":"reserve answered"}', payload["model"])
+        with tempfile.TemporaryDirectory() as d:
+            call, log = self.build_analyst(d, transport, analyst_fallback_adapter="a2")
+            result = call([], {})
+            self.assertEqual(result["data"], {"mechanism": "reserve answered"})
+            self.assertEqual(sent, ["vendor/analyst-primary:free", "vendor/analyst-primary:free",
+                                    "vendor/analyst-reserve:free"])
+            self.assertTrue(call.info["fallback_used"])
+            self.assertEqual(call.info["model_id"], "vendor/analyst-reserve:free")
+            rows = self.rows(log)
+            self.assertIn("analyst_fallback", [r.get("component") for r in rows])
+            self.assertIn("analyst_resilience", [r.get("component") for r in rows])
+
+    def test_analyst_reserve_also_retries_transient_502(self):
+        sent = []
+        def transport(method, url, headers, payload):
+            sent.append(payload["model"])
+            if payload["model"] == "vendor/analyst-primary:free":
+                return ERR_502
+            return ERR_502 if sent.count("vendor/analyst-reserve:free") == 1 else (
+                200, completion('{"mechanism":"reserve retry answered"}', payload["model"]))
+        with tempfile.TemporaryDirectory() as d:
+            call, log = self.build_analyst(d, transport, analyst_fallback_adapter="a2")
+            self.assertEqual(call([], {})["data"], {"mechanism": "reserve retry answered"})
+            self.assertEqual(sent, ["vendor/analyst-primary:free", "vendor/analyst-primary:free",
+                                    "vendor/analyst-reserve:free", "vendor/analyst-reserve:free"])
+            rows = self.rows(log)
+            self.assertIn("analyst_fallback_resilience", [r.get("component") for r in rows])
 
     def test_brain_survives_one_transient_502(self):
         sent = []
@@ -132,6 +179,9 @@ class TransientRetryTests(unittest.TestCase):
             for name in ("missing", "j", "b"):
                 with self.assertRaises(ProviderPolicyError, msg=name):
                     self.build(d, lambda *a: ERR_502, brain_fallback_adapter=name)
+            for name in ("missing", "j", "a"):
+                with self.assertRaises(ProviderPolicyError, msg=f"analyst:{name}"):
+                    self.build_analyst(d, lambda *a: ERR_502, analyst_fallback_adapter=name)
 
     def test_settings_validate_the_new_fields(self):
         def load(**extra):
@@ -148,9 +198,12 @@ class TransientRetryTests(unittest.TestCase):
         self.assertEqual((parsed.source_min_final_score, parsed.source_allowed_actions, parsed.source_threshold_mode),
                          (60.0, ("DEEP",), "enforce"))
         self.assertEqual((parsed.brain_fallback_adapter, parsed.judge_fallback_adapter), ("b2", "j2"))
+        parsed = load(analyst_adapter="a", analyst_fallback_adapter="a2")
+        self.assertEqual((parsed.analyst_adapter, parsed.analyst_fallback_adapter), ("a", "a2"))
         for bad in ({"transient_retries": 9}, {"transient_retries": True}, {"retry_delay_seconds": -1},
                     {"source_selection": []}, {"source_selection": {"mode": "strict"}},
-                    {"source_selection": {"allowed_actions": "DEEP"}}, {"brain_fallback_adapter": 3}):
+                    {"source_selection": {"allowed_actions": "DEEP"}}, {"brain_fallback_adapter": 3},
+                    {"analyst_fallback_adapter": 3}):
             with self.assertRaises(SettingsError, msg=str(bad)):
                 load(**bad)
 

@@ -30,12 +30,12 @@ on:
         required: true
         default: "30"
       find_requests:
-        description: "Hard cap on SocialCrawl requests. When play_2s_rate, play_6s_rate, or playback_both is selected, the contract-aware plan uses this budget for up to three product-targeted Sponsored Search queries; it does not call Ads Top playback boards or retention. Requested playback metrics are reported as unavailable for product-query selection. Source-commercial and Target-Fit remain separate downstream gates."
+        description: "Hard cap on SocialCrawl requests. Product mode uses up to three target-focused Sponsored Search queries and does not call Ads Top performance boards. Views/likes/comments/shares are metadata only, never selection criteria. Target-Fit and mechanism analysis are downstream."
         type: number
         required: true
         default: 4
       find_max_ads:
-        description: "Maximum ranked TikTok ads to return"
+        description: "Maximum eligible TikTok source videos to return (provider relevance order)"
         type: number
         required: true
         default: 3
@@ -56,7 +56,7 @@ on:
         required: false
         default: "car vacuum"
       find_performance_order:
-        description: "Optional playback-metric request for FIND. Selecting play_2s_rate, play_6s_rate, or playback_both activates the contract-aware product-search plan: request budget goes to targeted Sponsored Search, Ads Top playback boards are not called, and the requested metric is reported as NOT_OBTAINABLE_FOR_PRODUCT_QUERY. The attention score is only a proxy, not commercial proof. default keeps the existing default discovery plan."
+        description: "Optional playback-metric diagnostic. In Product mode no Ads Top playback/performance board is used because it is not reliably product-targeted and does not return numeric play-rate values. Requested rates are explicitly reported as NOT_OBTAINABLE_FOR_PRODUCT_QUERY. default still uses target-focused Sponsored Search; engagement never gates or ranks sources."
         type: choice
         options:
           - default
@@ -71,7 +71,7 @@ on:
         required: false
         default: false
       find_selection_mode:
-        description: "Product targets the configured offer; when a playback-metric option is selected it uses contract-aware, product-targeted Sponsored Search and an attention proxy only. Mechanism searches explicit keywords using Sponsored Search and an attention proxy only. Attention is not commercial proof; it is diagnostic evidence, while Target-Fit remains the transferability gate."
+        description: "Product searches and selects playable ads that independently advertise the configured target product. Mechanism searches explicit keywords for promoted adjacent products. Neither mode uses views/likes/comments/shares to admit or rank candidates; those fields are metadata only."
         type: choice
         options:
           - product

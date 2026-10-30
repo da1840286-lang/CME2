@@ -130,16 +130,28 @@ class ContractAwareFindTests(unittest.TestCase):
         with mock.patch.dict("os.environ", {"CME_FIND_SEEN_PATH": str(self.ledger)}):
             return run_find(params, client=client, now="2026-10-29T00:00:00Z"), client
 
-    def test_run_40681442750_replay_finds_relevant_ads_without_ads_top_spend(self):
+    def test_default_product_mode_uses_targeted_sponsored_search_without_ads_top(self):
         result, client = self.run_find(RELEVANT + IRRELEVANT)
         self.assertEqual([call[0] for call in client.calls], ["sponsored_search"] * 3)
         queries = [call[1]["query"] for call in client.calls]
         self.assertEqual(queries[0], BRAND)  # brand query is in the executed plan
+        self.assertTrue(all(call[1]["sort_by"] == "relevance" for call in client.calls))
         ids = {c["ad_id"] for c in result["candidates"]}
         self.assertEqual(ids, {r[0] for r in RELEVANT})
         self.assertEqual(result["diagnostics"]["outcome"], "CANDIDATES_FOUND")
         self.assertEqual(result["diagnostics"]["performance_calls_used"], 0)
         self.assertEqual(result["stats"]["total_credits_reported"], 3)
+
+    def test_default_product_mode_uses_target_search_without_engagement_fallback(self):
+        result, client = self.run_find(RELEVANT + IRRELEVANT, performance_order_bys=[], include_retention=False)
+        self.assertEqual([call[0] for call in client.calls], ["sponsored_search"] * 3)
+        self.assertTrue(all(call[1]["sort_by"] == "relevance" for call in client.calls))
+        self.assertEqual([c["ad_id"] for c in result["candidates"]], [item[0] for item in RELEVANT])
+        self.assertNotIn("money_ready_source_ads", result["diagnostics"])
+        self.assertNotIn("mechanism_ready_source_ads", result["diagnostics"])
+        self.assertNotIn("minimum_attention_coverage", result["request"])
+        self.assertTrue(all(c["performance_evidence"]["basis"] == "NOT_AVAILABLE"
+                            for c in result["candidates"]))
 
     def test_requested_metric_is_labelled_not_faked_and_not_a_gate(self):
         result, _ = self.run_find(RELEVANT + IRRELEVANT)
@@ -149,39 +161,43 @@ class ContractAwareFindTests(unittest.TestCase):
         self.assertEqual(availability["numeric_values_returned"], {})
         for candidate in result["candidates"]:
             evidence = candidate["performance_evidence"]
-            self.assertEqual(evidence["basis"], "ATTENTION_PROXY_ONLY")
+            self.assertEqual(evidence["basis"], "NOT_AVAILABLE")
+            self.assertFalse(evidence["is_selection_signal"])
             self.assertFalse(evidence["is_commercial_proof"])
             self.assertFalse(evidence["requested_metric_confirmed"])
             self.assertEqual(evidence["requested_metric_status"], "NOT_OBTAINABLE_FOR_PRODUCT_QUERY")
             self.assertEqual(candidate["source_selection"]["role"], TARGET_PRODUCT)
 
-    def test_product_first_candidates_receive_the_existing_legacy_source_score(self):
+    def test_product_selection_no_longer_attaches_legacy_money_or_mechanism_scores(self):
         result, _ = self.run_find(RELEVANT + IRRELEVANT)
         self.assertEqual(len(result["candidates"]), len(RELEVANT))
         for candidate in result["candidates"]:
-            score = candidate["source_score"]
-            self.assertIsInstance(score, dict)
-            self.assertIsInstance(score.get("final_score"), (int, float))
-            self.assertIn(score.get("action"), {"DEEP", "SHALLOW", "REJECT"})
-            self.assertIn("money_signal_gate", score.get("components", {}))
-            self.assertEqual(candidate["performance_evidence"]["basis"], "ATTENTION_PROXY_ONLY")
-            self.assertFalse(candidate["performance_evidence"]["is_commercial_proof"])
+            self.assertIsNone(candidate.get("source_score"))
+            self.assertEqual(candidate["performance_evidence"]["basis"], "NOT_AVAILABLE")
+            self.assertFalse(candidate["performance_evidence"]["is_selection_signal"])
             self.assertEqual(candidate["commercial_evidence"]["level"], "ATTENTION_ONLY")
             self.assertEqual(candidate["source_selection"]["role"], TARGET_PRODUCT)
+            self.assertFalse(candidate["source_selection"]["attention_is_selection_signal"])
 
-    def test_relevant_ads_are_not_cut_by_a_pool_relative_floor(self):
-        # 5 relevant ads with very different reach: all pass an absolute attention floor; none is cut
-        # because irrelevant rows with more views sit above them.
-        result, _ = self.run_find(RELEVANT + IRRELEVANT)
+    def test_product_admission_and_order_do_not_depend_on_engagement(self):
+        rows = [row(*item) for item in RELEVANT]
+        for item in rows:
+            item.update({"views": None, "likes": None, "comments": None, "shares": None})
+        client = RecordingClient(rows)
+        params = {"country": "US", "period": 30, "max_requests": 5, "max_ads": 10,
+                  "keywords": ["car vacuum"], "performance_order_bys": [], "include_retention": False,
+                  "offer": OFFER}
+        seen_path = Path(self.temp.name) / "seen-no-engagement.json"
+        with mock.patch.dict("os.environ", {"CME_FIND_SEEN_PATH": str(seen_path)}):
+            result = run_find(params, client=client, now="2026-10-29T00:00:00Z")
         self.assertEqual(len(result["candidates"]), len(RELEVANT))
-        reasons = result["diagnostics"]["source_selection_diagnostics"]["rejected_by_reason"]
-        self.assertNotIn("BELOW_PERFORMANCE_FLOOR", reasons)
+        self.assertEqual([c["ad_id"] for c in result["candidates"]], [item[0] for item in RELEVANT])
+        self.assertTrue(all(call[1]["sort_by"] == "relevance" for call in client.calls))
 
-    def test_attention_floor_remains_an_explicit_operator_setting(self):
+    def test_attention_floor_is_ignored_for_pattern_source_discovery(self):
         result, _ = self.run_find(RELEVANT, attention_floor=1000)
-        self.assertEqual(result["candidates"], [])
-        reasons = result["diagnostics"]["source_selection_diagnostics"]["rejected_by_reason"]
-        self.assertEqual(reasons.get("BELOW_ATTENTION_PROXY_FLOOR"), len(RELEVANT))
+        self.assertEqual(len(result["candidates"]), len(RELEVANT))
+        self.assertIsNone(result["request"].get("minimum_attention_coverage"))
 
     def test_only_irrelevant_rows_yield_an_honest_no_target_relevance(self):
         result, client = self.run_find(IRRELEVANT)
