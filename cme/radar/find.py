@@ -1287,10 +1287,10 @@ def _run_mechanism_find(*, request: dict, offer: dict, keywords: list[str], clie
             reason = "NO_PLAYABLE_VIDEO"
         elif market.get("status") == "MISMATCH":
             reason = "SOURCE_MARKET_MISMATCH"
-        elif not query_product_match.get("matches"):
-            reason = str(query_product_match.get("reason") or "QUERY_PRODUCT_UNVERIFIED")
         elif role.get("role") != accept_role:
             reason = str(role.get("role") or "OFF_TOPIC")
+        elif not query_product_match.get("matches"):
+            reason = str(query_product_match.get("reason") or "QUERY_PRODUCT_UNVERIFIED")
         elif not role.get("promotion_evidence"):
             reason = "NO_INDEPENDENT_PROMOTION_EVIDENCE"
         elif target_lane and not role.get("target_promotion_evidence"):
@@ -1407,9 +1407,8 @@ def _run_mechanism_find(*, request: dict, offer: dict, keywords: list[str], clie
         if (row.get("source_role_info") or {}).get("role") == "TARGET_PRODUCT"
     )
     market_mismatch_count = reason_counts.get("SOURCE_MARKET_MISMATCH", 0)
-    unpromoted_target_mentions = reason_counts.get("QUERY_PRODUCT_NOT_PROMOTED", 0)
     no_target_relevance = target_lane and (
-        (target_role_count == 0 and unpromoted_target_mentions == 0)
+        target_role_count == 0
         or (target_role_count > 0 and market_mismatch_count >= target_role_count)
     )
     diagnostics = {

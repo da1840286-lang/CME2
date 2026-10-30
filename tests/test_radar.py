@@ -490,7 +490,7 @@ class VendoredCodeIsTheRealOne(Env):
 
         # High engagement and a product-related hashtag cannot turn use-context into an advertised target product.
         self.assertEqual(result["candidates"], [])
-        self.assertEqual(result["diagnostics"]["outcome"], "NO_TARGET_PRODUCT_AD")
+        self.assertEqual(result["diagnostics"]["outcome"], "NO_TARGET_RELEVANCE")
         gate = result["diagnostics"]["product_selection_gate"]
         self.assertGreater(gate["rejected_candidates"], 0)
         self.assertIn("OFF_TOPIC", gate["rejected_by_reason"])
@@ -519,7 +519,7 @@ class VendoredCodeIsTheRealOne(Env):
 
         self.assertEqual(result["candidates"], [])
         by_reason = result["diagnostics"]["source_selection_diagnostics"]["by_reason"]
-        self.assertIn("QUERY_PRODUCT_NOT_PROMOTED", by_reason)
+        self.assertIn("OFF_TOPIC", by_reason)
         row = result["stats"]["source_selection_diagnostics"]["examples"][0]
         self.assertEqual(row["product_match_reason"], "QUERY_PRODUCT_NOT_PROMOTED")
 
