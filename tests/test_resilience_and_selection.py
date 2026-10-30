@@ -359,7 +359,7 @@ class WorkflowThresholdIntegrationTests(unittest.TestCase):
             source_selection={"min_final_score": 75, "mode": "flag"})
         self.assertEqual(done.returncode, 0, done.stderr[-800:])
         self.assertTrue(live["weak_source"])
-        self.assertIn("below the bar", live["weak_source_reasons"][0])
+        self.assertIn("below the diagnostic bar", live["weak_source_reasons"][0])
         self.assertTrue(all(r["weak_source"] for r in ledger["candidates"]))
 
     def test_enforce_setting_is_diagnostic_and_does_not_block_all(self):

@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       stage:
-        description: "Run FIND, analyze a selected source, run Brain/frame checks, or create a test creative. Automatic transfer requires source-commercial/mechanism eligibility and the independent Target-Fit gate; manual candidate_id is an explicit override, not proof of commercial success."
+        description: "Run FIND, analyze a selected source, run Brain/frame checks, or create a test creative. Automatic ALL analyzes the FIND shortlist in FIND order using PATTERN_SOURCE_V1; commercial metrics are diagnostics and Target-Fit decides transferability. Manual candidate_id selects one FIND source but cannot bypass PATTERN_SOURCE_V1."
         type: choice
         options:
           - find
@@ -71,7 +71,7 @@ on:
         required: false
         default: false
       find_selection_mode:
-        description: "Product targets the configured offer; when a playback-metric option is selected it uses contract-aware, product-targeted Sponsored Search and an attention proxy only. Mechanism searches explicit keywords using Sponsored Search and an attention proxy only. Attention is not commercial proof; source-commercial and Target-Fit gates remain separate."
+        description: "Product targets the configured offer; when a playback-metric option is selected it uses contract-aware, product-targeted Sponsored Search and an attention proxy only. Mechanism searches explicit keywords using Sponsored Search and an attention proxy only. Attention is not commercial proof; it is diagnostic evidence, while Target-Fit remains the transferability gate."
         type: choice
         options:
           - product
@@ -84,7 +84,7 @@ on:
         required: false
         default: ""
       candidate_id:
-        description: "For analyze/all: exact candidate_id from FIND. An explicit choice overrides automatic commercial ranking; video/source checks and Target-Fit still apply. Use only when deliberately overriding automatic eligibility."
+        description: "For analyze/all: exact candidate_id from FIND. Manual selection overrides automatic order only; PATTERN_SOURCE_V1 video, role, promotion and explicit operator filters still apply. It is not proof of commercial success."
         type: string
         required: false
         default: ""
@@ -803,11 +803,11 @@ jobs:
                   s.write(f"- `candidate_id: {c['id']}` — {brand}: {title}; score={c.get('final_score')}; video={'yes' if c.get('video_url_present') else 'no'}; performance={(c.get('performance_evidence') or {}).get('basis', 'unknown')}; commercial_evidence={(c.get('commercial_evidence') or {}).get('level', 'unknown')}; playback={c.get('playback_metrics') or {}}; [open ad]({url})\n")
               if mode == "find":
                   if params.get("selection_mode") == "mechanism":
-                      s.write("\nMechanism results are PATTERN_CANDIDATE records, not commercial approval; attention is a proxy only and Target-Fit remains NOT_EVALUATED. Use this run ID plus an explicit candidate_id for stage=analyze.\n")
+                      s.write("\nFIND results are PATTERN_SOURCE_V1 analysis candidates, not commercial approval; attention is a proxy only and Target-Fit remains NOT_EVALUATED. Use this run ID plus an explicit candidate_id for stage=analyze.\n")
                   else:
                       s.write("\nManual choice: run stage=all with this run ID and the selected candidate_id.\n")
               else:
-                  s.write("\nPlayback metrics are shown only when SocialCrawl returned them. commercial_evidence is descriptive, not a profitability prediction. Automatic stage=all applies the strict source-commercial/mechanism eligibility gate before analysis, then the independent Target-Fit gate before transfer. Playback metrics are shown only when SocialCrawl returned them; commercial_evidence is descriptive, not a profitability prediction. A manually supplied candidate_id allows source inspection, not a commercial-success claim.\n")
+                  s.write("\nFIND records PATTERN_SOURCE_V1 eligibility after source-role, promotion, query, attention and explicit operator filters. ALL consumes the same eligible shortlist in FIND order; commercial metrics and scorer actions are diagnostics only. Target-Fit decides transferability. A manually supplied candidate_id selects one FIND source but cannot bypass PATTERN_SOURCE_V1.\n")
           print(f"FIND finished: {len(rows)} candidate(s).")
           PY
           elif [[ "$CME_STAGE" == "analyze" ]]; then

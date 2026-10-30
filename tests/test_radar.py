@@ -803,7 +803,7 @@ class AutomaticSourceReadinessGate(unittest.TestCase):
             },
         }
 
-    def test_reject_money_block_and_zero_score_are_skipped(self):
+    def test_scorer_reject_money_gate_and_zero_score_do_not_block_pattern_analysis(self):
         rejected = self.candidate(
             "rejected", action="REJECT", final_score=0,
             tags=["money_signal_hard_block", "duration_over_60_hard_block"],
@@ -817,11 +817,8 @@ class AutomaticSourceReadinessGate(unittest.TestCase):
             tags=["money_signal_pass"], money_pass=True, source_value_type="COMMERCIAL_WINNER",
         )
         selected, skipped = select_candidate([rejected, money_blocked, zero_score])
-        self.assertIsNone(selected)
-        self.assertEqual(len(skipped), 3)
-        self.assertIn("action is REJECT", skipped[0])
-        self.assertIn("money-signal hard block", skipped[1])
-        self.assertIn("zero or below", skipped[2])
+        self.assertEqual(selected["id"], "rejected")
+        self.assertEqual(skipped, [])
 
     def test_money_gate_or_explicit_mechanism_exception_can_pass(self):
         commercial = self.candidate(

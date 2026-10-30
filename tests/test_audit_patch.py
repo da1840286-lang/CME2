@@ -239,11 +239,11 @@ class AutoSelectionTests(unittest.TestCase):
         self.assertIsNone(chosen)
         self.assertIn("UNVERIFIED", skipped[0])
 
-    def test_excluded_hits_and_optional_score_floor(self):
+    def test_excluded_hits_block_but_legacy_score_floor_is_diagnostic_only(self):
         self.assertIn("hard-excluded", block_reason(self.cand("a", excluded=["weapon"])))
         self.assertEqual(block_reason(self.cand("a", score=0.8), min_final_score=0.5), "")
-        self.assertIn("below", block_reason(self.cand("a", score=0.2), min_final_score=0.5))
-        self.assertIn("below", block_reason(self.cand("a", score=None), min_final_score=0.5))
+        self.assertEqual(block_reason(self.cand("a", score=0.2), min_final_score=0.5), "")
+        self.assertEqual(block_reason(self.cand("a", score=None), min_final_score=0.5), "")
 
 
 
@@ -278,22 +278,21 @@ class PatternTransferSelectionTests(unittest.TestCase):
 
     def test_failed_money_gate_does_not_block_pattern_extraction(self):
         candidate = self.candidate("tess", final=18.0, performance=6.0, commercial=5.0)
-        self.assertIn("REJECT", block_reason(candidate))
+        self.assertEqual(block_reason(candidate), "")
         self.assertEqual(pattern_source_reason(candidate), "")
         picked, skipped = select_pattern_candidate([candidate])
         self.assertEqual(picked["id"], "tess")
         self.assertEqual(skipped, [])
-        chosen, _ = select_candidate([candidate])
-        self.assertIsNone(chosen)
+        chosen, skipped = select_candidate([candidate])
+        self.assertEqual(chosen["id"], "tess")
+        self.assertEqual(skipped, [])
 
-    def test_commercially_rejected_long_source_is_not_auto_selected(self):
+    def test_commercially_rejected_long_source_is_still_available_for_pattern_analysis(self):
         candidate = self.candidate("long", relevance="DIRECT", final=0.0,
                                    performance=86.0, commercial=0.0, duration=83.5)
-        self.assertEqual(pattern_source_reason(candidate), "")
         picked, skipped = select_transfer_candidate([candidate])
-        self.assertIsNone(picked)
-        self.assertTrue(any("REJECT" in reason or "money-signal" in reason or "duration" in reason
-                            for reason in skipped))
+        self.assertEqual(picked["id"], "long")
+        self.assertEqual(skipped, [])
 
     def test_low_or_unverified_relevance_is_not_auto_eligible(self):
         low = self.candidate("low", relevance="LOW", final=0.0, performance=0.0, commercial=0.0)
@@ -301,11 +300,11 @@ class PatternTransferSelectionTests(unittest.TestCase):
                                     performance=None, commercial=None, action="UNKNOWN")
         for candidate in (low, unverified):
             with self.subTest(candidate=candidate["id"]):
-                self.assertEqual(pattern_source_reason(candidate), "")
+                self.assertNotEqual(pattern_source_reason(candidate), "")
         picked, skipped = select_transfer_candidate([low, unverified])
         self.assertIsNone(picked)
         self.assertTrue(any("LOW" in reason for reason in skipped))
-        self.assertEqual(analysis_review_reason(unverified), "")
+        self.assertNotEqual(analysis_review_reason(unverified), "")
 
     def test_missing_video_and_hard_exclusions_remain_blocked(self):
         no_video = self.candidate("no-video", video=None)
@@ -339,14 +338,13 @@ class PatternTransferWorkflowWiringTests(unittest.TestCase):
     def test_manual_analysis_and_full_pipeline_use_pattern_policy(self):
         workflow = (ROOT / ".github" / "workflows" / "live-smoke.yml").read_text(encoding="utf-8")
         self.assertIn("from cme.radar.select import pattern_source_reason", workflow)
-        self.assertIn("from cme.radar.select import pattern_source_reason, select_transfer_candidate", workflow)
-        self.assertIn("candidate, skipped = select_transfer_candidate(candidates, threshold)", workflow)
-        self.assertNotIn("candidate, skipped = select_candidate(candidates)", workflow)
+        self.assertIn("from cme.radar.select import pattern_source_reason, rank_pattern_candidates", workflow)
+        self.assertIn("candidate_pool, skipped = rank_pattern_candidates(candidates)", workflow)
+        self.assertNotIn("select_transfer_candidate(candidates, threshold)", workflow)
+        self.assertNotIn("commercial_gate_passed", workflow)
         self.assertIn("PATTERN_EXTRACTION_NOT_COMMERCIAL_APPROVAL", workflow)
-        self.assertIn("Pattern extraction is not commercial approval", workflow)
-        self.assertNotIn("Analysis-only source contract is not commercial approval and cannot be used by stage=all", workflow)
-        self.assertIn("Automatic stage=all applies the strict source-commercial/mechanism eligibility gate before analysis", workflow)
-        self.assertIn("independent Target-Fit gate before transfer", workflow)
+        self.assertIn("Commercial metrics and scorer actions are diagnostics only", workflow)
+        self.assertIn("Target-Fit decides transferability downstream", workflow)
 
     def test_all_can_reuse_prior_find_artifact_from_same_branch(self):
         workflow = (ROOT / ".github" / "workflows" / "live-smoke.yml").read_text(encoding="utf-8")

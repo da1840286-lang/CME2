@@ -163,18 +163,18 @@ def cand(cid, video=True, cls="DIRECT", money=True, action="DEEP"):
 
 
 class AutoTransferEligibilityTests(unittest.TestCase):
-    def test_commercially_eligible_source_is_selected_and_weak_sources_are_skipped(self):
+    def test_money_gate_does_not_block_and_integrity_failures_still_do(self):
         ordered, skipped = rank_transfer_candidates([
-            cand("weak", money=False), cand("strong"), cand("novideo", video=False),
-            cand("excluded", cls="HARD_EXCLUDE")])
-        self.assertEqual([c["id"] for c in ordered], ["strong"])
-        self.assertEqual(len(skipped), 3)
+            cand("weak", money=False, action="REJECT"), cand("strong"),
+            cand("novideo", video=False), cand("excluded", cls="HARD_EXCLUDE")])
+        self.assertEqual([c["id"] for c in ordered], ["weak", "strong"])
+        self.assertEqual(len(skipped), 2)
 
-    def test_find_order_is_preserved_among_commercially_eligible_sources(self):
+    def test_find_order_is_preserved_without_commercial_reranking(self):
         ordered, skipped = rank_transfer_candidates([
             cand("a"), cand("b"), cand("c", money=False), cand("d", money=False)])
-        self.assertEqual([c["id"] for c in ordered], ["a", "b"])
-        self.assertEqual(len(skipped), 2)
+        self.assertEqual([c["id"] for c in ordered], ["a", "b", "c", "d"])
+        self.assertEqual(skipped, [])
 
     def test_weak_only_pool_is_rejected(self):
         chosen, skipped = select_transfer_candidate([cand("only", money=False, cls="UNVERIFIED", action="REJECT")])
