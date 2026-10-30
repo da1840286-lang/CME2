@@ -418,6 +418,7 @@ table{border-collapse:collapse;width:100%}td,th{border-bottom:1px solid var(--bd
 <p class="unk">Каждый запуск может делать до N платных запросов к SocialCrawl. В режиме «Целевой товар» часть бюджета резервируется для Ads Top/performance; в режиме «Смежный товар» выполняется только Sponsored Search по явным ключевым словам. Source Gate и Target-Fit остаются отдельными проверками. Автоматический анализ здесь не запускается.</p>
 <p>Страна <input id="fCountry" value="US" size="4"> Период <select id="fPeriod"><option>7</option><option selected>30</option><option>180</option></select></p>
 <p>Запросов (макс.) <input id="fReq" type="number" min="1" max="10" value="3" style="width:60px"> Объявлений <input id="fAds" type="number" min="1" max="50" value="20" style="width:60px"></p>
+<p>Длительность ролика <select id="fDuration"><option value="all">Без ограничения</option><option value="up_to_40">До 40 сек.</option><option value="40_to_60">Свыше 40 до 60 сек.</option><option value="60_to_90">Свыше 60 до 90 сек.</option><option value="over_90">Больше 90 сек.</option></select></p>
 <p>Режим отбора <select id="fMode"><option value="product">Целевой товар + Ads Top</option><option value="mechanism">Смежный товар / поиск механики</option></select></p>
 <p id="fModeInfo" class="unk">Товарный режим: текущий поиск и ранжирование; Source Gate и Target-Fit остаются отдельными проверками.</p>
 <p>Ключевые слова (через запятую)<br><input id="fKw" size="40"></p>
@@ -513,7 +514,7 @@ function syncFindMode(){
 }
 $('fMode').addEventListener('change',syncFindMode);syncFindMode();
 $('dlgFind').addEventListener('close',async()=>{if($('dlgFind').returnValue!=='go')return;say('Поиск выполняется…');
- const r=await api('POST','/api/find',{country:$('fCountry').value,period:+$('fPeriod').value,max_requests:+$('fReq').value,max_ads:+$('fAds').value,selection_mode:$('fMode').value,keywords:$('fKw').value.split(',').map(x=>x.trim()).filter(Boolean)});
+ const r=await api('POST','/api/find',{country:$('fCountry').value,period:+$('fPeriod').value,max_requests:+$('fReq').value,max_ads:+$('fAds').value,selection_mode:$('fMode').value,video_duration_range:$('fDuration').value,keywords:$('fKw').value.split(',').map(x=>x.trim()).filter(Boolean)});
  const d=r.diagnostics||{};
  const note=r.status==='OK'?(r.returned>0?`Найдено: новых ${r.new}, обновлено ${r.updated}. FIND ${d.outcome||'OK'}; DIRECT ${d.direct_relevant_ads??'н/д'}, EXPANDED ${d.expanded_relevant_ads??'н/д'}.`:`FIND ${d.outcome||'без кандидатов'}: API-строк ${d.raw_ads_returned??0}; DIRECT ${d.direct_relevant_ads??0}; EXPANDED ${d.expanded_relevant_ads??0}; непроверенных ${d.unverified_ads??0}. ${d.explanation||''}${(d.search_queries_executed||[]).length?' Запросы: '+d.search_queries_executed.join(', '):''}`):`${r.status}: ${r.detail||''} ${r.how_to_fix||''}`;
  say(note,r.status!=='OK'||!r.returned);await loadFeed()});

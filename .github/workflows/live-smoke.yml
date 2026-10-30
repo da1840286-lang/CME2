@@ -39,6 +39,17 @@ on:
         type: number
         required: true
         default: 3
+      find_video_duration_range:
+        description: "FIND video-duration filter. A selected range excludes records with unknown duration; it does not change provider request budgets or downstream stages."
+        type: choice
+        options:
+          - all
+          - up_to_40
+          - 40_to_60
+          - 60_to_90
+          - over_90
+        required: true
+        default: all
       keywords:
         description: "Comma-separated fallback/generic search terms. In contract-aware product search, the exact offer name and product type are prioritized before these terms."
         type: string
@@ -169,6 +180,7 @@ jobs:
       FIND_PERIOD: ${{ inputs.period }}
       FIND_REQUESTS: ${{ inputs.find_requests }}
       FIND_MAX_ADS: ${{ inputs.find_max_ads }}
+      FIND_VIDEO_DURATION_RANGE: ${{ inputs.find_video_duration_range }}
       FIND_KEYWORDS: ${{ inputs.keywords }}
       FIND_SELECTION_MODE: ${{ inputs.find_selection_mode }}
       FIND_PERFORMANCE_ORDER: ${{ inputs.find_performance_order }}
@@ -441,6 +453,7 @@ jobs:
               [[ "$FIND_PERIOD" =~ ^(7|30|180)$ ]] || { echo "::error::period must be 7, 30, or 180."; exit 1; }
               [[ "$FIND_REQUESTS" =~ ^([1-9]|10)$ ]] || { echo "::error::find_requests must be 1..10."; exit 1; }
               [[ "$FIND_MAX_ADS" =~ ^([1-9]|[1-4][0-9]|50)$ ]] || { echo "::error::find_max_ads must be 1..50."; exit 1; }
+              [[ "$FIND_VIDEO_DURATION_RANGE" =~ ^(all|up_to_40|40_to_60|60_to_90|over_90)$ ]] || { echo "::error::find_video_duration_range is invalid."; exit 1; }
               if [[ "$FIND_SELECTION_MODE" == "mechanism" && "$FIND_PERFORMANCE_ORDER" != "default" ]]; then
                 echo "::error::Mechanism mode uses Sponsored Search only; choose find_performance_order=default."
                 exit 1
@@ -478,6 +491,7 @@ jobs:
                 [[ "$FIND_PERIOD" =~ ^(7|30|180)$ ]] || { echo "::error::period must be 7, 30, or 180."; exit 1; }
                 [[ "$FIND_REQUESTS" =~ ^([1-9]|10)$ ]] || { echo "::error::find_requests must be 1..10."; exit 1; }
                 [[ "$FIND_MAX_ADS" =~ ^([1-9]|[1-4][0-9]|50)$ ]] || { echo "::error::find_max_ads must be 1..50."; exit 1; }
+                [[ "$FIND_VIDEO_DURATION_RANGE" =~ ^(all|up_to_40|40_to_60|60_to_90|over_90)$ ]] || { echo "::error::find_video_duration_range is invalid."; exit 1; }
                 if [[ "$FIND_SELECTION_MODE" == "mechanism" && "$FIND_PERFORMANCE_ORDER" != "default" ]]; then
                   echo "::error::Mechanism mode uses Sponsored Search only; choose find_performance_order=default."
                   exit 1
@@ -661,6 +675,7 @@ jobs:
                     "max_ads": int(os.environ["FIND_MAX_ADS"]),
                     "keywords": keywords, "offer": offer_data, "discovery_mode": "auto",
                     "selection_mode": os.environ.get("FIND_SELECTION_MODE", "product"),
+                    "video_duration_range": os.environ.get("FIND_VIDEO_DURATION_RANGE", "all"),
                     "performance_order_bys": performance_order_bys,
                     "include_retention": os.environ.get("FIND_INCLUDE_RETENTION", "false").lower() == "true"}
           try:
@@ -964,6 +979,7 @@ jobs:
                             "max_ads": int(os.environ["FIND_MAX_ADS"]),
                             "keywords": keywords, "offer": offer_data, "discovery_mode": "auto",
                             "selection_mode": os.environ.get("FIND_SELECTION_MODE", "product"),
+                            "video_duration_range": os.environ.get("FIND_VIDEO_DURATION_RANGE", "all"),
                             "performance_order_bys": performance_order_options[order_mode],
                             "include_retention": os.environ.get("FIND_INCLUDE_RETENTION", "false").lower() == "true"}
                   find_result = run_find(params)

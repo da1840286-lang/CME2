@@ -31,6 +31,37 @@ METRIC_FIELDS = ("views", "likes", "comments", "shares", "ctr", "cvr", "play_2s_
                  "retention_2s", "retention_6s", "retention_curve",
                  "rank", "cost_score", "like_tier", "estimated_reach", "engagement_rate")
 PERIODS = (7, 30, 180)
+VIDEO_DURATION_RANGES = ("all", "up_to_40", "40_to_60", "60_to_90", "over_90")
+
+
+def _video_duration_filter_reason(record: dict, selected_range: str = "all") -> str | None:
+    """Return why a candidate fails the operator-selected duration range.
+
+    Unknown duration remains eligible in the default all-range mode, but is excluded
+    from a specific range rather than silently treated as a short video.
+    """
+    selected_range = str(selected_range or "all").strip().lower()
+    if selected_range not in VIDEO_DURATION_RANGES:
+        raise ValueError(f"video_duration_range must be one of {VIDEO_DURATION_RANGES}")
+    if selected_range == "all":
+        return None
+    record = record if isinstance(record, dict) else {}
+    raw = record.get("duration_seconds")
+    if isinstance(raw, bool) or raw in (None, "", []):
+        return "VIDEO_DURATION_UNKNOWN"
+    try:
+        duration = float(raw)
+    except (TypeError, ValueError, OverflowError):
+        return "VIDEO_DURATION_UNKNOWN"
+    if not math.isfinite(duration) or duration <= 0:
+        return "VIDEO_DURATION_UNKNOWN"
+    matches = {
+        "up_to_40": duration <= 40,
+        "40_to_60": 40 < duration <= 60,
+        "60_to_90": 60 < duration <= 90,
+        "over_90": duration > 90,
+    }[selected_range]
+    return None if matches else "VIDEO_DURATION_OUT_OF_RANGE"
 
 LEGACY_ERROR = ""
 try:
@@ -752,7 +783,7 @@ def to_candidate(item: dict, request: dict, collected_at: str, origin: str, sour
                 "performance_evidence": rec.get("performance_evidence") or {},
                 "selection_reason": rec.get("auto_selection_reason") or ""},
         "discovered_at": collected_at,
-        "request": {k: request.get(k) for k in ("country", "period", "order_bys", "keywords", "vertical", "selection_mode")},
+        "request": {k: request.get(k) for k in ("country", "period", "order_bys", "keywords", "vertical", "selection_mode", "video_duration_range")},
         "legacy_record": rec,
     }
     role = rec.get("source_role_info")
@@ -1174,7 +1205,8 @@ def _run_mechanism_find(*, request: dict, offer: dict, keywords: list[str], clie
                         max_ads: int, limit_per_board: int,
                         accept_role: str = ADJACENT_MECHANISM, lane: str = "mechanism",
                         attention_floor: float | None = None,
-                        requested_metric_status: dict | None = None) -> dict:
+                        requested_metric_status: dict | None = None,
+                        video_duration_range: str = "all") -> dict:
     """Sponsored-Search-only selection; no Ads Top lane, no pool-relative percentile.
 
     lane="mechanism": adjacent-product sources (explicit keywords).
@@ -1189,6 +1221,14 @@ def _run_mechanism_find(*, request: dict, offer: dict, keywords: list[str], clie
     calls, raw_records, qualified, rejected = [], [], [], []
     rows_by_identity, identity_keys_seen = {}, set()
     raw_count = 0
+    duration_gate = {
+        "applied": video_duration_range != "all",
+        "range": video_duration_range,
+        "considered_candidates": 0,
+        "accepted_candidates": 0,
+        "rejected_unknown_duration": 0,
+        "rejected_out_of_range": 0,
+    }
     for query in keywords[:max_requests]:
         try:
             response = client.fetch_sponsored_search(
@@ -1273,7 +1313,14 @@ def _run_mechanism_find(*, request: dict, offer: dict, keywords: list[str], clie
         elif attention["score"] < floor:
             reason = "BELOW_ATTENTION_PROXY_FLOOR"
         else:
-            reason = ""
+            duration_gate["considered_candidates"] += 1
+            reason = _video_duration_filter_reason(record, video_duration_range)
+            if reason == "VIDEO_DURATION_UNKNOWN":
+                duration_gate["rejected_unknown_duration"] += 1
+            elif reason == "VIDEO_DURATION_OUT_OF_RANGE":
+                duration_gate["rejected_out_of_range"] += 1
+            else:
+                duration_gate["accepted_candidates"] += 1
         if reason:
             rejected.append({
                 "ad_id": str(record.get("ad_id") or record.get("video_id") or ""),
@@ -1367,6 +1414,7 @@ def _run_mechanism_find(*, request: dict, offer: dict, keywords: list[str], clie
         "product_relevant_ads": sum(1 for row in rows_by_identity.values()
                                     if (row.get("source_role_info") or {}).get("role") == "TARGET_PRODUCT"),
         "adjacent_mechanism_ads": len(qualified), "auto_shortlist_ads": len(selected),
+        "video_duration_filter": duration_gate,
         "performance_lane_reserved": False,
         "discovery_strategy": {
             "selection_mode": "product" if target_lane else "mechanism",
@@ -1416,6 +1464,14 @@ def _run_mechanism_find(*, request: dict, offer: dict, keywords: list[str], clie
     stats["total_credits_reported"] = sum(
         int(call.get("credits_used") or 0) for call in calls if isinstance(call.get("credits_used"), (int, float)))
     diagnostics["total_credits_reported"] = stats["total_credits_reported"]
+    if (not candidates and duration_gate["applied"] and duration_gate["considered_candidates"] > 0
+            and duration_gate["accepted_candidates"] == 0):
+        diagnostics["outcome"] = "NO_MATCHING_VIDEO_DURATION"
+        diagnostics["explanation"] = (
+            "Sources passed the existing FIND gates, but none matched the selected video-duration range. "
+            "Candidates with unknown duration were excluded from this range."
+        )
+    diagnostics["video_duration_filter"] = duration_gate
     if requested_metric_status:
         availability = {
             "requested_metrics": list(requested_metric_status.get("requested_metrics") or []),
@@ -1443,6 +1499,9 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
     max_requests = int(params.get("max_requests") or 3)
     max_ads = int(params.get("max_ads") or 20)
     selection_mode = str(params.get("selection_mode") or "product").strip().lower()
+    video_duration_range = str(params.get("video_duration_range") or "all").strip().lower()
+    if video_duration_range not in VIDEO_DURATION_RANGES:
+        raise ValueError(f"video_duration_range must be one of {VIDEO_DURATION_RANGES}")
     if selection_mode not in {"product", "mechanism"}:
         raise ValueError("selection_mode must be 'product' or 'mechanism'")
     if len(country) != 2 or not country.isalpha():
@@ -1495,6 +1554,7 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
         "search_terms": search_terms, "selection_mode": selection_mode,
         "target_offer": offer["target_offer"], "product_type": offer["product_type"],
         "product_category": offer["product_category"], "max_ads": max_ads,
+        "video_duration_range": video_duration_range,
         "vertical": VERTICAL,
     }
     if conflict:
@@ -1528,7 +1588,7 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
             request=request, offer=offer, keywords=user_keywords, client=client,
             ledger=ledger, scope=scope, prior_seen_keys=prior_seen_keys, stamp=stamp,
             country=country, period=period, max_requests=max_requests, max_ads=max_ads,
-            limit_per_board=limit_per_board,
+            limit_per_board=limit_per_board, video_duration_range=video_duration_range,
         )
     if contract_aware:
         queries = ordered_target_queries(
@@ -1550,6 +1610,7 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
             country=country, period=period, max_requests=len(queries), max_ads=max_ads,
             limit_per_board=limit_per_board, accept_role=TARGET_PRODUCT, lane="target_product",
             attention_floor=(None if raw_floor in (None, "") else float(raw_floor)),
+            video_duration_range=video_duration_range,
             requested_metric_status={
                 "requested_metrics": list(requested_performance_order_bys),
                 "requested_metric_status": retention_strategy["requested_metric_status"],
@@ -1595,7 +1656,10 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
             keyword_boards=(1 if dual_playback_retention else max_requests),
             # Keep the legacy scheduler from ending the bounded batch early merely
             # because pre-gate scoring marks enough raw sources as analysis-ready.
-            source_queue_size=(500 if dual_playback_retention else None),
+            source_queue_size=(
+                500 if dual_playback_retention else
+                min(250, max(50, max_ads * 5)) if video_duration_range != "all" else None
+            ),
             vertical=VERTICAL, target_offer=offer["target_offer"],
             product_type=offer["product_type"] or offer["product_category"],
             prelander=offer["prelander"], landing_page=offer["landing_page"],
@@ -1743,9 +1807,31 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
     stats["retention_enrichment"] = dict(retention_enrichment_execution)
     _merge_discovery_evidence(ranked, evidence_tracker)
     _enrich_selection_diagnostics(stats, evidence_tracker)
+    duration_filter_diagnostics = {
+        "applied": video_duration_range != "all",
+        "range": video_duration_range,
+        "considered_candidates": len(ranked),
+        "accepted_candidates": 0,
+        "rejected_unknown_duration": 0,
+        "rejected_out_of_range": 0,
+    }
+    if duration_filter_diagnostics["applied"]:
+        duration_qualified = []
+        for item in ranked:
+            reason = _video_duration_filter_reason(item.get("record"), video_duration_range)
+            if reason == "VIDEO_DURATION_UNKNOWN":
+                duration_filter_diagnostics["rejected_unknown_duration"] += 1
+            elif reason == "VIDEO_DURATION_OUT_OF_RANGE":
+                duration_filter_diagnostics["rejected_out_of_range"] += 1
+            else:
+                duration_filter_diagnostics["accepted_candidates"] += 1
+                duration_qualified.append(item)
+        ranked = duration_qualified
+    else:
+        duration_filter_diagnostics["accepted_candidates"] = len(ranked)
     candidates_before_final_gates = [to_candidate(item, request, stamp, "found") for item in ranked]
     candidates, final_gates = _apply_product_selection_gates(candidates_before_final_gates, request)
-    if dual_playback_retention:
+    if dual_playback_retention or duration_filter_diagnostics["applied"]:
         accepted_before_output_limit = len(candidates)
         candidates = candidates[:max_ads]
         final_gates["product_selection"]["accepted_before_output_limit"] = accepted_before_output_limit
@@ -1754,6 +1840,7 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
         final_gates["product_selection"]["trimmed_after_gates"] = max(
             0, accepted_before_output_limit - len(candidates)
         )
+    stats["video_duration_filter"] = duration_filter_diagnostics
     stats["product_selection_gate"] = final_gates["product_selection"]
     stats["requested_performance_evidence_gate"] = final_gates["requested_performance"]
     strategy = stats.setdefault("discovery_strategy", {})
@@ -1818,6 +1905,14 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
             ),
         }
     diagnostics = _find_diagnostics(stats, len(candidates))
+    diagnostics["video_duration_filter"] = duration_filter_diagnostics
+    if (duration_filter_diagnostics["applied"] and duration_filter_diagnostics["considered_candidates"] > 0
+            and duration_filter_diagnostics["accepted_candidates"] == 0):
+        diagnostics["outcome"] = "NO_MATCHING_VIDEO_DURATION"
+        diagnostics["explanation"] = (
+            "FIND found candidates, but none matched the selected video-duration range. "
+            "Records with unknown duration were excluded from the selected range."
+        )
     diagnostics["product_source_role_gate"] = stats.get("product_source_role_gate") or {}
     diagnostics["product_selection_gate"] = stats.get("product_selection_gate") or {}
     diagnostics["requested_performance_evidence_gate"] = stats.get("requested_performance_evidence_gate") or {}
