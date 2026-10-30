@@ -1407,8 +1407,10 @@ def _run_mechanism_find(*, request: dict, offer: dict, keywords: list[str], clie
         if (row.get("source_role_info") or {}).get("role") == "TARGET_PRODUCT"
     )
     market_mismatch_count = reason_counts.get("SOURCE_MARKET_MISMATCH", 0)
+    unpromoted_target_mentions = reason_counts.get("QUERY_PRODUCT_NOT_PROMOTED", 0)
     no_target_relevance = target_lane and (
-        target_role_count == 0 or market_mismatch_count >= target_role_count
+        (target_role_count == 0 and unpromoted_target_mentions == 0)
+        or (target_role_count > 0 and market_mismatch_count >= target_role_count)
     )
     diagnostics = {
         "outcome": "CANDIDATES_FOUND" if candidates else (
