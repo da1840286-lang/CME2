@@ -452,7 +452,7 @@ class VendoredCodeIsTheRealOne(Env):
         self.assertEqual(result["candidates"], [])
         self.assertEqual(result["diagnostics"]["outcome"], "NO_TARGET_RELEVANCE")
         by_reason = result["diagnostics"]["source_selection_diagnostics"]["by_reason"]
-        self.assertIn("QUERY_PRODUCT_MISMATCH", by_reason)
+        self.assertIn("OFF_TOPIC", by_reason)
 
 
 
