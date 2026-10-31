@@ -89,7 +89,7 @@ on:
         required: false
         default: ""
       branding_policy:
-        description: "For brain/all: no_branding forbids product logos/lettering; target_brand_allowed permits confirmed target marks. Frame inherits its exact Brain contract."
+        description: "Single campaign branding selector: no_branding removes all product marks; target_brand_allowed preserves only confirmed target-brand marks. Frame inherits its exact Brain contract."
         type: choice
         options:
           - no_branding
@@ -97,10 +97,10 @@ on:
         required: true
         default: no_branding
       offer_json:
-        description: "Target OfferCard. For target_brand_allowed, add confirmed target marks to approved_brand_marks."
+        description: "Target OfferCard facts and approved_brand_marks. Branding mode is controlled only by the separate branding_policy menu; any branding_policy field in this JSON is ignored."
         type: string
         required: false
-        default: '{"offer_id":"fanttik-v8-mate-us-001","name":"Fanttik V8 Mate Cordless Car Vacuum","product_type":"cordless handheld car vacuum","verified_claims":["Cordless car vacuum"],"forbidden_claims":["guaranteed","medical","cures"],"photos":[],"platform":"","geo":"US","product_category":"","confirmations":[],"branding_policy":"no_branding","approved_brand_marks":[]}'
+        default: '{"offer_id":"fanttik-v8-mate-us-001","name":"Fanttik V8 Mate Cordless Car Vacuum","product_type":"cordless handheld car vacuum","verified_claims":["Cordless car vacuum"],"forbidden_claims":["guaranteed","medical","cures"],"photos":[],"platform":"","geo":"US","product_category":"","confirmations":[],"approved_brand_marks":[]}'
       target_photo_url:
         description: "Direct HTTPS image URL; downloaded during the workflow, not committed to the repository"
         type: string
@@ -173,6 +173,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       CME_REPOSITORY: ${{ github.repository }}
       CME_STAGE: ${{ inputs.stage }}
+      CME_BRANDING_POLICY: ${{ inputs.branding_policy }}
       FIND_RUN_ID: ${{ inputs.find_run_id }}
       CANDIDATE_ID: ${{ inputs.candidate_id }}
       SOURCE_CONTRACT_PROVIDED: ${{ inputs.source_contract_json != '' || inputs.source_contract_run_id != '' }}
@@ -276,6 +277,7 @@ jobs:
           from urllib.parse import urlsplit
           from PIL import Image
           from cme.brain import build_source_transfer_context
+          from cme.branding import BRANDING_POLICIES
           from cme.offer import load_offer
           from cme.qa import validate_product_references
 
@@ -372,9 +374,18 @@ jobs:
               raise SystemExit(f"Invalid JSON (line {exc.lineno}, column {exc.colno}): {exc.msg}") from exc
           if not isinstance(offer_data, dict):
               raise SystemExit("offer_json must be a JSON object")
-          branding_policy = str(dispatch_inputs.get("branding_policy") or "no_branding").strip().lower()
-          if branding_policy not in {"no_branding", "target_brand_allowed"}:
-              raise SystemExit("branding_policy must be no_branding or target_brand_allowed")
+          branding_policy = os.environ.get("CME_BRANDING_POLICY", "").strip().lower()
+          if branding_policy not in BRANDING_POLICIES:
+              raise SystemExit(
+                  "Select branding_policy in the workflow menu: no_branding or target_brand_allowed. "
+                  "The run will not silently choose a branding mode."
+              )
+          json_policy = offer_data.pop("branding_policy", None)
+          if json_policy and str(json_policy).strip().lower() != branding_policy:
+              print(
+                  f"Ignoring offer_json.branding_policy={json_policy!r}; "
+                  f"workflow menu selected {branding_policy!r} and is the sole policy source."
+              )
           offer_data["branding_policy"] = branding_policy
           if not isinstance(offer_data.get("approved_brand_marks", []), list):
               raise SystemExit("OfferCard.approved_brand_marks must be a JSON array")
@@ -420,6 +431,10 @@ jobs:
           offer_path = out / "live_offer.json"
           offer_path.write_text(json.dumps(offer_data, ensure_ascii=False, indent=2), encoding="utf-8")
           offer = load_offer(offer_path)
+          # Persist the exact effective allowlist resolved by OfferCard. Every downstream
+          # stage consumes this normalized file; the menu value is not re-read later.
+          offer_data["approved_brand_marks"] = list(offer.approved_brand_marks)
+          offer_path.write_text(json.dumps(offer_data, ensure_ascii=False, indent=2), encoding="utf-8")
           issues = validate_product_references(offer.photos)
           if issues:
               raise SystemExit("Target-photo preflight blocked before provider calls: " + "; ".join(issues))
@@ -434,7 +449,16 @@ jobs:
               if not any(context.get(key) for key in meaningful):
                   raise SystemExit("Source contract contains no usable mechanism/transfer evidence")
               (out / "source_contract.json").write_text(json.dumps(source_data, ensure_ascii=False, indent=2), encoding="utf-8")
-          print(f"Preflight PASS: offer={offer.offer_id}; target photo(s)={len(offer.photos)}.")
+          effective_marks = ", ".join(offer.approved_brand_marks) or "(none)"
+          print(
+              f"Preflight PASS: offer={offer.offer_id}; branding_policy={offer.branding_policy}; "
+              f"approved_target_marks={effective_marks}; target photo(s)={len(offer.photos)}."
+          )
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write("## Campaign branding contract\\n\\n")
+              summary.write(f"- Workflow menu selection: {offer.branding_policy}\\n")
+              summary.write(f"- Approved target-brand marks: {effective_marks}\\n")
+              summary.write("- This normalized OfferCard is the single source consumed by Brain, Frame, generation and QA.\\n\\n")
           print("No provider calls were made by this preflight step.")
           PY
 

@@ -183,6 +183,9 @@ class MechanismCoverageTests(unittest.TestCase):
             manifest = json.loads((out / "atoms_manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(manifest["mechanism_links"], ["problem", "intervention", "result"])
             offer = load_offer(EX)
+            self.assertEqual(manifest["schema_version"], 2)
+            self.assertEqual(manifest["branding_policy"], offer.branding_policy)
+            self.assertEqual(manifest["approved_brand_marks"], list(offer.approved_brand_marks))
             data = json.loads((out / "atoms.json").read_text(encoding="utf-8"))
             validate_atoms_manifest(out / "atoms.json", out / "atoms_manifest.json", data, offer, shot=1)
 
@@ -202,6 +205,20 @@ class MechanismCoverageTests(unittest.TestCase):
                 with self.assertRaises(BrainError) as gate_cm:
                     validate_atoms_manifest(out / "atoms.json", out / "atoms_manifest.json", data, offer, shot=1)
                 self.assertIn("#target_fit_gate", gate_cm.exception.errors)
+            other_policy = "no_branding" if manifest["branding_policy"] != "no_branding" else "target_brand_allowed"
+            for tampered in (
+                {**manifest, "branding_policy": other_policy},
+                {**manifest, "approved_brand_marks": ["UnapprovedBrand"]},
+            ):
+                (out / "atoms_manifest.json").write_text(
+                    json.dumps(tampered, ensure_ascii=False, indent=1), encoding="utf-8")
+                with self.assertRaises(BrainError) as branding_cm:
+                    validate_atoms_manifest(out / "atoms.json", out / "atoms_manifest.json", data, offer, shot=1)
+                self.assertTrue(
+                    {"branding_policy", "approved_brand_marks"}.intersection(branding_cm.exception.errors),
+                    branding_cm.exception.errors,
+                )
+
             # Restore the valid manifest before exercising the separate missing-link regression.
             (out / "atoms_manifest.json").write_text(
                 json.dumps(manifest, ensure_ascii=False, indent=1), encoding="utf-8")

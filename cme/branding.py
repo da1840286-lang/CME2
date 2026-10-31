@@ -106,6 +106,19 @@ def resolved_brand_marks(policy, approved_brand_marks=(), offer_name="", product
     return explicit if explicit else default_target_marks(offer_name, product_type)
 
 
+def resolve_branding_contract(policy, approved_brand_marks=(), offer_name="", product_type=""):
+    """Return the single canonical campaign policy and its effective target-mark allowlist."""
+    normalized = str(policy or "").strip().lower()
+    if normalized not in BRANDING_POLICIES:
+        raise ValueError(f"unsupported branding_policy {normalized!r}; expected one of {BRANDING_POLICIES}")
+    return {
+        "branding_policy": normalized,
+        "approved_brand_marks": list(
+            resolved_brand_marks(normalized, approved_brand_marks, offer_name, product_type)
+        ),
+    }
+
+
 def reference_lettering_rule():
     """Visual acceptance rule for the prepared image-provider reference."""
     return (

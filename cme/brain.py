@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 import re
 from .atoms import ATOM_SCHEMA, TRANSFER_ATOM_SCHEMA, check_claims, check_language, parse_atoms
-from .branding import TARGET_BRAND_ALLOWED, brain_branding_rule, resolved_brand_marks
+from .branding import brain_branding_rule, resolve_branding_contract
 from .vertical import check_vertical
 
 
@@ -1048,10 +1048,15 @@ def validate_transfer_decision(decision, atoms) -> list:
 
 
 def build_request(offer, brief: str, shots: int, failed=None, source_transfer=None) -> dict:
-    policy = getattr(offer, "branding_policy", TARGET_BRAND_ALLOWED)
-    branding_rule = brain_branding_rule(policy, resolved_brand_marks(
-        policy, getattr(offer, "approved_brand_marks", ()), getattr(offer, "name", ""), getattr(offer, "product_type", "")))
-    req = {"schema": TRANSFER_ATOM_SCHEMA if source_transfer else ATOM_SCHEMA, "offer": offer.to_dict(), "brief": brief, "shots": shots,
+    branding = resolve_branding_contract(
+        offer.branding_policy, offer.approved_brand_marks, offer.name, offer.product_type
+    )
+    branding_rule = brain_branding_rule(
+        branding["branding_policy"], branding["approved_brand_marks"]
+    )
+    offer_payload = offer.to_dict()
+    offer_payload.update(branding)
+    req = {"schema": TRANSFER_ATOM_SCHEMA if source_transfer else ATOM_SCHEMA, "offer": offer_payload, "brief": brief, "shots": shots,
            "rules": ["Return atoms only, no finished prompts.",
                      "Every kind='claim' atom must copy one verified claim verbatim and use channel='qa'; it records offer truth, not pixels.",
                      "Never put kind='claim' atoms in channel='image'. If visible proof is needed, create a separate image atom of kind product/action/scene that describes an observable cue, such as a close-up of the zip closure visibly shut.",

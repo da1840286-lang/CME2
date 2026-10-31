@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from .branding import BRANDING_POLICIES, TARGET_BRAND_ALLOWED
+from .branding import BRANDING_POLICIES, TARGET_BRAND_ALLOWED, resolve_branding_contract
 
 MAX_CLAIM_CHARS = 120
 
@@ -31,6 +31,9 @@ class OfferCard:
     approved_brand_marks: tuple[str, ...] = ()
 
     def to_dict(self) -> dict:
+        branding = resolve_branding_contract(
+            self.branding_policy, self.approved_brand_marks, self.name, self.product_type
+        )
         return {
             "offer_id": self.offer_id, "name": self.name, "product_type": self.product_type,
             "verified_claims": list(self.verified_claims),
@@ -38,8 +41,7 @@ class OfferCard:
             "photos": [Path(x).name for x in self.photos], "platform": self.platform, "geo": self.geo,
             "product_category": self.product_category,
             "confirmations": list(self.confirmations),
-            "branding_policy": self.branding_policy,
-            "approved_brand_marks": list(self.approved_brand_marks),
+            **branding,
         }
 
 
@@ -76,6 +78,7 @@ def load_offer(path: str | Path, check_files: bool = True) -> OfferCard:
     photos = resolved
     if errors:
         raise OfferError("; ".join(errors))
+    branding = resolve_branding_contract(policy, marks, data["name"], data["product_type"])
     return OfferCard(
         offer_id=str(data["offer_id"]).strip(), name=str(data["name"]).strip(),
         product_type=str(data["product_type"]).strip(),
@@ -85,5 +88,6 @@ def load_offer(path: str | Path, check_files: bool = True) -> OfferCard:
         geo=str(data.get("geo", "US")).strip().upper() or "US",
         product_category=str(data.get("product_category", "")).strip().lower(),
         confirmations=tuple(str(c).strip() for c in data.get("confirmations", []) if str(c).strip()),
-        branding_policy=policy, approved_brand_marks=tuple(marks),
+        branding_policy=branding["branding_policy"],
+        approved_brand_marks=tuple(branding["approved_brand_marks"]),
     )

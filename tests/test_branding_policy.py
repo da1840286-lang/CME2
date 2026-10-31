@@ -5,15 +5,17 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from PIL import Image, ImageDraw
 from cme.brain import build_request
-from cme.branding import NO_BRANDING, TARGET_BRAND_ALLOWED, allowed_brand_tokens, prepare_unbranded_reference, qa_branding_rule
+from cme.branding import (NO_BRANDING, TARGET_BRAND_ALLOWED, allowed_brand_tokens,
+                          prepare_unbranded_reference, qa_branding_rule, resolve_branding_contract)
 from cme.compiler import compile_image_prompt
 from cme.offer import load_offer
 from cme.qa import CheckResult, SYSTEM_NO_TEXT_ID, make_qa_checks
-from cme.run import produce_shot
+from cme.run import produce_shot, qa_retry_feedback
 from cme.state import new_run
 from cme.vertical import GateError
 from tests.helpers import A, png_bytes
@@ -22,6 +24,67 @@ ROOT = Path(__file__).resolve().parent.parent
 EX = ROOT / "examples" / "offer_example.json"
 
 class CampaignBrandingPolicyTests(unittest.TestCase):
+    def test_offer_loader_normalizes_one_policy_and_effective_target_mark_allowlist(self):
+        data = json.loads(EX.read_text(encoding="utf-8"))
+        data["photos"] = [str((ROOT / "examples" / "photos" / "product_01.png").resolve())]
+        data["approved_brand_marks"] = ["Grove Co."]
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "offer.json"
+            data["branding_policy"] = NO_BRANDING
+            path.write_text(json.dumps(data), encoding="utf-8")
+            strict = load_offer(path)
+            self.assertEqual(strict.branding_policy, NO_BRANDING)
+            self.assertEqual(strict.approved_brand_marks, ())
+            self.assertEqual(strict.to_dict()["approved_brand_marks"], [])
+
+            data["branding_policy"] = TARGET_BRAND_ALLOWED
+            path.write_text(json.dumps(data), encoding="utf-8")
+            branded = load_offer(path)
+            self.assertEqual(branded.branding_policy, TARGET_BRAND_ALLOWED)
+            self.assertEqual(branded.approved_brand_marks, ("Grove Co.",))
+            self.assertEqual(branded.to_dict()["approved_brand_marks"], ["Grove Co."])
+            self.assertEqual(
+                resolve_branding_contract(branded.branding_policy, branded.approved_brand_marks,
+                                          branded.name, branded.product_type),
+                {"branding_policy": TARGET_BRAND_ALLOWED, "approved_brand_marks": ["Grove Co."]},
+            )
+
+    def test_workflow_menu_is_the_only_branding_policy_input(self):
+        workflow = (ROOT / ".github" / "workflows" / "live-smoke.yml").read_text(encoding="utf-8")
+        self.assertIn("CME_BRANDING_POLICY: ${{ inputs.branding_policy }}", workflow)
+        self.assertIn('os.environ.get("CME_BRANDING_POLICY", "")', workflow)
+        self.assertIn('offer_data.pop("branding_policy", None)', workflow)
+        self.assertNotIn('dispatch_inputs.get("branding_policy")', workflow)
+        self.assertIn("- no_branding", workflow)
+        self.assertIn("- target_brand_allowed", workflow)
+
+    def test_retry_feedback_obeys_the_same_two_branding_modes(self):
+        receipt_id = "drec_" + "a" * 24
+        with tempfile.TemporaryDirectory() as d:
+            receipt = {
+                "receipt_id": receipt_id,
+                "overall": "FAILED_QA",
+                "checks": [{
+                    "check_id": SYSTEM_NO_TEXT_ID,
+                    "status": "FAIL",
+                    "required": True,
+                    "detail": "unapproved wordmark is visible",
+                }],
+                "rows": [],
+            }
+            Path(d, f"{receipt_id}.json").write_text(json.dumps(receipt), encoding="utf-8")
+            state = SimpleNamespace(attempts=[{
+                "shot": 1, "receipt_id": receipt_id, "status": "FAILED_QA"
+            }])
+            strict = " ".join(qa_retry_feedback(state, d, 1, NO_BRANDING, ()))
+            branded = " ".join(qa_retry_feedback(
+                state, d, 1, TARGET_BRAND_ALLOWED, ("Grove Co.",)
+            ))
+            self.assertIn("plain, unmarked material", strict)
+            self.assertIn("Grove Co.", branded)
+            self.assertIn("Do not erase or redesign an approved target mark", branded)
+            self.assertNotIn("plain, unmarked material", branded)
+
     def test_strict_mode_never_whitelists_target_name_but_brand_mode_does(self):
         self.assertEqual(allowed_brand_tokens(NO_BRANDING, ("Fanttik",), "Fanttik V8 Mate Vacuum", "cordless vacuum"), ())
         self.assertEqual(set(allowed_brand_tokens(TARGET_BRAND_ALLOWED, (), "Fanttik V8 Mate Cordless Car Vacuum",
@@ -196,6 +259,7 @@ class CampaignBrandingPolicyTests(unittest.TestCase):
             self.assertIn("FRAME FORM", calls[0][0])
             data = json.loads((Path(d) / "out" / "receipts" / f"{receipt.receipt_id}.json").read_text())
             self.assertEqual(data["branding_policy"], NO_BRANDING)
+            self.assertEqual(data["approved_brand_marks"], [])
             row = data["image_inputs"][0]
             self.assertEqual(row["role"], "target_product_photo_unbranded_reference")
             self.assertEqual(row["source_filename"], "target.png")
@@ -212,7 +276,10 @@ class CampaignBrandingPolicyTests(unittest.TestCase):
             self.assertIn("LABEL", str(cm.exception))
             blocked = list((Path(d) / "out" / "receipts").glob("blocked_*.json"))
             self.assertEqual(len(blocked), 1)
-            self.assertEqual(json.loads(blocked[0].read_text())["overall"], "BLOCKED_BRANDING_REFERENCE")
+            blocked_data = json.loads(blocked[0].read_text())
+            self.assertEqual(blocked_data["overall"], "BLOCKED_BRANDING_REFERENCE")
+            self.assertEqual(blocked_data["branding_policy"], NO_BRANDING)
+            self.assertEqual(blocked_data["approved_brand_marks"], [])
 
     def test_generation_is_blocked_when_nothing_can_confirm_the_reference(self):
         with tempfile.TemporaryDirectory() as d:
