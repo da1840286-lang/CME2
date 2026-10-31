@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import math
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 
 VERSION = "attention_absolute_v1"
@@ -22,7 +22,8 @@ def _number(value):
     return parsed if math.isfinite(parsed) and parsed >= 0 else None
 
 
-def _date(value):
+def parse_datetime_utc(value):
+    """Parse a provider timestamp into an aware UTC datetime; missing/invalid stays None."""
     if value in (None, ""):
         return None
     if isinstance(value, (int, float)) and not isinstance(value, bool):
@@ -45,7 +46,8 @@ def _date(value):
             return None
 
 
-def _published_at(record):
+def published_at_value(record):
+    """Return only the source publication timestamp, never discovery/collection time."""
     direct = record.get("published_at")
     if direct not in (None, ""):
         return direct
@@ -59,6 +61,44 @@ def _published_at(record):
     return None
 
 
+def publication_window_evidence(record: dict, period_days: int = 30, now=None) -> dict:
+    """Apply an exact elapsed-day publication window; unknown dates never pass."""
+    try:
+        period = int(period_days or 30)
+    except (TypeError, ValueError):
+        period = 30
+    if period not in (7, 30, 180):
+        period = 30
+
+    now_dt = now if isinstance(now, datetime) else parse_datetime_utc(now)
+    if now_dt is None:
+        now_dt = datetime.now(timezone.utc)
+    elif now_dt.tzinfo is None:
+        now_dt = now_dt.replace(tzinfo=timezone.utc)
+    else:
+        now_dt = now_dt.astimezone(timezone.utc)
+
+    raw_published = published_at_value(record if isinstance(record, dict) else {})
+    published = parse_datetime_utc(raw_published)
+    base = {
+        "period_days": period,
+        "checked_at_utc": now_dt.isoformat().replace("+00:00", "Z"),
+        "published_at": raw_published,
+        "published_at_utc": published.isoformat().replace("+00:00", "Z") if published else None,
+        "window_start_utc": (now_dt - timedelta(days=period)).isoformat().replace("+00:00", "Z"),
+    }
+    if published is None:
+        return {**base, "status": "UNKNOWN", "reason": "PUBLISH_DATE_UNKNOWN", "age_days": None}
+
+    age_seconds = (now_dt - published).total_seconds()
+    age_days = age_seconds / 86400.0
+    if age_seconds < 0:
+        return {**base, "status": "FUTURE", "reason": "PUBLISH_DATE_IN_FUTURE", "age_days": round(age_days, 6)}
+    if age_seconds > period * 86400:
+        return {**base, "status": "OUTSIDE_PERIOD", "reason": "OUTSIDE_REQUESTED_PERIOD", "age_days": round(age_days, 6)}
+    return {**base, "status": "IN_PERIOD", "reason": None, "age_days": round(age_days, 6)}
+
+
 def attention_absolute_v1(record: dict, period_days: int = 30, now=None) -> dict:
     """Fixed absolute weights: missing values keep their weight; coverage exposes missing data."""
     record = record if isinstance(record, dict) else {}
@@ -69,7 +109,7 @@ def attention_absolute_v1(record: dict, period_days: int = 30, now=None) -> dict
     period_days = requested_period if requested_period in (7, 30, 180) else 30
     now_dt = now or datetime.now(timezone.utc)
     if not isinstance(now_dt, datetime):
-        now_dt = _date(now_dt) or datetime.now(timezone.utc)
+        now_dt = parse_datetime_utc(now_dt) or datetime.now(timezone.utc)
     elif now_dt.tzinfo is None:
         now_dt = now_dt.replace(tzinfo=timezone.utc)
     else:
@@ -94,7 +134,7 @@ def attention_absolute_v1(record: dict, period_days: int = 30, now=None) -> dict
 
     base = sum(WEIGHTS[field] * values[field] for field in values)
     coverage = sum(WEIGHTS[field] for field in values)
-    published = _date(_published_at(record))
+    published = parse_datetime_utc(published_at_value(record))
     age_days = None if published is None else max(0.0, (now_dt - published).total_seconds() / 86400.0)
     recency = 1.0 if age_days is None else max(0.5, min(1.0, 0.8 ** (age_days / period_days)))
     return {
@@ -168,8 +208,8 @@ def attention_rank(record: dict, period_days: int = 30, now=None) -> dict:
         if count is not None:
             components[name] = clamp(count / views / MECHANISM_RATE_CAPS[name] * 100.0) * confidence
 
-    published = _date(_published_at(record))
-    now_dt = _date(now) if now is not None and not isinstance(now, datetime) else now
+    published = parse_datetime_utc(published_at_value(record))
+    now_dt = parse_datetime_utc(now) if now is not None and not isinstance(now, datetime) else now
     now_dt = now_dt or datetime.now(timezone.utc)
     if now_dt.tzinfo is None:
         now_dt = now_dt.replace(tzinfo=timezone.utc)

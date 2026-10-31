@@ -1,0 +1,307 @@
+{
+  "id": "tiktok:ad:7689369687079144717",
+  "platform": "tiktok",
+  "country": "US",
+  "period_days": 30,
+  "source_url": "https://www.tiktok.com/@lznn2424glg/video/7689369687079144717",
+  "source_selection": {
+    "mode": "product",
+    "role": "TARGET_PRODUCT",
+    "role_reason": "Target product noun is tied to source-body promotion/action. Target use context is present.",
+    "source_body_evidence": "Tested plenty of tools, and this portable car vacuum is genuinely practical 👀! Leaves your interior looking tidy 🚗. Hit the yellow card 🛒! #carvacuumcleaner #carcleaning #GapCleaning #SEESENewArrivals #tiktokshopstockup",
+    "target_anchor": "vacuum",
+    "target_mention_source": "body",
+    "matched_target_terms": [
+      "car",
+      "vacuum"
+    ],
+    "detected_product_nouns": [
+      "vacuum"
+    ],
+    "promotion_evidence": true,
+    "target_promotion_evidence": true,
+    "promo_signals": [
+      "paid_ad_inventory"
+    ],
+    "context_verified": true,
+    "confidence": "MEDIUM",
+    "attention": {
+      "version": "attention_rank_v1",
+      "score": 67.89,
+      "rank": 67.89,
+      "base_score": 67.89,
+      "coverage": 1.0,
+      "components": {
+        "reach": 100.0,
+        "amplification": 89.53,
+        "save_rate": 38.52,
+        "share_rate": 57.03,
+        "like_rate": 17.49,
+        "recency": 39.46
+      },
+      "available_fields": [
+        "author_followers",
+        "likes",
+        "published_at",
+        "saves",
+        "shares",
+        "views"
+      ],
+      "missing_components": [],
+      "period_days": 30,
+      "age_days": 36.33,
+      "is_commercial_proof": false,
+      "warning": "Attention proxy only; not sales, conversion, profit, or causal-mechanism evidence."
+    },
+    "attention_is_commercial_proof": false,
+    "decision": "SELECTED_TARGET_PRODUCT",
+    "reason": "Promoted target-class product passed the source-body, media, and attention-proxy gates. The existing legacy pre-video source score is attached; attention and score are not proof of sales or profit. Causal mechanism, transferability, and independent Target-Fit remain downstream."
+  },
+  "analysis_eligibility": {
+    "contract": "PATTERN_SOURCE_V1",
+    "eligible": true,
+    "reason": null
+  },
+  "source_check": {
+    "status": "UNKNOWN",
+    "classification": "UNVERIFIED",
+    "score": 11.0,
+    "excluded": [],
+    "reason": "brand=lznn2424glg toolhackcentral domain=tiktok.com industry= observed_direct_brands=[] direct_brands=[] direct_domains=[] identity=[] strong=[] topical=['car', 'portable'] adjacent=['portable'] hard_brand=[] hard_domain=[] excluded=[] industry_conflict=False software_industry=False context_required_brand_hits=[] classification=UNVERIFIED mode=strict. Target context intentionally excluded from source classification.",
+    "product_relevance": {},
+    "scope": null
+  },
+  "source_score": {
+    "final_score": 71.35294117647058,
+    "performance_score": 94.11764705882352,
+    "commercial_score": 40.0,
+    "funnel_fit_score": 68.0,
+    "evidence_score": 55.0,
+    "longevity_score": 45.0,
+    "duration_fit_score": 65.0,
+    "action": "REJECT",
+    "mechanism_source_score": 5.0,
+    "source_value_type": "NONE",
+    "penalties": 0.0,
+    "tags": [
+      "elite_performance_signal",
+      "ad_copy_present",
+      "advertiser_identified",
+      "video_available",
+      "target_context_overlap",
+      "weak_metadata_funnel_overlap",
+      "duration_soft_46_60s",
+      "seller_intent_signal",
+      "money_signal_hard_block",
+      "target_context_possible",
+      "source_vertical_requires_video_verification"
+    ],
+    "components": {
+      "performance": {
+        "estimated_reach": 94.1
+      },
+      "vertical": {
+        "status": "UNKNOWN",
+        "classification": "UNVERIFIED",
+        "score": 11.0,
+        "hits": [
+          "portable"
+        ],
+        "strong_hits": [],
+        "identity_hits": [],
+        "adjacent_hits": [
+          "portable"
+        ],
+        "topical_hits": [
+          "car",
+          "portable"
+        ],
+        "excluded": [],
+        "hard_exclude_brand_hits": [],
+        "hard_exclude_domain_hits": [],
+        "direct_brand_hits": [],
+        "observed_direct_brand_hits": [],
+        "direct_domain_hits": [],
+        "direct_url_hits": [],
+        "adjacent_brand_hits": [],
+        "context_required_brand_hits": [],
+        "industry_conflict": false,
+        "strict_match": false,
+        "expanded_match": false,
+        "unverified": true,
+        "known_brand": false,
+        "entity_resolution": {
+          "observed_direct_brand_hits": [],
+          "content_brand_hits": [],
+          "metadata_brand_hits": [],
+          "advertiser_brand_hits": [],
+          "resolved_brand_hits": [],
+          "unresolved_brand_hits": [],
+          "conflicted_brand_hits": [],
+          "positive_context_hits": {},
+          "negative_context_hits": {},
+          "direct_domain_hits": [],
+          "direct_url_hits": [],
+          "identity_source": "unresolved_content"
+        },
+        "software_industry": false,
+        "market_path": {
+          "native_industry": "UNKNOWN",
+          "entity": [],
+          "entity_observed": [],
+          "domain": [],
+          "url": [],
+          "product_type": [],
+          "use_case": [
+            "car",
+            "portable"
+          ],
+          "adjacent_entity": [],
+          "adjacent_product": [
+            "portable"
+          ]
+        },
+        "conflict_evidence": {
+          "brand": [],
+          "domain": [],
+          "terms": [],
+          "industry": false
+        },
+        "reason": "brand=lznn2424glg toolhackcentral domain=tiktok.com industry= observed_direct_brands=[] direct_brands=[] direct_domains=[] identity=[] strong=[] topical=['car', 'portable'] adjacent=['portable'] hard_brand=[] hard_domain=[] excluded=[] industry_conflict=False software_industry=False context_required_brand_hits=[] classification=UNVERIFIED mode=strict. Target context intentionally excluded from source classification."
+      },
+      "commercial": 40.0,
+      "money_signal_gate": {
+        "pass": false,
+        "score": 17.0,
+        "hard_block": true,
+        "reason": "no sufficient source-side money signal before deep analysis",
+        "tags": [
+          "seller_intent_signal",
+          "advertiser_identified",
+          "money_signal_hard_block"
+        ]
+      },
+      "funnel": 68.0,
+      "evidence": 55.0,
+      "longevity": 45.0,
+      "duration": {
+        "seconds": 52.534,
+        "fit_score": 65.0,
+        "hard_block": false,
+        "long_source_exception": false
+      },
+      "mechanism_source": {
+        "score": 5.0,
+        "eligible": false,
+        "source_value_type": "NONE",
+        "tags": [
+          "target_context_possible"
+        ]
+      },
+      "weights": {
+        "performance": 0.45,
+        "vertical": 0.25,
+        "duration": 0.1,
+        "evidence": 0.1,
+        "longevity": 0.1
+      }
+    }
+  },
+  "performance_evidence": {
+    "basis": "ATTENTION_PROXY_ONLY",
+    "score": 67.89,
+    "coverage": 1.0,
+    "is_commercial_proof": false
+  },
+  "commercial_evidence": {
+    "level": "ATTENTION_ONLY",
+    "commercial_result_confirmed": false,
+    "available_metrics": [
+      "views",
+      "likes",
+      "shares",
+      "comments"
+    ],
+    "signals": [
+      "attention_metric:views",
+      "attention_metric:likes",
+      "attention_metric:shares",
+      "attention_metric:comments",
+      "performance_basis:ATTENTION_PROXY_ONLY"
+    ],
+    "missing": [
+      "source-side commercial signal (for example CTR/CVR or campaign objective/landing page)",
+      "confirmed campaign outcome and economic target"
+    ],
+    "explanation": "Only attention/playback/engagement evidence is available; this is not proof of sales.",
+    "validation": {},
+    "money_gate_is_profit_proof": false,
+    "source_score_is_profit_probability": false
+  },
+  "metrics": {
+    "views": {
+      "value": 9636393,
+      "source": "socialcrawl:tiktok_sponsored_search",
+      "boards": [],
+      "collected_at": "2026-10-31T20:49:11Z"
+    },
+    "likes": {
+      "value": 33892,
+      "source": "socialcrawl:tiktok_sponsored_search",
+      "boards": [],
+      "collected_at": "2026-10-31T20:49:11Z"
+    },
+    "comments": {
+      "value": 183,
+      "source": "socialcrawl:tiktok_sponsored_search",
+      "boards": [],
+      "collected_at": "2026-10-31T20:49:11Z"
+    },
+    "shares": {
+      "value": 5524,
+      "source": "socialcrawl:tiktok_sponsored_search",
+      "boards": [],
+      "collected_at": "2026-10-31T20:49:11Z"
+    },
+    "estimated_reach": {
+      "value": 11563672,
+      "source": "socialcrawl:tiktok_sponsored_search",
+      "boards": [],
+      "collected_at": "2026-10-31T20:49:11Z"
+    },
+    "engagement_rate": {
+      "value": 0.004109,
+      "source": "socialcrawl:tiktok_sponsored_search",
+      "boards": [],
+      "collected_at": "2026-10-31T20:49:11Z"
+    }
+  },
+  "retention_evidence": {
+    "status": "NOT_AVAILABLE",
+    "source": null,
+    "boards": [],
+    "collection_order_by": null,
+    "collected_via_unfiltered_request": false,
+    "retention_2s": null,
+    "retention_6s": null,
+    "curve_point_count": 0,
+    "curve_invalid_or_missing_points": 0,
+    "provenance": {
+      "retention_curve": "post.ext.ad.retention:missing"
+    },
+    "is_exact_play_rate": false,
+    "commercial_result_confirmed": false,
+    "interpretation": "TikTok audience-retention points; not the exact play-rate values used to sort Ads Top and not evidence of conversion, sales, or profit."
+  },
+  "legacy_record": {
+    "discovery_source": "tiktok_sponsored_search",
+    "discovery_query": "car vacuum",
+    "discovery_country": "US",
+    "published_at": null,
+    "raw": {
+      "post": {
+        "published_at": "2026-09-25T13:00:00.000Z"
+      }
+    }
+  }
+}

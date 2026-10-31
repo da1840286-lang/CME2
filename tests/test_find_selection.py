@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from cme.radar.attention import attention_absolute_v1, attention_rank
+from cme.radar.attention import attention_absolute_v1, attention_rank, publication_window_evidence
 from cme.radar.fit import ADJACENT_MECHANISM, OFF_TOPIC, TARGET_PRODUCT, classify_source_role, match_source_to_product_query
 from cme.radar.find import run_find
 from cme.radar.legacy import discover as legacy_discover
@@ -62,6 +62,24 @@ class AttentionTests(unittest.TestCase):
                         attention_absolute_v1(record, period_days=180, now=now)["score"])
         unknown = attention_absolute_v1({"views": 500_000}, period_days=7, now=now)
         self.assertEqual(unknown["recency_status"], "UNKNOWN_NO_PENALTY")
+
+    def test_exact_elapsed_window_accepts_boundary_and_rejects_old_unknown_and_future(self):
+        now = datetime(2026, 1, 31, 12, 0, tzinfo=timezone.utc)
+        boundary = (now - timedelta(days=30)).isoformat()
+        just_old = (now - timedelta(days=30, seconds=1)).isoformat()
+        future = (now + timedelta(seconds=1)).isoformat()
+        self.assertEqual(publication_window_evidence({"published_at": boundary}, 30, now)["status"], "IN_PERIOD")
+        self.assertEqual(publication_window_evidence({"published_at": just_old}, 30, now)["reason"], "OUTSIDE_REQUESTED_PERIOD")
+        self.assertEqual(publication_window_evidence({}, 30, now)["reason"], "PUBLISH_DATE_UNKNOWN")
+        self.assertEqual(publication_window_evidence({"published_at": future}, 30, now)["reason"], "PUBLISH_DATE_IN_FUTURE")
+
+    def test_exact_window_reads_provider_timestamp_from_raw_post(self):
+        now = datetime(2026, 1, 31, 12, 0, tzinfo=timezone.utc)
+        evidence = publication_window_evidence(
+            {"raw": {"post": {"published_at": "2026-01-15T09:30:00Z"}}}, 30, now
+        )
+        self.assertEqual(evidence["status"], "IN_PERIOD")
+        self.assertEqual(evidence["published_at_utc"], "2026-01-15T09:30:00Z")
 
 
 class SeenLedgerTests(unittest.TestCase):
@@ -149,6 +167,29 @@ class MechanismFindTests(unittest.TestCase):
         self.assertFalse(candidate["source_selection"]["attention_is_commercial_proof"])
         self.assertEqual(result["diagnostics"]["performance_calls_used"], 0)
         self.assertEqual(result["request"]["selection_mode"], "mechanism")
+
+    def test_find_excludes_outside_unknown_and_future_publication_dates(self):
+        now = "2026-01-31T12:00:00Z"
+        exact = self.item("exact-boundary")
+        exact["published_at"] = "2026-01-01T12:00:00Z"
+        old = self.item("one-second-old")
+        old["published_at"] = "2026-01-01T11:59:59Z"
+        unknown = self.item("unknown-date")
+        unknown.pop("published_at")
+        future = self.item("future-date")
+        future["published_at"] = "2026-01-31T12:00:01Z"
+        client = FakeClient([exact, old, unknown, future])
+        params = {"selection_mode": "mechanism", "country": "US", "period": 30, "max_requests": 1,
+                  "max_ads": 5, "keywords": ["air duster"], "offer": self.target}
+        with mock.patch.dict("os.environ", {"CME_FIND_SEEN_PATH": str(self.ledger_path)}):
+            result = run_find(params, client=client, now=now)
+        self.assertEqual([candidate["ad_id"] for candidate in result["candidates"]], ["exact-boundary"])
+        window = result["diagnostics"]["date_window_filter"]
+        self.assertEqual(window["counts"], {"IN_PERIOD": 1, "OUTSIDE_PERIOD": 1, "UNKNOWN": 1, "FUTURE": 1})
+        reasons = result["diagnostics"]["source_selection_diagnostics"]["rejected_by_reason"]
+        self.assertEqual(reasons.get("OUTSIDE_REQUESTED_PERIOD"), 1)
+        self.assertEqual(reasons.get("PUBLISH_DATE_UNKNOWN"), 1)
+        self.assertEqual(reasons.get("PUBLISH_DATE_IN_FUTURE"), 1)
 
     def test_find_applies_seen_ledger_across_runs(self):
         client = FakeClient([self.item("seen-across-runs")])

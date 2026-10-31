@@ -66,6 +66,17 @@ class VendoredCodeIsTheRealOne(Env):
         self.assertEqual(record["play_2s_rate"], 0)
         self.assertEqual(record["play_6s_rate"], "0.42")
 
+    def test_exact_period_gate_can_read_publish_date_from_preserved_provider_payload(self):
+        from cme.radar.attention import publication_window_evidence
+        item = synthetic_post("publish-date-preserved", ctr=None, cvr=None, views=1000)
+        item["post"]["published_at"] = "2026-10-20T12:00:00Z"
+        record = T.SocialCrawlTikTokTopAds._unwrap_item(item)
+        self.assertIsNone(record["published_at"])  # legacy adapter field remains untouched
+        self.assertEqual(
+            publication_window_evidence(record, 30, "2026-11-01T12:00:00Z")["status"],
+            "IN_PERIOD",
+        )
+
     def test_merge_item_preserves_playback_metrics_when_duplicate_arrives_from_ads_top(self):
         combined = {
             "same-ad": {
@@ -753,6 +764,28 @@ class CommercialEvidenceContractTests(unittest.TestCase):
         self.assertFalse(evidence["commercial_result_confirmed"])
         self.assertFalse(evidence["money_gate_is_profit_proof"])
         self.assertFalse(evidence["source_score_is_profit_probability"])
+
+    def test_missing_campaign_metrics_are_unverified_and_ads_lanes_stay_distinct(self):
+        from cme.radar.evidence import source_metric_availability, classify_commercial_evidence
+        sponsored = source_metric_availability({
+            "discovery_source": "tiktok_sponsored_search", "views": 120_000,
+            "likes": 900, "comments": 12, "shares": 5,
+        })
+        ads_top = source_metric_availability({
+            "discovery_source": "tiktok_ads_top", "views": 120_000,
+            "likes": 900, "play_2s_rate": 0.42,
+        })
+        self.assertEqual(sponsored["source_lane"], "SPONSORED_SEARCH")
+        self.assertEqual(sponsored["commercial_fields_status"], "NOT_RETURNED_BY_SPONSORED_SEARCH")
+        self.assertNotIn("ctr", sponsored["commercial_fields_available"])
+        self.assertEqual(ads_top["source_lane"], "ADS_TOP")
+        self.assertEqual(ads_top["commercial_fields_status"], "NOT_PRESENT_IN_ADS_TOP_ROW")
+        evidence = classify_commercial_evidence(
+            {"discovery_source": "tiktok_sponsored_search", "views": 120_000}, {},
+            {"basis": "ENGAGEMENT_PROXY"},
+        )
+        self.assertEqual(evidence["status"], "UNVERIFIED")
+        self.assertFalse(evidence["is_selection_gate"])
 
     def test_views_and_likes_remain_attention_only_even_with_high_score(self):
         from cme.radar.evidence import classify_commercial_evidence

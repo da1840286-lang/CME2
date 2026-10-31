@@ -9,6 +9,7 @@ def synthetic_post(ad_id, brand="synthbrand", title="[SYNTHETIC TEST] Shop now f
         "author": {"username": brand, "display_name": brand.title()},
         "content": {"text": title + text_extra, "media_urls": [video_url.format(id=ad_id)], "thumbnail_url": f"https://example.invalid/c/{ad_id}.jpg",
                     "duration_seconds": duration},
+        "published_at": "2026-10-10T00:00:00Z",
         "engagement": {"views": views, "likes": 900, "comments": 12, "shares": 5},
         "ext": {"ad": {"ctr": ctr, "cvr": cvr, "rank": 3, "industry": "Home & Garden", "objective": "Conversions",
                        "landing_page_url": "https://example.invalid/shop/products/gadget"}},

@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from cme.radar.find import _retention_execution_plan, run_find
+from cme.radar.find import _DiscoveryEvidenceTracker, _retention_execution_plan, run_find
 from cme.radar.fit import TARGET_PRODUCT, classify_source_role, match_source_to_product_query
 from cme.radar.provider_contract import ordered_target_queries
 
@@ -164,6 +164,52 @@ class ContractAwareFindTests(unittest.TestCase):
             self.assertFalse(evidence["requested_metric_confirmed"])
             self.assertEqual(evidence["requested_metric_status"], "NOT_OBTAINABLE_FOR_PRODUCT_QUERY")
             self.assertEqual(candidate["source_selection"]["role"], TARGET_PRODUCT)
+            commercial = candidate["commercial_evidence"]
+            self.assertEqual(commercial["status"], "UNVERIFIED")
+            self.assertFalse(commercial["commercial_result_confirmed"])
+            self.assertFalse(commercial["is_selection_gate"])
+            availability = commercial["metric_availability"]
+            self.assertEqual(availability["source_lane"], "SPONSORED_SEARCH")
+            self.assertEqual(availability["commercial_fields_status"], "NOT_RETURNED_BY_SPONSORED_SEARCH")
+            self.assertNotIn("ctr", candidate["metrics"])
+            self.assertNotIn("cvr", candidate["metrics"])
+
+    def test_ads_top_rows_are_exact_date_filtered_before_legacy_ranking(self):
+        inside = row("ads-top-inside", RELEVANT[0][1], 80000, 600)
+        outside = row("ads-top-outside", RELEVANT[0][1], 80000, 600)
+        outside["published_at"] = "2026-09-27T23:59:59Z"
+        unknown = row("ads-top-unknown", RELEVANT[0][1], 80000, 600)
+        unknown.pop("published_at")
+        client = RecordingClient([])
+        tracker = _DiscoveryEvidenceTracker(
+            client, offer=OFFER, period_days=30, now="2026-10-29T00:00:00Z",
+        )
+        filtered = tracker._remember(
+            {"items": [inside, outside, unknown]}, source="ads_top", order_by="for_you",
+        )
+        self.assertEqual([item["ad_id"] for item in filtered["items"]], ["ads-top-inside"])
+        self.assertEqual(tracker.date_window_summary()["counts"], {
+            "IN_PERIOD": 1, "OUTSIDE_PERIOD": 1, "UNKNOWN": 1, "FUTURE": 0,
+        })
+
+    def test_product_mode_applies_exact_30_day_window_not_provider_calendar_month(self):
+        inside = row("inside-window", RELEVANT[0][1], 80000, 600)
+        outside = row("outside-window", RELEVANT[0][1], 80000, 600)
+        outside["published_at"] = "2026-09-27T23:59:59Z"  # 31 days + 1 second before the fixed test clock
+        unknown = row("unknown-window", RELEVANT[0][1], 80000, 600)
+        unknown.pop("published_at")
+        future = row("future-window", RELEVANT[0][1], 80000, 600)
+        future["published_at"] = "2026-10-29T00:00:01Z"
+        client = RecordingClient([inside, outside, unknown, future])
+        params = {"country": "US", "period": 30, "max_requests": 3, "max_ads": 10,
+                  "keywords": ["car vacuum"], "offer": OFFER, "performance_order_bys": [],
+                  "include_retention": False}
+        with mock.patch.dict("os.environ", {"CME_FIND_SEEN_PATH": str(self.ledger)}):
+            result = run_find(params, client=client, now="2026-10-29T00:00:00Z")
+        self.assertEqual([candidate["ad_id"] for candidate in result["candidates"]], ["inside-window"])
+        window = result["diagnostics"]["date_window_filter"]
+        self.assertEqual(window["counts"], {"IN_PERIOD": 1, "OUTSIDE_PERIOD": 1, "UNKNOWN": 1, "FUTURE": 1})
+        self.assertTrue(window["unknown_dates_are_excluded"])
 
     def test_product_first_candidates_receive_the_existing_legacy_source_score(self):
         result, _ = self.run_find(RELEVANT + IRRELEVANT)

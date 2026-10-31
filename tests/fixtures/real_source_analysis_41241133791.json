@@ -1,0 +1,168 @@
+{
+  "candidate_id": "tiktok:ad:7689369687079144717",
+  "analysis_id": 1,
+  "status": "OK",
+  "selection_mode": "manual_from_prior_find",
+  "decision": "PATTERN_EXTRACTION_ONLY",
+  "source_use_policy": "PATTERN_EXTRACTION_NOT_COMMERCIAL_APPROVAL",
+  "source_relevance": "UNVERIFIED",
+  "source_role": "TARGET_PRODUCT",
+  "analysis_eligibility": {
+    "contract": "PATTERN_SOURCE_V1",
+    "eligible": true,
+    "reason": null
+  },
+  "source_score": 71.35294117647058,
+  "source_evidence_scope": "sampled video frames only (count and spacing: material.frame_sampling); mechanism and transferability remain hypotheses",
+  "result": {
+    "hook": {
+      "text": "The ad opens with a messy car trunk carpet covered in white debris while a handheld vacuum cleans a strip through it.",
+      "kind": "OBSERVED"
+    },
+    "buyer_problem": {
+      "text": "Car interiors accumulate debris in carpets, seat crevices, and tight gaps that are hard to clean.",
+      "kind": "OBSERVED"
+    },
+    "product_intervention": {
+      "text": "A portable black and yellow handheld car vacuum (brand SEESE) with multiple attachments is demonstrated cleaning various car surfaces.",
+      "kind": "OBSERVED"
+    },
+    "result_demo": {
+      "text": "Frame 0 shows a visible clean strip on the carpet where the vacuum passed; frame 7 shows the clear dust container filled with collected debris; frame 5 shows debris being sucked from a seat crevice.",
+      "kind": "OBSERVED"
+    },
+    "cta": {
+      "text": "Hit the yellow card to purchase (from ad title text).",
+      "kind": "INFERRED"
+    },
+    "mechanism_hypothesis": {
+      "text": "The handheld vacuum uses motorized suction to pull debris into a removable transparent dust container, with interchangeable nozzles for different surfaces and gaps.",
+      "kind": "INFERRED"
+    },
+    "transferability": {
+      "text": "The vacuum appears transferable to home cleaning, as shown by the cereal-on-wood-floor scene, suggesting use beyond just car interiors.",
+      "kind": "INFERRED"
+    },
+    "evidence": [
+      {
+        "t_sec": 0.5,
+        "observation": "A hand operates the vacuum on a debris-covered trunk carpet, leaving a visibly clean strip behind the nozzle while surrounding areas remain dirty.",
+        "frame": 0,
+        "supports": [
+          "hook",
+          "buyer_problem",
+          "product_intervention",
+          "result_demo"
+        ]
+      },
+      {
+        "t_sec": 6.24,
+        "observation": "The vacuum is held upright showing the SEESE branding and yellow accent button, with debris still visible on the carpet behind it.",
+        "frame": 1,
+        "supports": [
+          "product_intervention"
+        ]
+      },
+      {
+        "t_sec": 11.97,
+        "observation": "Open product box displays the vacuum and accessories in foam packaging with a $40 price graphic and crying Pepe meme.",
+        "frame": 2,
+        "supports": [
+          "cta",
+          "product_intervention"
+        ]
+      },
+      {
+        "t_sec": 17.71,
+        "observation": "The same box is shown with a surprised Pepe meme and exclamation marks; a hand points at the vacuum and accessories inside.",
+        "frame": 3,
+        "supports": [
+          "cta",
+          "product_intervention"
+        ]
+      },
+      {
+        "t_sec": 23.45,
+        "observation": "A black leather car seat is covered in colorful confetti-like debris, with a hand pointing to the mess in the seat crevice.",
+        "frame": 4,
+        "supports": [
+          "buyer_problem"
+        ]
+      },
+      {
+        "t_sec": 29.18,
+        "observation": "The vacuum nozzle is inserted into the seat crevice, actively removing debris from between the seat sections.",
+        "frame": 5,
+        "supports": [
+          "product_intervention",
+          "result_demo"
+        ]
+      },
+      {
+        "t_sec": 34.92,
+        "observation": "The vacuum reaches into a narrow gap in the car interior, suctioning colorful debris from a tight space.",
+        "frame": 6,
+        "supports": [
+          "product_intervention",
+          "result_demo"
+        ]
+      },
+      {
+        "t_sec": 40.66,
+        "observation": "The vacuum is held upright with the transparent dust container visibly filled with collected debris and dust.",
+        "frame": 7,
+        "supports": [
+          "result_demo",
+          "product_intervention"
+        ]
+      },
+      {
+        "t_sec": 46.39,
+        "observation": "Cereal or oat debris is scattered on a wooden floor with the vacuum nozzle positioned nearby, suggesting home use beyond cars.",
+        "frame": 8,
+        "supports": [
+          "transferability",
+          "buyer_problem"
+        ]
+      },
+      {
+        "t_sec": 52.13,
+        "observation": "The open box displays all included accessories (nozzles, brush, charging cable) arranged in custom foam cutouts; a hand points at the contents.",
+        "frame": 9,
+        "supports": [
+          "product_intervention",
+          "cta"
+        ]
+      }
+    ],
+    "limits": {
+      "text": "No audio or spoken claims are available; no direct before/after static shot of the same surface fully cleaned; no battery life, suction power, or runtime specifications are visible; the final frame shows packaging but not a fully clean car interior.",
+      "missing": [
+        "audio narration",
+        "battery life specs",
+        "suction power rating",
+        "full before/after comparison of entire car interior",
+        "price confirmation in video frames"
+      ]
+    },
+    "ratings": {
+      "problem_clarity": 5,
+      "product_demo": 4,
+      "proof_visibility": 4,
+      "sequence_quality": 4
+    },
+    "warnings": []
+  },
+  "warnings": [],
+  "detail": "",
+  "analysis_attempts": [
+    {
+      "candidate_id": "tiktok:ad:7689369687079144717",
+      "attempt": 1,
+      "analysis_id": 1,
+      "status": "OK",
+      "detail": "",
+      "same_candidate_retry": false
+    }
+  ]
+}

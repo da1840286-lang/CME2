@@ -295,6 +295,7 @@ class FetchPlanRetentionTests(unittest.TestCase):
             "title": "Shop now: Fanttik V8 Mate cordless handheld car vacuum removes crumbs.",
             "source_url": "https://www.tiktok.com/@brand/video/ad-find-1",
             "video_url": "https://cdn.example/ad-find-1.mp4",
+            "published_at": "2026-10-10T00:00:00Z",
             "discovery_source": "tiktok_sponsored_search",
             "discovery_boards": ["sponsored_search", "play_6s_rate", "play_2s_rate"],
             "discovery_keywords": ["car vacuum"],

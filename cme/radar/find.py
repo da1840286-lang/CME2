@@ -12,8 +12,9 @@ import re
 import time
 from pathlib import Path
 
-from .evidence import classify_commercial_evidence
-from .attention import attention_absolute_v1, attention_rank, MECHANISM_ATTENTION_FLOOR, MECHANISM_MIN_COVERAGE
+from .evidence import classify_commercial_evidence, source_metric_availability
+from .attention import (attention_absolute_v1, attention_rank, parse_datetime_utc,
+                        publication_window_evidence, MECHANISM_ATTENTION_FLOOR, MECHANISM_MIN_COVERAGE)
 from .fit import ADJACENT_MECHANISM, TARGET_PRODUCT, classify_source_role, match_source_to_product_query
 from .seen import SeenLedger, build_scope
 from .provider_contract import (
@@ -197,6 +198,8 @@ class _DiscoveryEvidenceTracker:
         "product_role_gate", "candidate_provider_ids",
         "unfiltered_retention_identity_tokens", "unfiltered_retention_ad_ids",
         "multi_sponsored_search_queries", "restricted_order_bys", "_sponsored_search_batch_consumed",
+        "period_days", "checked_at", "enforce_publication_window", "date_window_counts", "date_window_accepted",
+        "date_window_total", "date_window_rejected_by_reason", "date_window_rejected_examples",
     })
     PERFORMANCE_FIELDS = (
         "ctr", "cvr", "play_2s_rate", "play_6s_rate", "views", "likes",
@@ -206,6 +209,7 @@ class _DiscoveryEvidenceTracker:
 
     def __init__(
         self, client, *, offer=None, multi_sponsored_search_queries=None, restrict_order_bys=None,
+        period_days=30, now=None,
     ):
         offer = offer if isinstance(offer, dict) else {}
         context = {
@@ -214,6 +218,14 @@ class _DiscoveryEvidenceTracker:
             "product_category": str(offer.get("product_category") or "").strip(),
         }
         object.__setattr__(self, "_client", client)
+        object.__setattr__(self, "period_days", int(period_days or 30))
+        object.__setattr__(self, "checked_at", parse_datetime_utc(now) if now is not None else None)
+        object.__setattr__(self, "enforce_publication_window", now is not None)
+        object.__setattr__(self, "date_window_counts", {"IN_PERIOD": 0, "OUTSIDE_PERIOD": 0, "UNKNOWN": 0, "FUTURE": 0})
+        object.__setattr__(self, "date_window_accepted", 0)
+        object.__setattr__(self, "date_window_total", 0)
+        object.__setattr__(self, "date_window_rejected_by_reason", {})
+        object.__setattr__(self, "date_window_rejected_examples", [])
         object.__setattr__(self, "multi_sponsored_search_queries", list(dict.fromkeys(
             str(query).strip() for query in (multi_sponsored_search_queries or []) if str(query).strip()
         )))
@@ -297,6 +309,22 @@ class _DiscoveryEvidenceTracker:
     def _nonempty_count(rows, field):
         return sum(1 for row in rows if isinstance(row, dict) and row.get(field) not in (None, "", []))
 
+    def date_window_summary(self):
+        counts = dict(self.date_window_counts)
+        rejected = self.date_window_total - self.date_window_accepted
+        return {
+            "policy": "EXACT_ELAPSED_DAYS",
+            "period_days": self.period_days,
+            "provider_date_posted_is_hint_only": True,
+            "counts": counts,
+            "total_rows_checked": self.date_window_total,
+            "accepted": self.date_window_accepted,
+            "rejected": rejected,
+            "rejected_by_reason": dict(self.date_window_rejected_by_reason),
+            "rejected_examples": list(self.date_window_rejected_examples),
+            "unknown_dates_are_excluded": True,
+        }
+
     def _remember(
         self, result, *, source, order_by="", keyword="", requested_keyword=None,
         retention_requested=False, unfiltered_retention=False, candidate_lane=True,
@@ -305,6 +333,9 @@ class _DiscoveryEvidenceTracker:
         result = result if isinstance(result, dict) else {}
         raw_rows = [dict(row) for row in (result.get("items") or []) if isinstance(row, dict)]
         rows_for_legacy, eligible_rows, rejected, role_counts = [], 0, [], {}
+        date_valid_rows = 0
+        date_rejected_rows = 0
+        date_reasons = {}
         for position, row in enumerate(raw_rows, start=1):
             tokens = self._identity_tokens(row)
             ad_id = str(row.get("ad_id") or row.get("video_id") or "").strip()
@@ -312,6 +343,29 @@ class _DiscoveryEvidenceTracker:
                 identity = ad_id or (sorted(tokens)[0] if tokens else "")
                 if identity:
                     self.candidate_provider_ids.add(identity)
+                if self.enforce_publication_window:
+                    publication = publication_window_evidence(
+                        row, period_days=self.period_days, now=self.checked_at,
+                    )
+                    row["publication_window"] = publication
+                    status = str(publication.get("status") or "UNKNOWN")
+                    self.date_window_counts[status] = self.date_window_counts.get(status, 0) + 1
+                    self.date_window_total += 1
+                    if status != "IN_PERIOD":
+                        date_rejected_rows += 1
+                        reason = str(publication.get("reason") or "PUBLISH_DATE_UNKNOWN")
+                        date_reasons[reason] = date_reasons.get(reason, 0) + 1
+                        self.date_window_rejected_by_reason[reason] = self.date_window_rejected_by_reason.get(reason, 0) + 1
+                        if len(self.date_window_rejected_examples) < 50:
+                            self.date_window_rejected_examples.append({
+                                "ad_id": ad_id, "source": source, "order_by": order_by,
+                                "keyword": keyword or "", "reason": reason,
+                                "published_at": publication.get("published_at"),
+                                "age_days": publication.get("age_days"),
+                            })
+                        continue
+                    self.date_window_accepted += 1
+                date_valid_rows += 1
 
             values = self._row_values(row)
             if not retention_requested:
@@ -403,9 +457,9 @@ class _DiscoveryEvidenceTracker:
 
         if candidate_lane:
             gate = self.product_role_gate
-            gate["raw_rows"] += len(raw_rows)
+            gate["raw_rows"] += date_valid_rows
             gate["accepted_rows"] += eligible_rows
-            gate["rejected_rows"] += len(raw_rows) - eligible_rows
+            gate["rejected_rows"] += date_valid_rows - eligible_rows
             for reason, count in role_counts.items():
                 gate["rejected_by_reason"][reason] = gate["rejected_by_reason"].get(reason, 0) + count
             gate["rejected_examples"].extend(rejected[:max(0, 12 - len(gate["rejected_examples"]))])
@@ -421,7 +475,10 @@ class _DiscoveryEvidenceTracker:
             "returned": len(raw_rows),
             "provider_rows_returned": len(raw_rows),
             "eligible_rows_returned": eligible_rows if candidate_lane else None,
-            "role_rejected_rows": len(raw_rows) - eligible_rows if candidate_lane else 0,
+            "date_window_accepted_rows": date_valid_rows if candidate_lane else None,
+            "date_window_rejected_rows": date_rejected_rows if candidate_lane else 0,
+            "date_window_rejected_by_reason": date_reasons if candidate_lane else {},
+            "role_rejected_rows": date_valid_rows - eligible_rows if candidate_lane else 0,
             "role_rejected_by_reason": role_counts,
             "candidate_lane": bool(candidate_lane),
             "credits_used": result.get("credits_used"), "request_id": result.get("request_id"),
@@ -668,9 +725,22 @@ def to_candidate(item: dict, request: dict, collected_at: str, origin: str, sour
     """item = {'record': old record, 'decision': ArbitrageDecision or its saved dict}."""
     rec = item["record"]
     decision = item.get("decision")
+    score = None
+    if decision is not None:
+        score = {k: _d(decision, k) for k in ("final_score", "performance_score", "commercial_score", "funnel_fit_score",
+                                              "evidence_score", "longevity_score", "duration_fit_score", "action",
+                                              "mechanism_source_score", "source_value_type")}
+        score["penalties"] = _d(decision, "penalties")
+        score["tags"] = _d(decision, "tags")
+        score["components"] = _d(decision, "components") or {}
     source_kind = str(rec.get("discovery_source") or "")
-    default_source = "socialcrawl:tiktok_sponsored_search" if source_kind == "tiktok_sponsored_search" else "socialcrawl:tiktok_ads_top"
+    default_source = "socialcrawl:tiktok_sponsored_search" if "sponsored_search" in source_kind.lower() else "socialcrawl:tiktok_ads_top"
     src = source_label or default_source
+    if not source_kind:
+        if "sponsored_search" in src.lower():
+            rec["discovery_source"] = "tiktok_sponsored_search"
+        elif "ads_top" in src.lower():
+            rec["discovery_source"] = "tiktok_ads_top"
     boards = list(rec.get("discovery_boards") or [])
     metrics = {}
     retention_boards = [board for board in boards if board in {"play_2s_rate", "play_6s_rate"}]
@@ -715,15 +785,13 @@ def to_candidate(item: dict, request: dict, collected_at: str, origin: str, sour
     }
     rel = rec.get("vertical_relevance") or {}
     brand = rec.get("brand")
+    metric_availability = source_metric_availability(rec)
+    commercial_evidence = classify_commercial_evidence(rec, score, rec.get("performance_evidence") or {})
+    performance_evidence = dict(rec.get("performance_evidence") or {})
+    performance_evidence.setdefault("status", commercial_evidence.get("status", "UNVERIFIED"))
+    performance_evidence["source_lane"] = metric_availability["source_lane"]
+    performance_evidence["metric_availability"] = metric_availability
     video = rec.get("video_url_540p") or rec.get("video_url") or rec.get("video_url_360p") or ""
-    score = None
-    if decision is not None:
-        score = {k: _d(decision, k) for k in ("final_score", "performance_score", "commercial_score", "funnel_fit_score",
-                                              "evidence_score", "longevity_score", "duration_fit_score", "action",
-                                              "mechanism_source_score", "source_value_type")}
-        score["penalties"] = _d(decision, "penalties")
-        score["tags"] = _d(decision, "tags")
-        score["components"] = _d(decision, "components") or {}
     why = {"explanation": _d(decision, "explanation"), "action": _d(decision, "action"), "tags": _d(decision, "tags"),
            "scope": rec.get("discovery_scope"), "boards": boards, "keywords": rec.get("discovery_keywords") or [],
            "hits": rec.get("discovery_hits"), "relevance_reason": rel.get("reason"),
@@ -740,6 +808,8 @@ def to_candidate(item: dict, request: dict, collected_at: str, origin: str, sour
         "title": rec.get("title") or None, "industry": rec.get("industry") or None,
         "landing_page": rec.get("landing_page") or None, "landing_page_url": rec.get("landing_page_url") or None,
         "duration_seconds": rec.get("duration_seconds"), "duration_source": rec.get("duration_source"),
+        "published_at": rec.get("published_at") or (rec.get("publication_window") or {}).get("published_at"),
+        "publication_window": rec.get("publication_window") or {},
         "metrics": metrics,
         "retention_evidence": retention_evidence,
         "source_check": {"status": rel.get("status") or "UNKNOWN", "classification": rel.get("classification"),
@@ -750,13 +820,11 @@ def to_candidate(item: dict, request: dict, collected_at: str, origin: str, sour
         "product_relevance": rec.get("product_relevance") or {},
         # None = not evaluated (standard Product path); {} would read as a mismatch downstream.
         "query_product_match": rec.get("query_product_match") if isinstance(rec.get("query_product_match"), dict) and rec.get("query_product_match") else None,
-        "performance_evidence": rec.get("performance_evidence") or {},
-        "commercial_evidence": classify_commercial_evidence(
-            rec, score, rec.get("performance_evidence") or {}
-        ),
+        "performance_evidence": performance_evidence,
+        "commercial_evidence": commercial_evidence,
         "shortlist_eligibility": rec.get("shortlist_eligibility") or {},
         "why": {**why, "product_relevance": rec.get("product_relevance") or {},
-                "performance_evidence": rec.get("performance_evidence") or {},
+                "performance_evidence": performance_evidence,
                 "selection_reason": rec.get("auto_selection_reason") or ""},
         "discovered_at": collected_at,
         "request": {k: request.get(k) for k in ("country", "period", "order_bys", "keywords", "vertical", "selection_mode", "video_duration_range", "minimum_attention_coverage", "attention_floor")},
@@ -1263,13 +1331,28 @@ def _run_mechanism_find(*, request: dict, offer: dict, keywords: list[str], clie
             rows_by_identity[identity] = record
             identity_keys_seen.update(keys)
 
-    try:
-        from datetime import datetime
-        parsed_now = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
-    except (TypeError, ValueError):
-        parsed_now = None
+    parsed_now = parse_datetime_utc(stamp)
+    date_window_counts = {"IN_PERIOD": 0, "OUTSIDE_PERIOD": 0, "UNKNOWN": 0, "FUTURE": 0}
+    date_window_rejected = []
 
     for record in rows_by_identity.values():
+        publication = publication_window_evidence(record, period_days=period, now=parsed_now)
+        record["publication_window"] = publication
+        date_window_counts[publication["status"]] = date_window_counts.get(publication["status"], 0) + 1
+        if publication["status"] != "IN_PERIOD":
+            reason = publication["reason"] or "PUBLISH_DATE_UNKNOWN"
+            rejected.append({
+                "ad_id": str(record.get("ad_id") or record.get("video_id") or ""),
+                "title": str(record.get("title") or "")[:160],
+                "reason": reason,
+                "published_at": publication.get("published_at"),
+                "age_days": publication.get("age_days"),
+                "period_days": period,
+            })
+            date_window_rejected.append(reason)
+            record["selection_decision"], record["selection_reason"] = "REJECTED", reason
+            continue
+
         rel = classify_vertical(
             record, VERTICAL, target_offer=offer.get("target_offer") or "",
             prelander=offer.get("prelander") or "",
@@ -1333,9 +1416,14 @@ def _run_mechanism_find(*, request: dict, offer: dict, keywords: list[str], clie
             })
             record["selection_decision"], record["selection_reason"] = "REJECTED", reason
             continue
+        metric_availability = source_metric_availability(record)
         record["performance_evidence"] = {
+            "status": "UNVERIFIED",
             "basis": "ATTENTION_PROXY_ONLY", "score": attention["score"],
             "coverage": attention["coverage"], "is_commercial_proof": False,
+            "source_lane": metric_availability["source_lane"],
+            "metric_availability": metric_availability,
+            "selection_gate": False,
         }
         if requested_metric_status:
             record["performance_evidence"].update(requested_metric_status)
@@ -1416,6 +1504,16 @@ def _run_mechanism_find(*, request: dict, offer: dict, keywords: list[str], clie
                                     if (row.get("source_role_info") or {}).get("role") == "TARGET_PRODUCT"),
         "adjacent_mechanism_ads": len(qualified), "auto_shortlist_ads": len(selected),
         "video_duration_filter": duration_gate,
+        "date_window_filter": {
+            "policy": "EXACT_ELAPSED_DAYS",
+            "period_days": period,
+            "provider_date_posted_is_hint_only": True,
+            "counts": date_window_counts,
+            "accepted": date_window_counts.get("IN_PERIOD", 0),
+            "rejected": len(date_window_rejected),
+            "rejected_by_reason": {reason: date_window_rejected.count(reason) for reason in sorted(set(date_window_rejected))},
+            "unknown_dates_are_excluded": True,
+        },
         "performance_lane_reserved": False,
         "discovery_strategy": {
             "selection_mode": "product" if target_lane else "mechanism",
@@ -1446,6 +1544,7 @@ def _run_mechanism_find(*, request: dict, offer: dict, keywords: list[str], clie
     diagnostics = {
         "outcome": "CANDIDATES_FOUND" if candidates else (
             "NO_API_ROWS" if raw_count == 0
+            else "NO_ADS_WITHIN_EXACT_PERIOD" if date_window_rejected and len(date_window_rejected) == unique_rows
             else "SCORING_FAILED" if target_lane and qualified and not scored_qualified
             else "NO_TARGET_RELEVANCE" if target_lane else "NO_QUALIFIED_ADJACENT_MECHANISM"),
         "explanation": (
@@ -1461,9 +1560,12 @@ def _run_mechanism_find(*, request: dict, offer: dict, keywords: list[str], clie
         "adjacent_mechanism_ads": len(qualified), "unverified_ads": 0,
         "hard_excluded_ads": reason_counts.get("HARD_EXCLUDED_BY_SOURCE_CHECK", 0),
         "source_selection_diagnostics": stats["source_selection_diagnostics"],
+        "date_window_filter": stats["date_window_filter"],
         "search_queries_executed": [call["keyword"] for call in calls],
         "request_sources": ["sponsored_search" for _ in calls], "performance_calls_used": 0,
         "commercial_evidence_note": "Attention proxy is not commercial proof; Target-Fit remains NOT_EVALUATED.",
+        "date_window_note": ("Provider date_posted is only a discovery hint. Every Sponsored Search result is independently checked "
+                             "against the exact elapsed-day window using the source publication timestamp; unknown/future dates are excluded."),
     }
     stats["total_credits_reported"] = sum(
         int(call.get("credits_used") or 0) for call in calls if isinstance(call.get("credits_used"), (int, float)))
@@ -1664,6 +1766,7 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
         client, offer=offer,
         multi_sponsored_search_queries=targeted_search_queries if dual_playback_retention else None,
         restrict_order_bys=performance_order_bys if dual_playback_retention else None,
+        period_days=period, now=stamp,
     )
     retention_enrichment_execution = {
         "requested": bool(dual_playback_retention),
@@ -1831,6 +1934,10 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
     stats["retention_enrichment"] = dict(retention_enrichment_execution)
     _merge_discovery_evidence(ranked, evidence_tracker)
     _enrich_selection_diagnostics(stats, evidence_tracker)
+
+    # The evidence tracker applies the exact elapsed-day gate to every Sponsored Search
+    # and Ads Top candidate row before the legacy ranker can trim the pool.
+    stats["date_window_filter"] = evidence_tracker.date_window_summary()
     duration_filter_diagnostics = {
         "applied": video_duration_range != "all",
         "range": video_duration_range,
@@ -1889,6 +1996,9 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
         )
     strategy["supply_search_enabled"] = True
     strategy["supply_lane"] = "tiktok_sponsored_search_plus_ads_top_performance"
+    strategy["publication_window_policy"] = "EXACT_ELAPSED_DAYS"
+    strategy["publication_window_period_days"] = period
+    strategy["publication_window_unknown_dates_excluded"] = True
     strategy["selection_mode"] = "product"
     strategy["supply_search_calls_used"] = sum(1 for call in executed_calls if call.get("source") == "sponsored_search")
     strategy["performance_calls_used"] = sum(
@@ -1930,6 +2040,14 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
         }
     diagnostics = _find_diagnostics(stats, len(candidates))
     diagnostics["video_duration_filter"] = duration_filter_diagnostics
+    diagnostics["date_window_filter"] = stats["date_window_filter"]
+    diagnostics["date_window_note"] = (
+        "Provider date filters are discovery hints only. Every shortlisted candidate is independently checked "
+        "against the exact elapsed-day window using its source publication timestamp; unknown/future dates are excluded."
+    )
+    if not candidates and stats["date_window_filter"].get("rejected") and not stats["date_window_filter"].get("accepted"):
+        diagnostics["outcome"] = "NO_ADS_WITHIN_EXACT_PERIOD"
+        diagnostics["explanation"] = "All shortlisted source rows were outside the requested elapsed-day window or had an unknown/future publication date."
     if (duration_filter_diagnostics["applied"] and duration_filter_diagnostics["considered_candidates"] > 0
             and duration_filter_diagnostics["accepted_candidates"] == 0):
         diagnostics["outcome"] = "NO_MATCHING_VIDEO_DURATION"

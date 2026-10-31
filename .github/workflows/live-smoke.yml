@@ -835,6 +835,7 @@ jobs:
           from cme.radar.server import ROOT, RadarApp
           from cme.radar.select import pattern_source_reason
           from cme.radar.source_loop import analyze_with_invalid_output_retry
+          from cme.radar.source_contract import build_source_contract
 
           out = Path("out").resolve()
           run_id = os.environ.get("FIND_RUN_ID", "").strip()
@@ -916,11 +917,9 @@ jobs:
               print(json.dumps(analysis, ensure_ascii=False, indent=2))
               if status.get("status") != "OK":
                   raise SystemExit(5 if status.get("status") in {"API_ERROR", "INVALID_OUTPUT"} else 4)
-              source_contract = {"status": "OK", "candidate_id": cid, "analysis_id": status.get("analysis_id"),
-                                 "source_use_policy": "PATTERN_EXTRACTION_NOT_COMMERCIAL_APPROVAL",
-                                 "review_status": "PATTERN_EXTRACTED_COMMERCIAL_PERFORMANCE_UNVERIFIED",
-                                 "source_scope": "sampled frames only; mechanism and transferability remain hypotheses"}
-              (out / "source_contract.json").write_text(json.dumps(source_contract, ensure_ascii=False, indent=2), encoding="utf-8")
+              source_contract = build_source_contract(analysis, candidate)
+              (out / "source_contract.json").write_text(
+                  json.dumps(source_contract, ensure_ascii=False, indent=2), encoding="utf-8")
           finally:
               app.store.close()
               shutil.rmtree(work, ignore_errors=True)
