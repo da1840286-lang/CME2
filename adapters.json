@@ -1,0 +1,137 @@
+{
+ "adapters": [
+  {
+   "name": "openrouter_free_brain",
+   "kind": "brain",
+   "provider": "openrouter",
+   "model_id": "nvidia/nemotron-3.5-super-vl:free",
+   "tier": "free",
+   "verified": false,
+   "params": {
+    "response_format_mode": "json_schema",
+    "temperature": 0.2,
+    "max_tokens": 4000,
+    "reasoning": {
+     "enabled": false
+    }
+   },
+   "price_hint": "free; rate limited, availability changes",
+   "notes": "Smoke test of the Brain path only, not commercial transfer quality. Requests strict JSON Schema output for the atoms contract."
+  },
+  {
+   "name": "openrouter_free_judge",
+   "kind": "judge",
+   "provider": "openrouter",
+   "model_id": "google/gemma-4-31b-it:free",
+   "tier": "free",
+   "verified": false,
+   "params": {
+    "response_format_mode": "json_object",
+    "temperature": 0,
+    "max_tokens": 1500,
+    "reasoning": {"enabled": false}
+   },
+   "price_hint": "free; rate limited",
+   "notes": "Independent vision judge, deliberately different from the Brain/Analyst model to reduce correlated errors. Free model availability and rate limits may change; every MUST visual atom is required."
+  },
+  {
+   "name": "openrouter_free_analyst",
+   "kind": "analyst",
+   "provider": "openrouter",
+   "model_id": "nvidia/nemotron-3.5-super-vl:free",
+   "tier": "free",
+   "verified": false,
+   "params": {
+    "response_format_mode": "json_object",
+    "temperature": 0.2,
+    "max_tokens": 3000
+   },
+   "price_hint": "free; rate limited",
+   "notes": "Creative Radar manual analysis: sends a few video frames. Free models may be weak at timing details; switch the adapter name in settings to a paid vision model when you have a key."
+  },
+  {
+   "name": "hf_zerogpu_flux2_klein",
+   "kind": "image",
+   "provider": "hf_space",
+   "model_id": "black-forest-labs/FLUX.2-klein-4B",
+   "tier": "free",
+   "verified": false,
+   "params": {
+    "space_id": "black-forest-labs/FLUX.2-klein-4B",
+    "api_name": "/infer",
+    "width": 576,
+    "height": 1024,
+    "seed": 0,
+    "args": [
+     {
+      "from": "prompt"
+     },
+     {
+      "from": "refs_gallery",
+      "default": null
+     },
+     {
+      "const": "Distilled (4 steps)"
+     },
+     {
+      "from": "seed"
+     },
+     {
+      "const": false
+     },
+     {
+      "from": "width"
+     },
+     {
+      "from": "height"
+     },
+     {
+      "const": 4
+     },
+     {
+      "const": 1
+     },
+     {
+      "const": false
+     }
+    ]
+   },
+   "price_hint": "free; ZeroGPU quota controlled by Hugging Face",
+   "notes": "api_name and argument order taken from the request diagnostics of run 39337237341 (prompt, input_images, mode_choice, seed, randomize_seed, width, height, num_inference_steps, guidance_scale, prompt_upsampling). prompt_upsampling is off so the Space does not rewrite the receipt-bound prompt; the old build enabled it for reference editing, compare on a second attempt if the result looks weak."
+  },
+  {
+   "name": "fal_flux2_pro",
+   "kind": "image",
+   "provider": "fal",
+   "model_id": "flux-2-pro",
+   "tier": "paid",
+   "verified": false,
+   "params": {
+    "model_path": "CONFIRM_ME",
+    "extra": {},
+    "ref_param": "image_urls",
+    "ref_style": "list",
+    "max_refs": 4
+   },
+   "price_hint": "about $0.03 per image on some channels (aggregator pages; verify on the fal pricing page)",
+   "notes": "Confirm model_path and the reference parameter name on the fal model page before the first live run."
+  },
+  {
+   "name": "fal_seedream",
+   "kind": "image",
+   "provider": "fal",
+   "model_id": "seedream",
+   "tier": "paid",
+   "verified": false,
+   "params": {
+    "model_path": "CONFIRM_ME",
+    "extra": {},
+    "ref_param": "image_urls",
+    "ref_style": "list",
+    "max_refs": 4
+   },
+   "price_hint": "about $0.035-0.04 per image (aggregator pages; verify)",
+   "notes": "Confirm model_path and the reference parameter name before the first live run."
+  }
+ ]
+}

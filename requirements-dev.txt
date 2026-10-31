@@ -1,0 +1,2 @@
+-r requirements.txt
+pytesseract>=0.3.10  # optional OCR (also needs the tesseract binary); without it the no-text check is NOT_RUN

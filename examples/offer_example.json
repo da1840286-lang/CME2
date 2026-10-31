@@ -1,0 +1,20 @@
+{
+  "offer_id": "example-001",
+  "name": "Reusable silicone food storage bag",
+  "product_type": "kitchen storage",
+  "verified_claims": [
+    "Reusable and dishwasher safe",
+    "Seals with a zip closure"
+  ],
+  "forbidden_claims": [
+    "guaranteed",
+    "medical",
+    "cures"
+  ],
+  "photos": [
+    "photos/product_01.png"
+  ],
+  "platform": "",
+  "geo": "US",
+  "product_category": ""
+}

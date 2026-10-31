@@ -1,0 +1,251 @@
+{
+  "origin": "GitHub Actions run 41206920383; source analysis and raw Brain gate responses captured from its artifact",
+  "source_analysis": {
+    "candidate_id": "tiktok:ad:7697657045536820511",
+    "analysis_id": 1,
+    "status": "OK",
+    "selection_mode": "automatic_find_order",
+    "source_use_policy": "PATTERN_EXTRACTION_NOT_COMMERCIAL_APPROVAL",
+    "commercial_evidence": {
+      "level": "ATTENTION_ONLY",
+      "commercial_result_confirmed": false,
+      "available_metrics": [
+        "views",
+        "likes",
+        "shares",
+        "comments"
+      ],
+      "signals": [
+        "attention_metric:views",
+        "attention_metric:likes",
+        "attention_metric:shares",
+        "attention_metric:comments",
+        "performance_basis:NOT_AVAILABLE"
+      ],
+      "missing": [
+        "source-side commercial signal (for example CTR/CVR or campaign objective/landing page)",
+        "confirmed campaign outcome and economic target"
+      ],
+      "explanation": "Only attention/playback/engagement evidence is available; this is not proof of sales.",
+      "validation": {},
+      "money_gate_is_profit_proof": false,
+      "source_score_is_profit_probability": false
+    },
+    "source_relevance": "UNVERIFIED",
+    "source_score": null,
+    "source_evidence_scope": "six sampled video frames only; mechanism and transferability remain hypotheses",
+    "result": {
+      "hook": {
+        "text": "Stop wasting money on Aluminum Foil",
+        "kind": "OBSERVED"
+      },
+      "buyer_problem": {
+        "text": "Wasting money on disposable aluminum foil and using it incorrectly",
+        "kind": "OBSERVED"
+      },
+      "product_intervention": {
+        "text": "A reusable clear silicone bag placed over a baking dish containing food",
+        "kind": "OBSERVED"
+      },
+      "result_demo": {
+        "text": "The bag is shown covering the food, but no later frame shows the food preserved over time or after heating/freezing to verify the result",
+        "kind": "INFERRED"
+      },
+      "cta": {
+        "text": "Link in my bio >> KITCHEN FINDS",
+        "kind": "INFERRED"
+      },
+      "mechanism_hypothesis": {
+        "text": "The silicone bag acts as a reusable cover that seals food for oven and freezer use, replacing single-use foil.",
+        "kind": "INFERRED"
+      },
+      "transferability": {
+        "text": "The product can be used for various baked dishes and storage needs beyond the specific casserole shown.",
+        "kind": "INFERRED"
+      },
+      "evidence": [
+        {
+          "t_sec": 0.5,
+          "observation": "Hands hold a clear silicone bag over a baking dish with casserole. Text overlay reads 'Stop wasting money on Aluminum Foil'.",
+          "frame": 0,
+          "supports": [
+            "hook",
+            "buyer_problem"
+          ]
+        },
+        {
+          "t_sec": 2.73,
+          "observation": "Hands lift a sheet of aluminum foil off the same baking dish. Text overlay reads 'You are doing all wrong'.",
+          "frame": 1,
+          "supports": [
+            "buyer_problem"
+          ]
+        },
+        {
+          "t_sec": 4.97,
+          "observation": "Hands place the clear silicone bag over the baking dish containing the food.",
+          "frame": 2,
+          "supports": [
+            "product_intervention"
+          ]
+        },
+        {
+          "t_sec": 7.2,
+          "observation": "The baking dish is fully covered by the clear silicone bag. Text overlay reads 'Eco-friendly'.",
+          "frame": 3,
+          "supports": [
+            "product_intervention",
+            "mechanism_hypothesis"
+          ]
+        },
+        {
+          "t_sec": 9.44,
+          "observation": "The clear bag is held up near the edge of the black baking dish. Text overlay reads 'Oven Safe (Up to 425F)'.",
+          "frame": 4,
+          "supports": [
+            "mechanism_hypothesis",
+            "transferability"
+          ]
+        },
+        {
+          "t_sec": 11.67,
+          "observation": "The baking dish is covered with the clear bag again. Text overlay reads 'And freezer safe'.",
+          "frame": 5,
+          "supports": [
+            "mechanism_hypothesis",
+            "transferability"
+          ]
+        }
+      ],
+      "limits": {
+        "text": "The CTA is not visible in the provided frames, only in the ad metadata. No long-term visual proof of food freshness or durability is shown.",
+        "missing": [
+          "cta_visual_in_frames",
+          "long_term_freshness_proof"
+        ]
+      },
+      "ratings": {
+        "problem_clarity": 5,
+        "product_demo": 4,
+        "proof_visibility": 2,
+        "sequence_quality": 4
+      },
+      "warnings": []
+    },
+    "warnings": [],
+    "detail": ""
+  },
+  "brain_trace": {
+    "run_id": "prod-20261031-134550-6d4a0c52",
+    "gate_rounds": [
+      {
+        "phase": "target_fit_gate",
+        "round": 1,
+        "response_excerpt": "{\"atoms\": [], \"transfer_decision\": {\"transferable\": false, \"abstract_mechanism\": \"A reusable silicone bag covers and seals a baking dish as a reusable replacement for disposable aluminum foil, with oven and freezer-safe use shown as proof.\", \"target_native_mapping\": \"Show the Grove silicone bag covering a baking dish as a reusable foil replacement, preserving the old-vs-new comparison and the oven/freezer-safe demonstration.\", \"target_evidence\": [\"reusable silicone food storage bag\", \"Stand-up base for filling and storage\", \"Secure seal\"], \"reason\": \"The source mechanism is a comparison between disposable foil and a reusable silicone cover, but the target OfferCard lacks verified oven-safe or freezer-safe claims; only microwave-safe up to 425°F is confirmed, so the essential oven/freeze\", \"demo_form_source\": \"comparison\", \"demo_form_target\": \"comparison\", \"source_elements_preserved\": [], \"source_elements_dropped\": [{\"element\": \"hook\", \"why\": \"Cannot preserve without unverified oven/freezer-safe target claims.\"}, {\"element\": \"problem\", \"why\": \"Cannot preserve without unverified oven/freezer-safe target claims.\"}, {\"element\": \"mechanism\", \"why\": \"Cannot preserve without unverified oven/freezer-safe target claims.\"}, {\"element\": \"intervention\", \"why\": \"Cannot preserve without unverified oven/freezer-safe target claims.\"}, {\"element\": \"result\", \"why\": \"Cannot preserve without unverified oven/freezer-safe target claims.\"}]}}",
+        "validation_errors": [
+          "NEGATIVE_TRANSFER_EVIDENCE_GAP: every dropped element is justified only by missing or unverified target evidence for a source feature. A missing target claim for a feature that does not change the causal action or its observable result (display readouts, power ratings, spec numbers, accessories) is not an incompatibility: omit that feature from the creative and keep the elements it does not define as preserved. Set transferable=false only if the target product class cannot perform the source's causal action at all, and then name that essential missing capability in each dropped element's why instead of citing unverified evidence."
+        ]
+      },
+      {
+        "phase": "target_fit_gate",
+        "round": 2,
+        "previous_errors": [
+          "NEGATIVE_TRANSFER_EVIDENCE_GAP: every dropped element is justified only by missing or unverified target evidence for a source feature. A missing target claim for a feature that does not change the causal action or its observable result (display readouts, power ratings, spec numbers, accessories) is not an incompatibility: omit that feature from the creative and keep the elements it does not define as preserved. Set transferable=false only if the target product class cannot perform the source's causal action at all, and then name that essential missing capability in each dropped element's why instead of citing unverified evidence."
+        ],
+        "response_excerpt": "{\"atoms\": [], \"transfer_decision\": {\"transferable\": false, \"abstract_mechanism\": \"A reusable silicone bag covers and seals a baking dish as a durable replacement for disposable aluminum foil, with oven and freezer safety shown as proof of reuse across temperature conditions.\", \"target_native_mapping\": \"Show the Grove Co. 12 oz silicone bag covering a baking dish as a foil replacement, using its verified stand-up base, secure seal, leak-proof design, and 425°F oven safety as the observable proof.\", \"target_evidence\": [\"Grove Co. Reusable Silicone Food Storage Bag 12 oz\", \"reusable silicone food storage bag\", \"Stand-up base for filling and storage, Secure seal, Leak-proof design, Withstands temperatures up to 425°F\"], \"reason\": \"The source mechanism is a comparison between the reusable silicone bag and disposable aluminum foil, but the sampled evidence never shows the bag actually sealing the dish or performing in the oven/freezer; it only shows the bag held over/2\", \"demo_form_source\": \"comparison\", \"demo_form_target\": \"comparison\", \"source_elements_preserved\": [], \"source_elements_dropped\": [{\"element\": \"hook\", \"why\": \"Source hook references aluminum foil, which is not part of the target OfferCard and cannot be restated without unverified claims.\"}, {\"element\": \"problem\", \"why\": \"The problem of wasting money on foil is source-specific and not supported by target OfferCard facts.\"}, {\"element\": \"mechanism\", \"why\": \"No sampled frame shows the bag sealing the dish or demonstrating oven/freezer performance, so the causal mechanism cannot be verified for transfer.\"}, {\"element\": \"intervention\", \"why\": \"Placing a bag over a dish is shown, but without a verified seal or temperature proof it cannot serve as the target intervention.\"}, {\"element\": \"result\", \"why\": \"No later frame shows preserved food or verified heating/freezing outcome, so the result is not observable evidence.\"}]}}",
+        "validation_errors": [
+          "transfer_decision.target_evidence[2] is not present in authoritative OfferCard fields",
+          "SOURCE_EVIDENCE_CONTRADICTION: the negative transfer rationale overlaps with concrete source-frame observation terms at 4.97s, 7.2s. Reconcile the specific observation before rejecting the transfer; a distinct, evidenced target incompatibility may still justify transferable=false."
+        ]
+      }
+    ],
+    "brain_rounds": []
+  },
+  "offer": {
+    "offer_id": "grove-silicone-bag-12oz-us-001",
+    "name": "Grove Co. Reusable Silicone Food Storage Bag 12 oz",
+    "product_type": "reusable silicone food storage bag",
+    "verified_claims": [
+      "Made with 100% platinum food-grade silicone",
+      "Stand-up base for filling and storage",
+      "Secure seal",
+      "Leak-proof design",
+      "Dishwasher-safe",
+      "Microwave-safe",
+      "Withstands temperatures up to 425°F"
+    ],
+    "forbidden_claims": [
+      "Guaranteed results",
+      "Medical benefits",
+      "Cures",
+      "BPA-free unless independently verified",
+      "Safe for every cooking method",
+      "Keeps food fresh for a guaranteed period"
+    ],
+    "photos": [],
+    "platform": "TikTok",
+    "geo": "US",
+    "product_category": "kitchen storage",
+    "confirmations": [],
+    "approved_brand_marks": [],
+    "branding_policy": "no_branding"
+  },
+  "find_candidate": {
+    "id": "tiktok:ad:7697657045536820511",
+    "video_url": "https://artifact-fixture.invalid/source.mp4",
+    "duration_seconds": 12.067,
+    "source_check": {
+      "status": "UNKNOWN",
+      "classification": "UNVERIFIED",
+      "excluded": []
+    },
+    "query_product_match": {
+      "matches": true,
+      "query_anchor": "bag",
+      "mention_source": "hashtag",
+      "reason": ""
+    },
+    "source_selection": {
+      "mode": "product",
+      "role": "TARGET_PRODUCT",
+      "promotion_evidence": true,
+      "target_promotion_evidence": true,
+      "confidence": "MEDIUM",
+      "context_verified": true,
+      "attention": {
+        "version": "attention_rank_v1",
+        "score": 52.11,
+        "rank": 52.11,
+        "base_score": 52.11,
+        "coverage": 1.0,
+        "components": {
+          "reach": 61.92,
+          "amplification": 47.93,
+          "save_rate": 26.53,
+          "share_rate": 74.61,
+          "like_rate": 36.1,
+          "recency": 76.78
+        },
+        "available_fields": [
+          "author_followers",
+          "likes",
+          "published_at",
+          "saves",
+          "shares",
+          "views"
+        ],
+        "missing_components": [],
+        "period_days": 30,
+        "age_days": 13.93,
+        "is_commercial_proof": false,
+        "warning": "Attention proxy only; not sales, conversion, profit, or causal-mechanism evidence."
+      }
+    },
+    "request": {
+      "selection_mode": "product",
+      "video_duration_range": "up_to_40",
+      "minimum_attention_coverage": null,
+      "attention_floor": null
+    }
+  }
+}

@@ -1,0 +1,18 @@
+# Sponsored Search seed corpus for physical-product source discovery.
+# These are product/category queries, not source-approval rules.
+cordless car vacuum
+handheld car vacuum
+car detailing vacuum
+car cleaning gadget
+portable tire inflator
+car organizer
+pet hair remover
+portable carpet cleaner
+cordless scrubber
+portable blender
+kitchen gadget
+electric lint remover
+home organizer
+rechargeable cleaning tool
+LED lamp
+portable massager

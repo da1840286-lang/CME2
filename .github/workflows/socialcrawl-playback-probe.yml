@@ -1,0 +1,259 @@
+name: SocialCrawl direct playback-metrics probe
+run-name: SocialCrawl playback probe — ${{ inputs.order_by }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      order_by:
+        description: "Ask Ads Top to rank by this playback metric"
+        type: choice
+        options:
+          - play_6s_rate
+          - play_2s_rate
+        required: true
+        default: play_6s_rate
+      country:
+        description: "Country"
+        type: choice
+        options:
+          - US
+          - GB
+          - CA
+        required: true
+        default: US
+      period:
+        description: "Lookback period in days"
+        type: choice
+        options:
+          - "7"
+          - "30"
+          - "180"
+        required: true
+        default: "30"
+      include_retention:
+        description: "Send include=retention (extra credits) to inspect real post.ext.ad.retention shape"
+        type: boolean
+        required: false
+        default: false
+      limit:
+        description: "Maximum rows (10 is the minimum useful probe)"
+        type: number
+        required: true
+        default: 10
+
+permissions:
+  contents: read
+
+jobs:
+  direct-api-probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      SOCIALCRAWL_API_KEY: ${{ secrets.SOCIALCRAWL_API_KEY }}
+      SC_ORDER_BY: ${{ inputs.order_by }}
+      SC_COUNTRY: ${{ inputs.country }}
+      SC_PERIOD: ${{ inputs.period }}
+      SC_LIMIT: ${{ inputs.limit }}
+      SC_INCLUDE_RETENTION: ${{ inputs.include_retention }}
+    steps:
+      - name: Query SocialCrawl directly (no CME adapter, keyword, or language filter)
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import re
+          import sys
+          import uuid
+          from pathlib import Path
+          from urllib.error import HTTPError, URLError
+          from urllib.parse import urlencode
+          from urllib.request import Request, urlopen
+
+          output = Path("socialcrawl-playback-probe.json")
+          api_key = os.environ.get("SOCIALCRAWL_API_KEY", "").strip()
+          report = {
+              "probe": "direct SocialCrawl API request; bypasses CME adapter",
+              "endpoint": "https://www.socialcrawl.dev/v1/tiktok/ads/top",
+              "params": {
+                  "country": os.environ.get("SC_COUNTRY", "US"),
+                  "period": int(os.environ.get("SC_PERIOD", "30")),
+                  "order_by": os.environ.get("SC_ORDER_BY", "play_6s_rate"),
+                  "limit": max(10, min(10, int(float(os.environ.get("SC_LIMIT", "10"))))),
+              },
+              "status": "NOT_RUN",
+              "interpretation": None,
+          }
+
+          if os.environ.get("SC_INCLUDE_RETENTION", "false").lower() == "true":
+              report["params"]["include"] = "retention"
+
+          if not api_key:
+              report.update({
+                  "status": "MISSING_SECRET",
+                  "interpretation": "GitHub Actions secret SOCIALCRAWL_API_KEY is not available to this workflow.",
+              })
+              output.write_text(json.dumps(report, indent=2), encoding="utf-8")
+              print(json.dumps(report, indent=2))
+              sys.exit(1)
+
+          query = urlencode(report["params"])
+          request = Request(
+              report["endpoint"] + "?" + query,
+              headers={
+                  "x-api-key": api_key,
+                  "Idempotency-Key": str(uuid.uuid4()),
+                  "Cache-Control": "no-cache",
+                  "Accept": "application/json",
+              },
+              method="GET",
+          )
+          payload = None
+          http_status = None
+          try:
+              with urlopen(request, timeout=40) as response:
+                  http_status = response.status
+                  body = response.read()
+          except HTTPError as exc:
+              http_status = exc.code
+              body = exc.read()
+          except (URLError, TimeoutError) as exc:
+              report.update({
+                  "status": "NETWORK_ERROR",
+                  "error_type": type(exc).__name__,
+                  "interpretation": "The direct request could not reach SocialCrawl.",
+              })
+              output.write_text(json.dumps(report, indent=2), encoding="utf-8")
+              print(json.dumps(report, indent=2))
+              sys.exit(1)
+
+          try:
+              payload = json.loads(body.decode("utf-8"))
+          except Exception:
+              report.update({
+                  "status": "NON_JSON_RESPONSE",
+                  "http_status": http_status,
+                  "response_preview": body[:500].decode("utf-8", errors="replace"),
+                  "interpretation": "SocialCrawl did not return JSON for this request.",
+              })
+              output.write_text(json.dumps(report, indent=2), encoding="utf-8")
+              print(json.dumps(report, indent=2))
+              sys.exit(1)
+
+          data = payload.get("data") if isinstance(payload, dict) else {}
+          data = data if isinstance(data, dict) else {}
+          items = data.get("items") or data.get("commercial_contents") or []
+          items = items if isinstance(items, list) else []
+
+          # Record only playback-related fields and a compact schema sample; never dump full ad rows or headers.
+          pattern = re.compile(
+              r"play.?[26]s|[26].?s.*rate|watch|retention|view.?through",
+              re.IGNORECASE,
+          )
+          field_hits = {}
+          field_samples = []
+
+          def visit(value, path="$", depth=0):
+              if depth > 10:
+                  return
+              if isinstance(value, dict):
+                  for key, child in value.items():
+                      child_path = f"{path}.{key}"
+                      if pattern.search(str(key)):
+                          field_hits[child_path] = field_hits.get(child_path, 0) + 1
+                          sample = child if child is None or isinstance(child, (str, int, float, bool)) else f"<{type(child).__name__}>"
+                          if len(field_samples) < 30:
+                              field_samples.append({"path": child_path, "value": sample, "value_type": type(child).__name__})
+                      visit(child, child_path, depth + 1)
+              elif isinstance(value, list):
+                  for i, child in enumerate(value[:30]):
+                      visit(child, f"{path}[{i}]", depth + 1)
+
+          for item in items:
+              visit(item)
+
+          def shape(value):
+              if not isinstance(value, dict):
+                  return {}
+              result = {"$": sorted(str(k) for k in value.keys())[:80]}
+              for parent_path, child_key in (("$.post", "post"), ("$.ext", "ext"), ("$.computed", "computed")):
+                  child = value.get(child_key)
+                  if isinstance(child, dict):
+                      result[parent_path] = sorted(str(k) for k in child.keys())[:80]
+              post = value.get("post")
+              if isinstance(post, dict):
+                  ext = post.get("ext")
+                  if isinstance(ext, dict):
+                      result["$.post.ext"] = sorted(str(k) for k in ext.keys())[:80]
+                      ad = ext.get("ad")
+                      if isinstance(ad, dict):
+                          result["$.post.ext.ad"] = sorted(str(k) for k in ad.keys())[:100]
+                  content = post.get("content")
+                  if isinstance(content, dict):
+                      result["$.post.content"] = sorted(str(k) for k in content.keys())[:80]
+              return result
+
+          # Show the retention shape and first six values only; do not dump full ad rows.
+          retention_value_samples = []
+          for item in items[:10]:
+              post = item.get("post") if isinstance(item, dict) else None
+              post = post if isinstance(post, dict) else (item if isinstance(item, dict) else {})
+              ext = post.get("ext") if isinstance(post.get("ext"), dict) else {}
+              ad = ext.get("ad") if isinstance(ext.get("ad"), dict) else {}
+              if not any(key in ad for key in ("retention", "retention_2s", "retention_6s")):
+                  continue
+              curve = ad.get("retention")
+              sample = {
+                  "retention_type": type(curve).__name__ if curve is not None else "missing",
+                  "retention_2s": ad.get("retention_2s"),
+                  "retention_6s": ad.get("retention_6s"),
+              }
+              if isinstance(curve, list):
+                  sample["retention_first_points"] = [
+                      point if point is None or isinstance(point, (str, int, float, bool))
+                      else f"<{type(point).__name__}>"
+                      for point in curve[:6]
+                  ]
+                  sample["retention_length"] = len(curve)
+              elif isinstance(curve, dict):
+                  sample["retention_keys"] = sorted(str(key) for key in curve.keys())[:12]
+              retention_value_samples.append(sample)
+
+          report.update({
+              "http_status": http_status,
+              "api_success": payload.get("success") if isinstance(payload, dict) else None,
+              "api_error": payload.get("error") if isinstance(payload, dict) else None,
+              "request_id": payload.get("request_id") if isinstance(payload, dict) else None,
+              "credits_used": payload.get("credits_used") if isinstance(payload, dict) else None,
+              "credits_remaining": payload.get("credits_remaining") if isinstance(payload, dict) else None,
+              "raw_item_count": len(items),
+              "playback_field_occurrences": sum(field_hits.values()),
+              "playback_field_paths": field_hits,
+              "playback_field_samples": field_samples,
+              "retention_value_samples": retention_value_samples,
+              "first_item_key_shapes": shape(items[0]) if items else {},
+          })
+
+          if http_status and 200 <= http_status < 300 and payload.get("success") is True:
+              if field_hits:
+                  report["status"] = "PLAYBACK_FIELDS_PRESENT"
+                  report["interpretation"] = "At least one playback/watch/retention-like field is present in the raw API response. Inspect paths and values before mapping it into CME."
+              else:
+                  report["status"] = "NO_PLAYBACK_FIELDS_IN_THIS_RESPONSE"
+                  report["interpretation"] = "The direct, unfiltered response contains no playback/watch/retention-like field names. This confirms absence in this response, not a universal statement about all SocialCrawl endpoints or accounts."
+          else:
+              report["status"] = "API_ERROR"
+              report["interpretation"] = "Direct request failed; inspect the redacted API error and HTTP status."
+          output.write_text(json.dumps(report, indent=2), encoding="utf-8")
+          print(json.dumps(report, indent=2))
+          if report["status"] not in ("PLAYBACK_FIELDS_PRESENT", "NO_PLAYBACK_FIELDS_IN_THIS_RESPONSE"):
+              sys.exit(1)
+          PY
+      - name: Upload compact probe report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: socialcrawl-playback-direct-probe
+          path: socialcrawl-playback-probe.json
+          if-no-files-found: warn
+          retention-days: 7

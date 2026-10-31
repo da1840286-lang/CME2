@@ -1,0 +1,1547 @@
+name: CME Live Control Center — pre-Layer 3
+run-name: CME pre-Layer-3 — ${{ inputs.stage }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      stage:
+        description: "Run FIND, analyze a selected source, run Brain/frame checks, or create a test creative. Automatic ALL analyzes the FIND shortlist in FIND order using PATTERN_SOURCE_V1; commercial metrics are diagnostics and Target-Fit decides transferability. Manual candidate_id selects one FIND source but cannot bypass PATTERN_SOURCE_V1."
+        type: choice
+        options:
+          - find
+          - analyze
+          - brain
+          - frame
+          - all
+        required: true
+        default: all
+      country:
+        description: "TikTok FIND country, two-letter code"
+        type: string
+        required: true
+        default: "US"
+      period:
+        description: "Lookback period in days for supported source-age filtering and attention scoring; this does not create playback metrics."
+        type: choice
+        options:
+          - "7"
+          - "30"
+          - "180"
+        required: true
+        default: "30"
+      find_requests:
+        description: "Hard cap on SocialCrawl requests. Product mode uses up to three target-focused Sponsored Search queries by default; it does not call Ads Top playback boards or unfiltered retention. Source role, attention proxy and Target-Fit remain separate downstream checks."
+        type: number
+        required: true
+        default: 4
+      find_max_ads:
+        description: "Maximum ranked TikTok ads to return"
+        type: number
+        required: true
+        default: 3
+      find_video_duration_range:
+        description: "FIND video-duration filter. A selected range excludes records with unknown duration; it does not change provider request budgets or downstream stages."
+        type: choice
+        options:
+          - all
+          - up_to_40
+          - 40_to_60
+          - 60_to_90
+          - over_90
+        required: true
+        default: all
+      keywords:
+        description: "Comma-separated search terms. In contract-aware product search the exact offer name is queried first, then these terms in the order typed, then the product type; at most three queries run, and any typed keyword that does not fit is listed in candidates.json request.dropped_operator_keywords."
+        type: string
+        required: false
+        default: "car vacuum"
+      find_performance_order:
+        description: "Optional playback-metric diagnostic. Product mode always uses target-focused Sponsored Search; requested play-rate values are reported as NOT_OBTAINABLE_FOR_PRODUCT_QUERY and never gate or rank candidates. default is the same target-focused product search without requesting unavailable rates."
+        type: choice
+        options:
+          - default
+          - play_6s_rate
+          - play_2s_rate
+          - playback_both
+        required: true
+        default: default
+      find_include_retention:
+        description: "Requires a playback-metric option. Unfiltered Ads Top retention is not product-targeted and is not used in automatic Product FIND; a true value is recorded as requested but not executed."
+        type: boolean
+        required: false
+        default: false
+      find_selection_mode:
+        description: "Product always targets the configured offer using Sponsored Search; mechanism searches explicit keywords using Sponsored Search. Both use attention only as a diagnostic proxy, never as commercial proof. Mechanism candidates also require an explicit positive query-product match. Target-Fit remains the transferability gate."
+        type: choice
+        options:
+          - product
+          - mechanism
+        required: true
+        default: product
+      find_run_id:
+        description: "For analyze/all: numeric run ID of a completed FIND run"
+        type: string
+        required: false
+        default: ""
+      candidate_id:
+        description: "For analyze/all: exact candidate_id from FIND. Manual selection overrides automatic order only; PATTERN_SOURCE_V1 video, role, promotion and explicit operator filters still apply. It is not proof of commercial success."
+        type: string
+        required: false
+        default: ""
+      branding_policy:
+        description: "For brain/all: no_branding forbids product logos/lettering; target_brand_allowed permits confirmed target marks. Frame inherits its exact Brain contract."
+        type: choice
+        options:
+          - no_branding
+          - target_brand_allowed
+        required: true
+        default: no_branding
+      offer_json:
+        description: "Target OfferCard. For target_brand_allowed, add confirmed target marks to approved_brand_marks."
+        type: string
+        required: false
+        default: '{"offer_id":"fanttik-v8-mate-us-001","name":"Fanttik V8 Mate Cordless Car Vacuum","product_type":"cordless handheld car vacuum","verified_claims":["Cordless car vacuum"],"forbidden_claims":["guaranteed","medical","cures"],"photos":[],"platform":"","geo":"US","product_category":"","confirmations":[],"approved_brand_marks":[]}'
+      target_photo_url:
+        description: "Direct HTTPS image URL; downloaded during the workflow, not committed to the repository"
+        type: string
+        required: false
+        default: ""
+      source_contract_json:
+        description: "Optional manual JSON input for brain/all. Prefer source_contract_run_id to load the Analyze artifact automatically."
+        type: string
+        required: false
+        default: ""
+      source_contract_run_id:
+        description: "For brain/all: numeric ID of a successful analyze run. Automatically loads source_contract.json from its cme-analyze-out artifact; avoids manual JSON copy/paste."
+        type: string
+        required: false
+        default: ""
+      shots:
+        description: "Number of sequential frames for brain/all (1-6; keep at 1 for first live run)"
+        type: number
+        required: true
+        default: 1
+      shot:
+        description: "For frame stage: shot number to generate from the accepted Brain contract (1-6)"
+        type: choice
+        options:
+          - "1"
+          - "2"
+          - "3"
+          - "4"
+          - "5"
+          - "6"
+        required: true
+        default: "1"
+      brief:
+        description: "Target-native production brief; source mechanism is carried separately from source_contract_json"
+        type: string
+        required: true
+        default: "Create target-native vertical 9:16 product-ad frames. Preserve the source's causal commercial mechanism, but replace its product, brand, creator, props, scene, wording and composition. Show the configured target product clearly and use only verified OfferCard facts."
+      brain_run_id:
+        description: "Required for frame; numeric run ID of a successful Brain stage from this branch. The atom manifest is revalidated before generation."
+        type: string
+        required: false
+        default: ""
+      previous_frame_run_id:
+        description: "Optional prior frame run ID for a controlled retry; restores state and attempt limits"
+        type: string
+        required: false
+        default: ""
+      no_ocr_required:
+        description: "Make OCR's no-text check optional; a missing required check can still leave QA UNVERIFIED"
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: cme-live-smoke-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      SOCIALCRAWL_API_KEY: ${{ secrets.SOCIALCRAWL_API_KEY }}
+      GH_TOKEN: ${{ github.token }}
+      CME_REPOSITORY: ${{ github.repository }}
+      CME_STAGE: ${{ inputs.stage }}
+      CME_BRANDING_POLICY: ${{ inputs.branding_policy }}
+      FIND_RUN_ID: ${{ inputs.find_run_id }}
+      CANDIDATE_ID: ${{ inputs.candidate_id }}
+      SOURCE_CONTRACT_PROVIDED: ${{ inputs.source_contract_json != '' || inputs.source_contract_run_id != '' }}
+      FIND_COUNTRY: ${{ inputs.country }}
+      FIND_PERIOD: ${{ inputs.period }}
+      FIND_REQUESTS: ${{ inputs.find_requests }}
+      FIND_MAX_ADS: ${{ inputs.find_max_ads }}
+      FIND_VIDEO_DURATION_RANGE: ${{ inputs.find_video_duration_range }}
+      FIND_KEYWORDS: ${{ inputs.keywords }}
+      FIND_SELECTION_MODE: ${{ inputs.find_selection_mode }}
+      FIND_PERFORMANCE_ORDER: ${{ inputs.find_performance_order }}
+      FIND_INCLUDE_RETENTION: ${{ inputs.find_include_retention }}
+      SHOTS: ${{ inputs.shots }}
+      CME_SHOT: ${{ inputs.shot }}
+      BRAIN_RUN_ID: ${{ inputs.brain_run_id }}
+      PREVIOUS_FRAME_RUN_ID: ${{ inputs.previous_frame_run_id }}
+      NO_OCR_REQUIRED: ${{ inputs.no_ocr_required }}
+    steps:
+      - name: Check out selected branch and commit
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Restore FIND source history
+        if: inputs.stage == 'find' || inputs.stage == 'all'
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/cme-find-state
+          key: cme-find-state-${{ runner.os }}-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            cme-find-state-${{ runner.os }}-${{ github.ref_name }}-
+      - name: Initialize FIND source history
+        if: inputs.stage == 'find' || inputs.stage == 'all'
+        shell: bash
+        run: |
+          mkdir -p "${RUNNER_TEMP}/cme-find-state"
+          echo "CME_FIND_STATE_DIR=${RUNNER_TEMP}/cme-find-state" >> "$GITHUB_ENV"
+          echo "CME_FIND_SEEN_PATH=${RUNNER_TEMP}/cme-find-state/seen.json" >> "$GITHUB_ENV"
+          rm -f "${RUNNER_TEMP}/cme-find-state/find-completed"
+          if [[ ! -s "${RUNNER_TEMP}/cme-find-state/seen.json" ]]; then
+            printf '{"version":1,"entries":{}}\n' > "${RUNNER_TEMP}/cme-find-state/seen.json"
+          fi
+
+      - name: Restore verified product-reference cache
+        if: inputs.stage == 'frame' || inputs.stage == 'all'
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/cme-reference-cache
+          key: cme-reference-cache-${{ runner.os }}-${{ hashFiles('examples/**', 'cme/branding.py') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            cme-reference-cache-${{ runner.os }}-${{ hashFiles('examples/**', 'cme/branding.py') }}-
+      - name: Initialize verified product-reference cache
+        if: inputs.stage == 'frame' || inputs.stage == 'all'
+        shell: bash
+        run: |
+          mkdir -p "${RUNNER_TEMP}/cme-reference-cache"
+          echo "CME_REFERENCE_CACHE_DIR=${RUNNER_TEMP}/cme-reference-cache" >> "$GITHUB_ENV"
+
+      - name: Install project dependencies
+        timeout-minutes: 5
+        run: python -m pip install --disable-pip-version-check --retries 1 --timeout 20 -r requirements.txt
+
+      - name: Install Tesseract for strict branding cleanup
+        if: inputs.stage == 'brain' || inputs.stage == 'frame' || inputs.stage == 'all'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends tesseract-ocr
+
+      - name: Verify FFmpeg runtime for GitHub-only source-video analysis
+        if: (inputs.stage == 'all' && inputs.source_contract_json == '' && inputs.source_contract_run_id == '') || inputs.stage == 'analyze'
+        timeout-minutes: 1
+        run: |
+          python - <<'PY'
+          from cme.radar.analyze import ffmpeg_executable, tools_status
+          status = tools_status()
+          if status["state"] != "READY":
+              raise SystemExit(f"FFmpeg runtime unavailable: {status['detail']}")
+          print(f"FFmpeg runtime ready: {ffmpeg_executable()}")
+          PY
+
+      - name: Create controlled runtime settings
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          cp settings.example.json settings.json
+
+      - name: Validate target offer and download target photo before provider calls
+        if: inputs.stage == 'brain' || inputs.stage == 'all'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, os, re, urllib.error, urllib.request, zipfile
+          from io import BytesIO
+          from pathlib import Path
+          from urllib.parse import urlsplit
+          from PIL import Image
+          from cme.brain import build_source_transfer_context
+          from cme.offer import load_offer
+          from cme.qa import validate_product_references
+
+          root = Path(os.environ["GITHUB_WORKSPACE"]).resolve()
+          out = (root / "out").resolve()
+          event_payload = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))
+          dispatch_inputs = event_payload.get("inputs") or {}
+          raw_offer = str(dispatch_inputs.get("offer_json") or "").strip()
+          raw_source = str(dispatch_inputs.get("source_contract_json") or "").strip()
+          source_run_id = str(dispatch_inputs.get("source_contract_run_id") or "").strip()
+          selected_candidate = os.environ.get("CANDIDATE_ID", "").strip()
+          photo_url = str(dispatch_inputs.get("target_photo_url") or "").strip()
+          if not raw_offer:
+              raise SystemExit("offer_json is required.")
+          stage = os.environ.get("CME_STAGE", "")
+          if raw_source and source_run_id:
+              raise SystemExit("Use only one source input: source_contract_json or source_contract_run_id.")
+          if stage == "brain" and not raw_source and not source_run_id:
+              raise SystemExit("Brain-only stage requires source_contract_json or source_contract_run_id from a successful analyze run.")
+          if stage == "all" and selected_candidate and not os.environ.get("FIND_RUN_ID", "").strip():
+              raise SystemExit("A manually selected candidate_id requires find_run_id from the FIND stage.")
+          if stage == "all" and selected_candidate and (raw_source or source_run_id):
+              raise SystemExit(
+                  "Conflicting stage=all inputs: choose either candidate_id from FIND (which creates a source contract "
+                  "from that candidate's analysis) or source_contract_json/source_contract_run_id, not both."
+              )
+
+          # Prefer fetching the canonical source_contract.json from the Analyze artifact to avoid manual copy/paste.
+          if source_run_id:
+              if not re.fullmatch(r"[0-9]{1,20}", source_run_id):
+                  raise SystemExit("source_contract_run_id must be the numeric ID of a completed Analyze run.")
+              token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+              if not token:
+                  raise SystemExit("GitHub token unavailable; cannot fetch the Analyze artifact.")
+              api_base = f"https://api.github.com/repos/{os.environ['CME_REPOSITORY']}"
+              headers = {
+                  "Authorization": f"Bearer {token}",
+                  "Accept": "application/vnd.github+json",
+                  "X-GitHub-Api-Version": "2022-11-28",
+                  "User-Agent": "CME-source-contract-loader",
+              }
+
+              class StripAuthorizationOnCrossHostRedirect(urllib.request.HTTPRedirectHandler):
+                  """GitHub API redirects artifact ZIP requests to signed storage URLs.
+
+                  The GitHub bearer token must not be forwarded to that other host; the
+                  signed redirect URL already authorizes the storage request.
+                  """
+                  def redirect_request(self, req, fp, code, msg, headers, newurl):
+                      redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+                      if redirected is not None and urlsplit(req.full_url).netloc.lower() != urlsplit(newurl).netloc.lower():
+                          redirected.remove_header("Authorization")
+                          redirected.remove_header("Cookie")
+                          redirected.unredirected_hdrs.pop("Authorization", None)
+                          redirected.unredirected_hdrs.pop("Cookie", None)
+                      return redirected
+
+              artifact_opener = urllib.request.build_opener(StripAuthorizationOnCrossHostRedirect())
+              try:
+                  req = urllib.request.Request(
+                      f"{api_base}/actions/runs/{source_run_id}/artifacts?per_page=100", headers=headers)
+                  with artifact_opener.open(req, timeout=30) as response:
+                      artifact_index = json.loads(response.read(5 * 1024 * 1024 + 1).decode("utf-8"))
+                  artifacts = artifact_index.get("artifacts", []) if isinstance(artifact_index, dict) else []
+                  artifact = next((a for a in artifacts
+                                   if a.get("name") == "cme-analyze-out" and not a.get("expired")), None)
+                  if artifact is None:
+                      available = ", ".join(str(a.get("name")) for a in artifacts[:20])
+                      raise SystemExit(
+                          f"Run {source_run_id} has no unexpired cme-analyze-out artifact. "
+                          f"Artifacts found: {available or '(none)'}")
+                  req = urllib.request.Request(str(artifact["archive_download_url"]), headers=headers)
+                  with artifact_opener.open(req, timeout=30) as response:
+                      archive_bytes = response.read(25 * 1024 * 1024 + 1)
+                  if len(archive_bytes) > 25 * 1024 * 1024:
+                      raise SystemExit("Analyze artifact ZIP exceeds 25 MB.")
+                  with zipfile.ZipFile(BytesIO(archive_bytes)) as archive:
+                      members = [name for name in archive.namelist()
+                                 if name == "source_contract.json" or name.endswith("/source_contract.json")]
+                      if len(members) != 1:
+                          raise SystemExit(
+                              f"Analyze artifact must contain exactly one source_contract.json; found {len(members)}.")
+                      raw_source = archive.read(members[0]).decode("utf-8")
+              except (OSError, urllib.error.URLError, ValueError, KeyError, zipfile.BadZipFile) as exc:
+                  raise SystemExit(
+                      f"Could not load source_contract.json from Analyze run {source_run_id}: "
+                      f"{type(exc).__name__}: {exc}") from exc
+
+          # In stage=all, no source input means FIND + ranked automatic selection in this same run.
+          try:
+              offer_data = json.loads(raw_offer)
+              source_data = json.loads(raw_source) if raw_source else None
+          except json.JSONDecodeError as exc:
+              raise SystemExit(f"Invalid JSON (line {exc.lineno}, column {exc.colno}): {exc.msg}") from exc
+          if not isinstance(offer_data, dict):
+              raise SystemExit("offer_json must be a JSON object")
+          from cme.branding import resolve_branding_contract
+          branding_policy = str(os.environ.get("CME_BRANDING_POLICY", "")).strip().lower()
+          if branding_policy not in {"no_branding", "target_brand_allowed"}:
+              raise SystemExit("Select branding_policy in the workflow menu: no_branding or target_brand_allowed.")
+          json_policy = offer_data.pop("branding_policy", None)
+          if json_policy and str(json_policy).strip().lower() != branding_policy:
+              print(f"Ignoring offer_json.branding_policy={json_policy!r}; workflow menu selected {branding_policy!r}.")
+          if not isinstance(offer_data.get("approved_brand_marks", []), list):
+              raise SystemExit("OfferCard.approved_brand_marks must be a JSON array")
+          offer_data.update(resolve_branding_contract(
+              branding_policy, offer_data.get("approved_brand_marks", []),
+              offer_data.get("name", ""), offer_data.get("product_type", ""),
+          ))
+          if source_data is not None and not isinstance(source_data, dict):
+              raise SystemExit("source_contract_json must be a JSON object")
+
+          if photo_url:
+              parsed = urlsplit(photo_url)
+              if parsed.scheme != "https" or not parsed.hostname or parsed.hostname.lower() in {"localhost", "127.0.0.1", "::1"}:
+                  raise SystemExit("target_photo_url must be a direct HTTPS image URL, not a product page.")
+              req = urllib.request.Request(photo_url, headers={"User-Agent": "Mozilla/5.0", "Accept": "image/*"})
+              try:
+                  with urllib.request.urlopen(req, timeout=30) as response:
+                      content_type = response.headers.get_content_type()
+                      image_bytes = response.read(15 * 1024 * 1024 + 1)
+              except (OSError, urllib.error.URLError) as exc:
+                  raise SystemExit(f"Could not download target_photo_url: {type(exc).__name__}: {exc}") from exc
+              if len(image_bytes) > 15 * 1024 * 1024:
+                  raise SystemExit("Target photo exceeds 15 MB; use a smaller image.")
+              if not content_type.startswith("image/"):
+                  raise SystemExit(f"target_photo_url returned {content_type}, not an image. Use the direct image URL.")
+              with Image.open(BytesIO(image_bytes)) as image:
+                  image.verify()
+              (out / "target_product_reference.jpg").write_bytes(image_bytes)
+              offer_data["photos"] = ["target_product_reference.jpg"]
+          else:
+              photos = offer_data.get("photos")
+              if not isinstance(photos, list) or not photos:
+                  raise SystemExit("Provide target_photo_url or OfferCard.photos pointing to real images in this branch.")
+              normalized = []
+              for raw in photos:
+                  if not isinstance(raw, str) or not raw.strip():
+                      raise SystemExit("Every OfferCard.photos entry must be a non-empty path")
+                  item = Path(raw)
+                  if item.is_absolute():
+                      raise SystemExit("OfferCard.photos must use repository-relative paths")
+                  photo = (root / item).resolve()
+                  if not photo.is_relative_to(root) or not photo.is_file():
+                      raise SystemExit(f"Photo is not present in this branch: {raw}")
+                  normalized.append(os.path.relpath(photo, out))
+              offer_data["photos"] = normalized
+
+          offer_path = out / "live_offer.json"
+          offer_path.write_text(json.dumps(offer_data, ensure_ascii=False, indent=2), encoding="utf-8")
+          offer = load_offer(offer_path)
+          issues = validate_product_references(offer.photos)
+          if issues:
+              raise SystemExit("Target-photo preflight blocked before provider calls: " + "; ".join(issues))
+          if source_data is not None:
+              # Pattern extraction is not commercial approval, but that is not a blocker
+              # for making a test creative. Validate the extracted mechanism below instead.
+              if source_data.get("candidate_id") and str(source_data.get("status", "")).upper() != "OK":
+                  raise SystemExit("Saved Radar analysis wrapper must have status=OK before transfer")
+              context = build_source_transfer_context(source_data)
+              meaningful = ("mechanism_hypothesis", "transferability_hypothesis", "mechanism", "mechanism_representation",
+                            "transfer", "rebuild_plan", "image_creative_contract", "hook", "buyer_problem", "product_intervention")
+              if not any(context.get(key) for key in meaningful):
+                  raise SystemExit("Source contract contains no usable mechanism/transfer evidence")
+              (out / "source_contract.json").write_text(json.dumps(source_data, ensure_ascii=False, indent=2), encoding="utf-8")
+          effective_marks = ", ".join(offer.approved_brand_marks) or "(none)"
+          print(f"Preflight PASS: offer={offer.offer_id}; branding_policy={offer.branding_policy}; "
+                f"approved_target_marks={effective_marks}; target photo(s)={len(offer.photos)}.")
+          print("No provider calls were made by this preflight step.")
+          PY
+
+      - name: Validate credentials, FIND parameters, and previous-run provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$CME_STAGE" == "all" && "$FIND_SELECTION_MODE" == "mechanism" && -z "$CANDIDATE_ID" && "$SOURCE_CONTRACT_PROVIDED" != "true" ]]; then
+            echo "::error::Mechanism mode discovers adjacent pattern candidates; it cannot auto-approve commercial transfer. Run stage=find, then explicitly choose a candidate for stage=analyze/all, or provide a reviewed source contract."
+            exit 1
+          fi
+          case "$CME_STAGE" in
+            find)
+              [[ -n "${SOCIALCRAWL_API_KEY:-}" ]] || { echo "::error::Add SOCIALCRAWL_API_KEY in repository Actions secrets."; exit 1; }
+              [[ "$FIND_COUNTRY" =~ ^[A-Za-z]{2}$ ]] || { echo "::error::country must be a two-letter code such as US."; exit 1; }
+              [[ "$FIND_PERIOD" =~ ^(7|30|180)$ ]] || { echo "::error::period must be 7, 30, or 180."; exit 1; }
+              [[ "$FIND_REQUESTS" =~ ^([1-9]|10)$ ]] || { echo "::error::find_requests must be 1..10."; exit 1; }
+              [[ "$FIND_MAX_ADS" =~ ^([1-9]|[1-4][0-9]|50)$ ]] || { echo "::error::find_max_ads must be 1..50."; exit 1; }
+              [[ "$FIND_VIDEO_DURATION_RANGE" =~ ^(all|up_to_40|40_to_60|60_to_90|over_90)$ ]] || { echo "::error::find_video_duration_range is invalid."; exit 1; }
+              if [[ "$FIND_SELECTION_MODE" == "mechanism" && "$FIND_PERFORMANCE_ORDER" != "default" ]]; then
+                echo "::error::Mechanism mode uses Sponsored Search only; choose find_performance_order=default."
+                exit 1
+              fi
+              if [[ "$FIND_INCLUDE_RETENTION" == "true" && ! "$FIND_PERFORMANCE_ORDER" =~ ^(play_6s_rate|play_2s_rate|playback_both)$ ]]; then
+                echo "::error::find_include_retention=true needs a playback option in find_performance_order (the contract-aware plan then reports retention as requested but does not execute it)."
+                exit 1
+              fi
+              ;;
+            analyze)
+              [[ -n "${OPENROUTER_API_KEY:-}" ]] || { echo "::error::Add OPENROUTER_API_KEY in Actions secrets."; exit 1; }
+              [[ "$FIND_RUN_ID" =~ ^[0-9]+$ ]] || { echo "::error::analyze requires find_run_id from a completed FIND run."; exit 1; }
+              [[ -n "$CANDIDATE_ID" ]] || { echo "::error::analyze requires the exact candidate_id from FIND."; exit 1; }
+              ;;
+            brain)
+              [[ -n "${OPENROUTER_API_KEY:-}" ]] || { echo "::error::Add OPENROUTER_API_KEY in Actions secrets."; exit 1; }
+              ;;
+            frame)
+              [[ -n "${OPENROUTER_API_KEY:-}" ]] || { echo "::error::Add OPENROUTER_API_KEY (Judge) in Actions secrets."; exit 1; }
+              [[ -n "${HF_TOKEN:-}" ]] || { echo "::error::Add HF_TOKEN (Hugging Face) in Actions secrets."; exit 1; }
+              [[ "$BRAIN_RUN_ID" =~ ^[0-9]+$ ]] || { echo "::error::For frame, enter the numeric run ID from successful Brain."; exit 1; }
+              [[ "$CME_SHOT" =~ ^[1-6]$ ]] || { echo "::error::shot must be 1..6."; exit 1; }
+              if [[ -n "$PREVIOUS_FRAME_RUN_ID" && ! "$PREVIOUS_FRAME_RUN_ID" =~ ^[0-9]+$ ]]; then
+                echo "::error::previous_frame_run_id must be numeric."; exit 1
+              fi
+              if [[ "$CME_SHOT" -gt 1 && -z "$PREVIOUS_FRAME_RUN_ID" ]]; then
+                echo "::error::shot 2+ requires previous_frame_run_id from a successful frame run."; exit 1
+              fi
+              ;;
+            all)
+              [[ -n "${OPENROUTER_API_KEY:-}" ]] || { echo "::error::Add OPENROUTER_API_KEY in Actions secrets."; exit 1; }
+              [[ -n "${HF_TOKEN:-}" ]] || { echo "::error::Add HF_TOKEN in Actions secrets."; exit 1; }
+              [[ "$SHOTS" =~ ^[1-6]$ ]] || { echo "::error::shots must be 1..6."; exit 1; }
+              if [[ -n "$CANDIDATE_ID" ]]; then
+                [[ "$FIND_RUN_ID" =~ ^[0-9]+$ ]] || { echo "::error::candidate_id requires find_run_id from FIND."; exit 1; }
+              elif [[ "$SOURCE_CONTRACT_PROVIDED" != "true" ]]; then
+                [[ -n "${SOCIALCRAWL_API_KEY:-}" ]] || { echo "::error::Add SOCIALCRAWL_API_KEY for automatic FIND."; exit 1; }
+                [[ "$FIND_COUNTRY" =~ ^[A-Za-z]{2}$ ]] || { echo "::error::country must be a two-letter code such as US."; exit 1; }
+                [[ "$FIND_PERIOD" =~ ^(7|30|180)$ ]] || { echo "::error::period must be 7, 30, or 180."; exit 1; }
+                [[ "$FIND_REQUESTS" =~ ^([1-9]|10)$ ]] || { echo "::error::find_requests must be 1..10."; exit 1; }
+                [[ "$FIND_MAX_ADS" =~ ^([1-9]|[1-4][0-9]|50)$ ]] || { echo "::error::find_max_ads must be 1..50."; exit 1; }
+                [[ "$FIND_VIDEO_DURATION_RANGE" =~ ^(all|up_to_40|40_to_60|60_to_90|over_90)$ ]] || { echo "::error::find_video_duration_range is invalid."; exit 1; }
+                if [[ "$FIND_SELECTION_MODE" == "mechanism" && "$FIND_PERFORMANCE_ORDER" != "default" ]]; then
+                  echo "::error::Mechanism mode uses Sponsored Search only; choose find_performance_order=default."
+                  exit 1
+                fi
+                if [[ "$FIND_INCLUDE_RETENTION" == "true" && ! "$FIND_PERFORMANCE_ORDER" =~ ^(play_6s_rate|play_2s_rate|playback_both)$ ]]; then
+                  echo "::error::find_include_retention=true needs a playback option in find_performance_order (the contract-aware plan then reports retention as requested but does not execute it)."
+                  exit 1
+                fi
+              fi
+              ;;
+            *) echo "::error::Unknown stage: $CME_STAGE"; exit 1 ;;
+          esac
+          if [[ "$CME_STAGE" == "frame" || "$CME_STAGE" == "analyze" || ( "$CME_STAGE" == "all" && -n "$CANDIDATE_ID" ) ]]; then
+            python - <<'PY'
+          import json, os, urllib.error, urllib.request
+          repo = os.environ["CME_REPOSITORY"]
+          branch = os.environ["GITHUB_REF_NAME"]
+          sha = os.environ["GITHUB_SHA"]
+          token = os.environ["GH_TOKEN"]
+
+          def api(url):
+              req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}",
+                  "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"})
+              try:
+                  with urllib.request.urlopen(req, timeout=20) as response:
+                      return json.load(response)
+              except urllib.error.HTTPError as exc:
+                  raise SystemExit(f"GitHub API rejected run/artifact lookup ({exc.code}); check run ID and Actions permissions") from exc
+
+          def check_run(run_id, artifact_name, require_success, allow_prior_commit=False):
+              run = api(f"https://api.github.com/repos/{repo}/actions/runs/{run_id}")
+              if run.get("path") != ".github/workflows/live-smoke.yml":
+                  raise SystemExit(f"Run {run_id} was not created by CME live-smoke workflow")
+              if run.get("head_branch") != branch:
+                  raise SystemExit(f"Run {run_id} belongs to another branch. Use a FIND artifact from {branch}.")
+              if run.get("head_sha") != sha and not allow_prior_commit:
+                  raise SystemExit(f"Run {run_id} belongs to another commit. Repeat FIND/Brain on {branch} at {sha[:12]}.")
+              if run.get("status") != "completed":
+                  raise SystemExit(f"Run {run_id} has not completed")
+              if require_success and run.get("conclusion") != "success":
+                  raise SystemExit(f"Required run {run_id} failed (conclusion={run.get('conclusion')})")
+              artifacts = api(f"https://api.github.com/repos/{repo}/actions/runs/{run_id}/artifacts").get("artifacts", [])
+              if not any(a.get("name") == artifact_name and not a.get("expired") for a in artifacts):
+                  raise SystemExit(f"Run {run_id} has no unexpired {artifact_name} artifact")
+
+          if os.environ["CME_STAGE"] == "frame":
+              # A frame consumes a compiled atom contract, not the Brain implementation itself.
+              # Permit a previous successful Brain run on this same branch; the downloaded
+              # manifest is validated against the current code and OfferCard before generation.
+              check_run(os.environ["BRAIN_RUN_ID"], "cme-brain-out", True, allow_prior_commit=True)
+              prior = os.environ.get("PREVIOUS_FRAME_RUN_ID", "").strip()
+              if prior:
+                  # Controlled retries may reuse frame state from an earlier commit, but only
+                  # when the contract fingerprints match exactly in the restore/preflight steps.
+                  check_run(prior, "cme-frame-out", int(os.environ.get("CME_SHOT", "1")) > 1,
+                            allow_prior_commit=True)
+          elif os.environ["CME_STAGE"] == "analyze":
+              # FIND is data input, not a compiled contract: permit an earlier commit on
+              # the same branch so the current run can analyse an already-paid-for search.
+              check_run(os.environ["FIND_RUN_ID"], "cme-find-out", True, allow_prior_commit=True)
+          else:
+              # FIND candidate lists are source data, not compiled contracts. Reuse a
+              # successful FIND artifact from an earlier commit on this same branch.
+              check_run(os.environ["FIND_RUN_ID"], "cme-find-out", True, allow_prior_commit=True)
+          print("Run provenance PASS: artifact belongs to this workflow and branch; successful artifact checks remain required.")
+          PY
+          fi
+
+      - name: Download selected TikTok candidates from FIND run
+        if: (inputs.stage == 'all' || inputs.stage == 'analyze') && inputs.candidate_id != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: cme-find-out
+          path: find-input
+          run-id: ${{ inputs.find_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Install Tesseract OCR for frame QA
+        if: (inputs.stage == 'frame' || inputs.stage == 'all') && inputs.no_ocr_required != true
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends tesseract-ocr
+
+      - name: Download atoms from previous Brain run
+        if: inputs.stage == 'frame'
+        uses: actions/download-artifact@v4
+        with:
+          name: cme-brain-out
+          path: out
+          run-id: ${{ inputs.brain_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Download prior frame state for a controlled retry
+        if: inputs.stage == 'frame' && inputs.previous_frame_run_id != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: cme-frame-out
+          path: prior-frame
+          run-id: ${{ inputs.previous_frame_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Restore prior frame state and preserve attempt limits
+        if: inputs.stage == 'frame' && inputs.previous_frame_run_id != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s prior-frame/state.json || { echo "::error::Prior frame artifact has no state.json"; exit 1; }
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          brain = json.loads(Path("out/atoms_manifest.json").read_text(encoding="utf-8"))
+          prior = json.loads(Path("prior-frame/atoms_manifest.json").read_text(encoding="utf-8"))
+          keys = ("schema_version", "offer_id", "branding_policy", "approved_brand_marks", "atoms_sha256", "offer_fingerprint", "photo_hashes", "contract_id", "requested_shots")
+          mismatches = [key for key in keys if brain.get(key) != prior.get(key)]
+          if mismatches:
+              raise SystemExit("Prior frame belongs to a different Brain contract: " + ", ".join(mismatches))
+          PY
+          cp -a prior-frame/. out/
+
+      - name: Validate offer and atom manifest before image generation
+        if: inputs.stage == 'frame'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          from cme.offer import load_offer
+          from cme.qa import validate_product_references
+          from cme.smoke import validate_atoms_manifest
+          offer_path = Path("out/live_offer.json")
+          atoms_path = Path("out/atoms.json")
+          manifest_path = Path("out/atoms_manifest.json")
+          if not offer_path.is_file() or not atoms_path.is_file() or not manifest_path.is_file():
+              raise SystemExit("Brain artifact must include live_offer.json, atoms.json, and atoms_manifest.json")
+          offer = load_offer(offer_path)
+          issues = validate_product_references(offer.photos)
+          if issues:
+              raise SystemExit("Target-product photo preflight blocked generation: " + "; ".join(issues))
+          data = json.loads(atoms_path.read_text(encoding="utf-8"))
+          dispatch_inputs = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8")).get("inputs") or {}
+          requested_shot = int(dispatch_inputs.get("shot") or 1)
+          manifest = validate_atoms_manifest(atoms_path, manifest_path, data, offer, shot=requested_shot)
+          print(f"Frame preflight PASS: offer={offer.offer_id}; contract={manifest['contract_id']}; target photos verified.")
+          PY
+
+      - name: Run controlled live pipeline
+        id: smoke
+        shell: bash
+        run: |
+          set +e
+          read_brief() {
+            python - <<'PY'
+          import json, os
+          from pathlib import Path
+          event_payload = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))
+          print(str((event_payload.get("inputs") or {}).get("brief") or ""), end="")
+          PY
+          }
+          if [[ "$CME_STAGE" == "find" ]]; then
+            python - <<'PY'
+          import json, os
+          from pathlib import Path
+          from cme.radar.find import run_find
+
+          keywords = [x.strip() for x in os.environ.get("FIND_KEYWORDS", "").split(",") if x.strip()]
+          dispatch_inputs = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8")).get("inputs") or {}
+          raw_offer = str(dispatch_inputs.get("offer_json") or "").strip()
+          offer_data = json.loads(raw_offer) if raw_offer else {}
+          if not isinstance(offer_data, dict):
+              raise SystemExit("offer_json must be a JSON object")
+          order_mode = os.environ.get("FIND_PERFORMANCE_ORDER", "default")
+          performance_order_options = {
+              "default": [],
+              "play_6s_rate": ["play_6s_rate"],
+              "play_2s_rate": ["play_2s_rate"],
+              "playback_both": ["play_6s_rate", "play_2s_rate"],
+          }
+          if order_mode not in performance_order_options:
+              raise SystemExit(f"Unknown FIND_PERFORMANCE_ORDER={order_mode!r}")
+          performance_order_bys = performance_order_options[order_mode]
+          params = {"country": os.environ["FIND_COUNTRY"].upper(),
+                    "period": int(os.environ["FIND_PERIOD"]),
+                    "max_requests": int(os.environ["FIND_REQUESTS"]),
+                    "max_ads": int(os.environ["FIND_MAX_ADS"]),
+                    "keywords": keywords, "offer": offer_data, "discovery_mode": "auto",
+                    "selection_mode": os.environ.get("FIND_SELECTION_MODE", "product"),
+                    "video_duration_range": os.environ.get("FIND_VIDEO_DURATION_RANGE", "all"),
+                    "performance_order_bys": performance_order_bys,
+                    "include_retention": os.environ.get("FIND_INCLUDE_RETENTION", "false").lower() == "true"}
+          try:
+              result = run_find(params)
+          except Exception as exc:
+              out = Path("out")
+              out.mkdir(parents=True, exist_ok=True)
+              failure_details = getattr(exc, "diagnostics", {}) or {}
+              stats = failure_details.get("discovery_stats") or {}
+              calls = stats.get("calls") or []
+              try:
+                  request_count = int(stats.get("executed_requests") or len(calls))
+              except (TypeError, ValueError):
+                  request_count = len(calls)
+              failed_call = calls[-1] if calls and calls[-1].get("request_failed") else {}
+              failure_class = "SOCIALCRAWL_REQUEST_FAILED" if failure_details.get("provider") == "SocialCrawl" else "FIND_FAILED"
+              diagnostics = {
+                  "outcome": "PROVIDER_ERROR" if failure_details.get("provider") == "SocialCrawl" else "FIND_ERROR",
+                  "explanation": str(exc)[:1000],
+                  "requests_executed": request_count,
+                  "failed_call": failed_call,
+                  "request_diagnostics": failure_details.get("request") or {},
+              }
+              failure_result = {
+                  "candidates": [],
+                  "stats": stats,
+                  "request": params,
+                  "diagnostics": diagnostics,
+              }
+              (out / "candidates.json").write_text(json.dumps(failure_result, ensure_ascii=False, indent=2), encoding="utf-8")
+              (out / "candidate_summary.json").write_text("[]", encoding="utf-8")
+              (out / "run_result.json").write_text(json.dumps({
+                  "command": "find", "exit_code": 1, "failure_class": failure_class,
+                  "status": "ERROR", "message": str(exc)[:1000], "diagnostics": diagnostics,
+              }, ensure_ascii=False, indent=2), encoding="utf-8")
+              with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+                  summary.write("## FIND failed; diagnostic artifact preserved\n\n")
+                  summary.write(f"- Failure: {type(exc).__name__} — {str(exc)[:800]}\n")
+                  summary.write(f"- Requests recorded: {request_count}\n")
+                  summary.write("- Artifacts: candidates.json, candidate_summary.json, run_result.json.\n\n")
+              print(json.dumps(failure_result, ensure_ascii=False, indent=2))
+              raise SystemExit(1)
+          def mark_find_state_if_executed(result):
+              stats = result.get("stats") or {}
+              diagnostics = result.get("diagnostics") or {}
+              try:
+                  request_count = int(diagnostics.get("requests_executed") or stats.get("executed_requests") or 0)
+              except (TypeError, ValueError):
+                  request_count = 0
+              calls = stats.get("calls") or []
+              if request_count <= 0 and not calls:
+                  return
+              state_dir = os.environ.get("CME_FIND_STATE_DIR", "").strip()
+              if not state_dir:
+                  return
+              marker = Path(state_dir) / "find-completed"
+              marker.parent.mkdir(parents=True, exist_ok=True)
+              marker.write_text("requests=" + str(request_count) + "\n", encoding="utf-8")
+          mark_find_state_if_executed(result)
+          out = Path("out")
+          (out / "candidates.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+          rows = []
+          for c in result.get("candidates", []):
+              score = c.get("source_score") or {}
+              rows.append({"id": c.get("id"), "brand": c.get("brand_name") or c.get("brand"),
+                           "title": c.get("title"), "source_url": c.get("source_url"),
+                           "video_url_present": bool(c.get("video_url")),
+                           "final_score": score.get("final_score") if isinstance(score, dict) else None,
+                           "source_check": c.get("source_check"), "stage": c.get("stage"), "source_gate_eligible": c.get("source_gate_eligible"), "analysis_eligibility": c.get("analysis_eligibility") or {}, "target_fit_status": c.get("target_fit_status"), "source_selection": c.get("source_selection") or {},
+                           "performance_evidence": c.get("performance_evidence") or {},
+                           "commercial_evidence": c.get("commercial_evidence") or {},
+                           "playback_metrics": {k: (c.get("metrics") or {}).get(k, {}).get("value")
+                                                for k in ("ctr", "cvr", "play_2s_rate", "play_6s_rate")
+                                                if k in (c.get("metrics") or {})},
+                           "retention_metrics": {
+                               k: (c.get("metrics") or {}).get(k, {}).get("value")
+                               for k in ("retention_2s", "retention_6s")
+                               if k in (c.get("metrics") or {})},
+                           "retention_curve_points": (c.get("retention_evidence") or {}).get("curve_point_count", 0),
+                           "retention_evidence": c.get("retention_evidence") or {}})
+          (out / "candidate_summary.json").write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as s:
+              mode = os.environ["CME_STAGE"]
+              s.write("## TikTok FIND results\n\n")
+              s.write(f"Mode: {params.get('selection_mode', 'product')} · Country: {params['country']} · Period: {params['period']} days · Request cap: {params['max_requests']} · Candidate cap: {params['max_ads']} · Keywords: {', '.join(keywords) or 'none'}\n\n")
+              if not rows:
+                  stats = result.get("stats") or {}
+                  diag = result.get("diagnostics") or {}
+                  queries = diag.get("search_queries_executed") or []
+                  if diag.get("outcome") == "INPUT_CONFLICT":
+                      s.write(f"FIND stopped before provider calls: {diag.get('explanation', 'input conflict')}\n\n")
+                  elif diag.get("raw_ads_returned", 0):
+                      s.write(f"SocialCrawl returned {diag['raw_ads_returned']} raw ad row(s), but none passed the target-source selection rules.\n\n")
+                  else:
+                      s.write("SocialCrawl returned no raw ad rows for the planned source queries.\n\n")
+                  s.write(f"Diagnosis: `{diag.get('outcome', 'UNKNOWN')}` — {diag.get('explanation', 'No additional FIND diagnostics available')}\n\n")
+                  s.write(f"Requests: {diag.get('requests_executed', 0)}; unique ads: {diag.get('unique_ads', 0)}; product-relevant: {diag.get('product_relevant_ads', diag.get('target_relevant_ads', 0))}; performance-ready: {diag.get('performance_ready_source_ads', 0)}; shortlisted: {diag.get('auto_shortlist_ads', 0)}; source-money-gate pass (not revenue): {diag.get('money_ready_source_ads', 0)}; hard-excluded: {diag.get('hard_excluded_ads', 0)}.\n\n")
+                  retention_diag = diag.get("retention_selection") or stats.get("retention_selection") or {}
+                  if retention_diag.get("retention_calls"):
+                      returned = retention_diag.get("returned_rows_with_retention") or {}
+                      s.write(
+                          f"Retention capture: calls={retention_diag.get('retention_calls', 0)}; "
+                          f"2s points={returned.get('retention_2s', 0)}; "
+                          f"6s points={returned.get('retention_6s', 0)}; "
+                          f"curves={returned.get('retention_curve', 0)}; "
+                          f"shortlisted with retention={retention_diag.get('selected_candidates_with_retention', 0)}.\n"
+                          "Exact numeric play_2s_rate/play_6s_rate values are not published by SocialCrawl; "
+                          "retention points are not the exact board score or proof of sales.\n\n"
+                      )
+                  selection_diag = diag.get("source_selection_diagnostics") or {}
+                  by_reason = selection_diag.get("by_reason") or {}
+                  if by_reason:
+                      s.write("Source-selection outcomes: " + "; ".join(f"{name}={count}" for name, count in sorted(by_reason.items())) + "\n\n")
+                      for item in (selection_diag.get("examples") or [])[:6]:
+                          title = str(item.get("title") or "(no title)").replace("\n", " ")[:120]
+                          url = item.get("source_url") if str(item.get("source_url") or "").startswith("https://") else ""
+                          s.write(f"- {item.get('ad_id')} — {item.get('reason')}; {title}; action={item.get('action')}; money_gate={item.get('money_gate_pass')}; performance={item.get('performance_basis', 'unknown')}:{item.get('performance_fields') or []}; performance_score={item.get('performance_score')}; [open ad]({url})\n")
+                      s.write("\n")
+                  if queries:
+                      s.write("Sponsored Search queries tried: " + ", ".join(queries) + "\n\n")
+              for c in rows:
+                  title = str(c.get("title") or "(no title)").replace("\n", " ")[:160]
+                  brand = str(c.get("brand") or "unknown brand")[:80]
+                  url = c.get("source_url") if isinstance(c.get("source_url"), str) and str(c.get("source_url")).startswith("https://") else ""
+                  s.write(f"- `candidate_id: {c['id']}` — {brand}: {title}; score={c.get('final_score')}; video={'yes' if c.get('video_url_present') else 'no'}; performance={(c.get('performance_evidence') or {}).get('basis', 'unknown')}; commercial_evidence={(c.get('commercial_evidence') or {}).get('level', 'unknown')}; playback={c.get('playback_metrics') or {}}; [open ad]({url})\n")
+              if mode == "find":
+                  if params.get("selection_mode") == "mechanism":
+                      s.write("\nFIND results are PATTERN_SOURCE_V1 analysis candidates, not commercial approval; attention is a proxy only and Target-Fit remains NOT_EVALUATED. Use this run ID plus an explicit candidate_id for stage=analyze.\n")
+                  else:
+                      s.write("\nManual choice: run stage=all with this run ID and the selected candidate_id.\n")
+              else:
+                  s.write("\nFIND records PATTERN_SOURCE_V1 eligibility after source-role, promotion, query, attention and explicit operator filters. ALL consumes the same eligible shortlist in FIND order; commercial metrics and scorer actions are diagnostics only. Target-Fit decides transferability. A manually supplied candidate_id selects one FIND source but cannot bypass PATTERN_SOURCE_V1.\n")
+          print(f"FIND finished: {len(rows)} candidate(s).")
+          PY
+          elif [[ "$CME_STAGE" == "analyze" ]]; then
+            python - <<'PY'
+          import json, os, shutil
+          from pathlib import Path
+          from cme.radar.server import ROOT, RadarApp
+          from cme.radar.select import pattern_source_reason
+          from cme.radar.source_loop import analyze_with_invalid_output_retry
+
+          out = Path("out").resolve()
+          run_id = os.environ.get("FIND_RUN_ID", "").strip()
+          cid = os.environ.get("CANDIDATE_ID", "").strip()
+          candidates_file = Path("find-input/candidates.json")
+          if not candidates_file.is_file():
+              raise SystemExit("FIND artifact lacks candidates.json")
+          candidates = json.loads(candidates_file.read_text(encoding="utf-8")).get("candidates", [])
+          candidate = next((c for c in candidates if c.get("id") == cid), None)
+          if candidate is None:
+              raise SystemExit(f"candidate_id {cid!r} is not in FIND run {run_id}")
+          reason = pattern_source_reason(candidate)
+          if reason:
+              raise SystemExit(f"Candidate cannot be used for pattern extraction ({reason}); no Analyst call was made.")
+
+          score = candidate.get("source_score") or {}
+          score = score if isinstance(score, dict) else {}
+          components = score.get("components") or {}
+          components = components if isinstance(components, dict) else {}
+          gate = components.get("money_signal_gate") or {}
+          gate = gate if isinstance(gate, dict) else {}
+          out_selected = {"candidate_id": cid, "stage": "analyze", "decision": "PATTERN_EXTRACTION_ONLY",
+                          "source_use_policy": "PATTERN_EXTRACTION_NOT_COMMERCIAL_APPROVAL",
+                          "brand": candidate.get("brand_name") or candidate.get("brand"),
+                          "title": candidate.get("title"), "source_url": candidate.get("source_url"),
+                          "source_check": candidate.get("source_check"), "source_score": score}
+          (out / "selected_candidate.json").write_text(json.dumps(out_selected, ensure_ascii=False, indent=2), encoding="utf-8")
+
+          work = Path("radar-work").resolve()
+          if work.exists():
+              shutil.rmtree(work)
+          app = RadarApp(work, settings_path=ROOT / "settings.json", catalog_path=ROOT / "adapters.json",
+                         offer_path=out / "unused-analysis-offer.json", vertical_path=ROOT / "verticals" / "physical_goods_us.json",
+                         production_shots=1)
+          try:
+              app.store.ingest([candidate], "github-find-" + run_id, "found")
+              app.store.decide(cid, "shortlist", "Selected manually from GitHub Actions FIND")
+              statuses = analyze_with_invalid_output_retry(lambda: app.do_analyze(cid), max_retries=1)
+              attempt_rows = []
+              status = statuses[-1] if statuses else {"status": "UNKNOWN", "detail": "no analysis attempt returned"}
+              saved_rows = app.store.analyses(cid)
+              saved = saved_rows[0] if saved_rows else {}
+              for index, item in enumerate(statuses, start=1):
+                  attempt_rows.append({
+                      "candidate_id": cid,
+                      "attempt": index,
+                      "analysis_id": item.get("analysis_id"),
+                      "status": str(item.get("status") or "UNKNOWN").upper(),
+                      "detail": str(item.get("detail") or "")[:500],
+                      "same_candidate_retry": index > 1,
+                  })
+              attempt_artifact = {"selection_mode": "manual_from_prior_find", "candidate_id": cid,
+                                  "max_attempts": 2, "attempts": attempt_rows,
+                                  "selected_candidate_id": cid if status.get("status") == "OK" else None}
+              (out / "source_analysis_attempts.json").write_text(
+                  json.dumps(attempt_artifact, ensure_ascii=False, indent=2), encoding="utf-8")
+              calls_path = work / "calls.jsonl"
+              if calls_path.is_file():
+                  shutil.copy2(calls_path, out / "radar-analysis-calls.jsonl")
+
+              source_check = candidate.get("source_check") or {}
+              analysis = {"candidate_id": cid, "analysis_id": status.get("analysis_id"), "status": status.get("status"),
+                          "selection_mode": "manual_from_prior_find", "decision": "PATTERN_EXTRACTION_ONLY",
+                          "source_use_policy": "PATTERN_EXTRACTION_NOT_COMMERCIAL_APPROVAL",
+                          "source_relevance": source_check.get("classification", "UNKNOWN"),
+                          "source_role": (candidate.get("source_selection") or {}).get("role"),
+                          "analysis_eligibility": candidate.get("analysis_eligibility") or {},
+                          "source_score": score.get("final_score"),
+                          "source_evidence_scope": "sampled video frames only (count and spacing: material.frame_sampling); mechanism and transferability remain hypotheses",
+                          "result": saved.get("result"), "warnings": status.get("warnings", []),
+                          "detail": status.get("detail", ""), "analysis_attempts": attempt_rows}
+              (out / "source_analysis.json").write_text(json.dumps(analysis, ensure_ascii=False, indent=2), encoding="utf-8")
+              with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+                  summary.write("## Source-only video analysis\n\n")
+                  summary.write(f"- Candidate: `{cid}`\n- Brand/title: {out_selected['brand'] or 'unknown'} — {out_selected['title'] or '(no title)'}\n")
+                  summary.write(f"- Analysis status: `{status.get('status')}`\n- Analysis attempts: {len(attempt_rows)}\n")
+                  summary.write("- Production/commercial approval: **not granted by this stage**\n")
+                  summary.write("- Outputs: `source_analysis.json`, `source_analysis_attempts.json` and provider call diagnostics; no image generation was called.\n\n")
+              print(json.dumps(analysis, ensure_ascii=False, indent=2))
+              if status.get("status") != "OK":
+                  raise SystemExit(5 if status.get("status") in {"API_ERROR", "INVALID_OUTPUT"} else 4)
+              source_contract = {"status": "OK", "candidate_id": cid, "analysis_id": status.get("analysis_id"),
+                                 "source_use_policy": "PATTERN_EXTRACTION_NOT_COMMERCIAL_APPROVAL",
+                                 "review_status": "PATTERN_EXTRACTED_COMMERCIAL_PERFORMANCE_UNVERIFIED",
+                                 "source_scope": "sampled frames only; mechanism and transferability remain hypotheses"}
+              (out / "source_contract.json").write_text(json.dumps(source_contract, ensure_ascii=False, indent=2), encoding="utf-8")
+          finally:
+              app.store.close()
+              shutil.rmtree(work, ignore_errors=True)
+          PY
+          elif [[ "$CME_STAGE" == "all" && ( -n "$CANDIDATE_ID" || "$SOURCE_CONTRACT_PROVIDED" != "true" ) ]]; then
+            python - <<'PY'
+          import json, os, shutil
+          from pathlib import Path
+          from cme.radar.server import ROOT, RadarApp
+
+          out = Path("out").resolve()
+          from cme.radar.select import pattern_source_reason, rank_pattern_candidates
+          from cme.radar.source_loop import analyze_with_invalid_output_retry
+          from cme.radar.select import SourceThreshold, weak_source_reasons
+          from cme.radar.ledger import build_ledger
+          from cme.registry import load_settings
+          import sys
+
+          # Legacy source_selection bars are diagnostics only; they never veto or reorder ANALYZE admission.
+          _settings_file = ROOT / "settings.json"
+          threshold = (SourceThreshold.from_settings(load_settings(_settings_file))
+                       if _settings_file.is_file() else SourceThreshold())
+          threshold_info = {"active": threshold.active, "mode": threshold.mode,
+                            "min_final_score": threshold.min_final_score,
+                            "allowed_actions": list(threshold.allowed_actions),
+                            "effect": "diagnostic_only; does not block or reorder pattern analysis"}
+
+          def write_ledger(all_candidates, **facts):
+              rows = build_ledger(all_candidates, threshold, **facts)
+              (out / "candidates_ledger.json").write_text(
+                  json.dumps({"threshold": threshold_info, "candidates": rows}, ensure_ascii=False, indent=2),
+                  encoding="utf-8")
+              return rows
+          requested_cid = os.environ.get("CANDIDATE_ID", "").strip()
+          skipped = []
+          if requested_cid:
+              candidates_file = Path("find-input/candidates.json")
+              if not candidates_file.is_file():
+                  raise SystemExit("FIND artifact lacks candidates.json")
+              candidates = json.loads(candidates_file.read_text(encoding="utf-8")).get("candidates", [])
+              selected = next((c for c in candidates if c.get("id") == requested_cid), None)
+              if selected is None:
+                  raise SystemExit(f"candidate_id {requested_cid!r} is not in this FIND run")
+              reason = pattern_source_reason(selected)
+              if reason:
+                  raise SystemExit(f"Candidate cannot be used for pattern extraction ({reason}); no Analyst call was made.")
+              candidate_pool = [selected]  # An explicit operator choice is never silently replaced.
+              selection_mode = "manual_from_prior_find"
+          else:
+              candidates_file = out / "candidates.json"
+              if not candidates_file.is_file():
+                  # Full automatic run: FIND and its handoff stay in this same Actions job.
+                  from cme.radar.find import run_find
+                  keywords = [x.strip() for x in os.environ.get("FIND_KEYWORDS", "").split(",") if x.strip()]
+                  dispatch_inputs = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8")).get("inputs") or {}
+                  raw_offer = str(dispatch_inputs.get("offer_json") or "").strip()
+                  offer_data = json.loads(raw_offer) if raw_offer else {}
+                  if not isinstance(offer_data, dict):
+                      raise SystemExit("offer_json must be a JSON object")
+                  order_mode = os.environ.get("FIND_PERFORMANCE_ORDER", "default")
+                  performance_order_options = {
+                      "default": [],
+                      "play_6s_rate": ["play_6s_rate"],
+                      "play_2s_rate": ["play_2s_rate"],
+                      "playback_both": ["play_6s_rate", "play_2s_rate"],
+                  }
+                  if order_mode not in performance_order_options:
+                      raise SystemExit(f"Unknown FIND_PERFORMANCE_ORDER={order_mode!r}")
+                  params = {"country": os.environ["FIND_COUNTRY"].upper(),
+                            "period": int(os.environ["FIND_PERIOD"]),
+                            "max_requests": int(os.environ["FIND_REQUESTS"]),
+                            "max_ads": int(os.environ["FIND_MAX_ADS"]),
+                            "keywords": keywords, "offer": offer_data, "discovery_mode": "auto",
+                            "selection_mode": os.environ.get("FIND_SELECTION_MODE", "product"),
+                            "video_duration_range": os.environ.get("FIND_VIDEO_DURATION_RANGE", "all"),
+                            "performance_order_bys": performance_order_options[order_mode],
+                            "include_retention": os.environ.get("FIND_INCLUDE_RETENTION", "false").lower() == "true"}
+                  find_result = run_find(params)
+                  def mark_find_state_if_executed(result):
+                      stats = result.get("stats") or {}
+                      diagnostics = result.get("diagnostics") or {}
+                      try:
+                          request_count = int(diagnostics.get("requests_executed") or stats.get("executed_requests") or 0)
+                      except (TypeError, ValueError):
+                          request_count = 0
+                      calls = stats.get("calls") or []
+                      if request_count <= 0 and not calls:
+                          return
+                      state_dir = os.environ.get("CME_FIND_STATE_DIR", "").strip()
+                      if not state_dir:
+                          return
+                      marker = Path(state_dir) / "find-completed"
+                      marker.parent.mkdir(parents=True, exist_ok=True)
+                      marker.write_text("requests=" + str(request_count) + "\n", encoding="utf-8")
+                  mark_find_state_if_executed(find_result)
+                  candidates_file.write_text(json.dumps(find_result, ensure_ascii=False, indent=2), encoding="utf-8")
+                  rows = []
+                  for c in find_result.get("candidates", []):
+                      score = c.get("source_score") or {}
+                      rows.append({"id": c.get("id"), "brand": c.get("brand_name") or c.get("brand"),
+                                   "title": c.get("title"), "source_url": c.get("source_url"),
+                                   "video_url_present": bool(c.get("video_url")),
+                                   "final_score": score.get("final_score") if isinstance(score, dict) else None,
+                                   "source_check": c.get("source_check"), "stage": c.get("stage"), "source_gate_eligible": c.get("source_gate_eligible"), "target_fit_status": c.get("target_fit_status"), "source_selection": c.get("source_selection") or {},
+                           "performance_evidence": c.get("performance_evidence") or {},
+                           "commercial_evidence": c.get("commercial_evidence") or {},
+                           "playback_metrics": {k: (c.get("metrics") or {}).get(k, {}).get("value")
+                                                for k in ("ctr", "cvr", "play_2s_rate", "play_6s_rate")
+                                                if k in (c.get("metrics") or {})}})
+                  (out / "candidate_summary.json").write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
+                  with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+                      summary.write("## TikTok FIND shortlist (automatic pipeline)\n\n")
+                      summary.write(f"Mode: {params.get('selection_mode', 'product')} · Country: {params['country']} · Period: {params['period']} days · Request cap: {params['max_requests']} · Candidate cap: {params['max_ads']} · Keywords: {', '.join(keywords) or 'none'}\n\n")
+                      for c in rows:
+                          title = str(c.get("title") or "(no title)").replace("\n", " ")[:160]
+                          brand = str(c.get("brand") or "unknown brand")[:80]
+                          url = c.get("source_url") if isinstance(c.get("source_url"), str) and str(c.get("source_url")).startswith("https://") else ""
+                          summary.write(f"- candidate_id: {c['id']} — {brand}: {title}; score={c.get('final_score')}; video={'yes' if c.get('video_url_present') else 'no'}; performance={(c.get('performance_evidence') or {}).get('basis', 'unknown')}; commercial_evidence={(c.get('commercial_evidence') or {}).get('level', 'unknown')}; playback={ {k: (c.get('metrics') or {}).get(k, {}).get('value') for k in ('ctr', 'cvr', 'play_2s_rate', 'play_6s_rate') if k in (c.get('metrics') or {})} }; {url}\n")
+                      summary.write("\nFIND applies source-role, promotion, query, attention and explicit operator filters, then records PATTERN_SOURCE_V1 eligibility. ALL consumes the shortlist in FIND order. Commercial metrics and scorer actions are diagnostics only; Target-Fit decides transferability downstream.\n")
+              candidates = json.loads(candidates_file.read_text(encoding="utf-8")).get("candidates", [])
+              candidate_pool, skipped = rank_pattern_candidates(candidates)
+              if not candidate_pool:
+                  stats = json.loads(candidates_file.read_text(encoding="utf-8")).get("stats") or {}
+                  diag = json.loads(candidates_file.read_text(encoding="utf-8")).get("diagnostics") or {}
+                  calls = stats.get("calls") or []
+                  raw_returned = sum(int(call.get("returned") or 0) for call in calls if isinstance(call, dict))
+                  strategy = stats.get("discovery_strategy") or {}
+                  tried = strategy.get("supply_queries_executed") or []
+                  diagnosis = (f"FIND diagnosis={diag.get('outcome', 'UNKNOWN')}; raw_rows={raw_returned}; "
+                               f"unique_ads={stats.get('unique_ads', 0)}; direct={stats.get('direct_relevant_ads', 0)}; "
+                               f"expanded={stats.get('expanded_relevant_ads', 0)}; unverified={stats.get('unverified_ads', 0)}; "
+                               f"hard_excluded={stats.get('pre_visual_verification_hard_excluded_ads', 0)}; "
+                               f"sponsored_queries={tried}. ")
+                  skip_text = "; ".join(skipped[:5]) or "FIND returned no ranked candidates to evaluate."
+                  message = ("NO_QUALIFIED_SOURCE: FIND returned no source eligible for pattern extraction (requires a playable video, no hard exclusion, "
+                             "and verified source-role/promotion evidence when role metadata is present): "
+                             + skip_text + " " + diagnosis + "No analyst/generator calls were made.")
+                  write_ledger(candidates, failure_class="NO_QUALIFIED_SOURCE")
+                  (out / "live_result.json").write_text(json.dumps(
+                      {"status": "NO_QUALIFIED_SOURCE", "failure_class": "NO_QUALIFIED_SOURCE", "exit_code": 4,
+                       "detail": message[:1500], "skipped_candidates": skipped, "source_threshold": threshold_info,
+                       "provider_calls_made": 0}, ensure_ascii=False, indent=2), encoding="utf-8")
+                  with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+                      summary.write("## No qualified source\n\n" + message[:1500] + "\n\nSee candidates_ledger.json for every candidate and why it was not used.\n\n")
+                  print(message, file=sys.stderr)
+                  raise SystemExit(4)
+              selection_mode = "automatic_find_order"
+
+          work = Path("radar-work").resolve()
+          if work.exists():
+              shutil.rmtree(work)
+          app = RadarApp(work, settings_path=ROOT / "settings.json", catalog_path=ROOT / "adapters.json",
+                         offer_path=out / "live_offer.json", vertical_path=ROOT / "verticals" / "physical_goods_us.json",
+                         production_shots=int(os.environ["SHOTS"]))
+          try:
+              find_reference = os.environ.get("FIND_RUN_ID", "").strip() or ("internal-" + os.environ.get("GITHUB_RUN_ID", "unknown"))
+              analysis_limit = 1 if selection_mode == "manual_from_prior_find" else 3
+              retryable_analysis_statuses = {"NO_VIDEO", "VIDEO_UNAVAILABLE", "API_ERROR", "INVALID_OUTPUT"}
+              attempts = []
+              selected_candidate = None
+              final_status = {}
+              final_analysis = {}
+              final_saved = {}
+
+              stop_candidate_search = False
+              for source in candidate_pool[:analysis_limit]:
+                  cid = str(source.get("id") or "").strip()
+                  if not cid:
+                      skipped.append("candidate without a stable ID")
+                      continue
+                  source_block = pattern_source_reason(source)
+                  if source_block:
+                      skipped.append(f"{cid}: {source_block}")
+                      continue
+                  app.store.ingest([source], "github-find-" + find_reference, "found")
+                  reason = ("Selected manually from GitHub Actions FIND" if selection_mode == "manual_from_prior_find"
+                            else "Eligible automatic source tried in FIND ranking order")
+                  app.store.decide(cid, "shortlist", reason)
+
+                  def analyze_once():
+                      try:
+                          return app.do_analyze(cid)
+                      except Exception as exc:
+                          # Unexpected implementation/configuration errors are recorded and stop fallback.
+                          return {"status": "INTERNAL_ERROR", "detail": f"{type(exc).__name__}: {exc}"}
+
+                  candidate_statuses = analyze_with_invalid_output_retry(analyze_once, max_retries=1)
+                  for analysis_attempt, status in enumerate(candidate_statuses, start=1):
+                      saved_rows = app.store.analyses(cid)
+                      saved = saved_rows[0] if saved_rows else {}
+                      score = source.get("source_score") or {}
+                      score = score if isinstance(score, dict) else {}
+                      components = score.get("components") or {}
+                      components = components if isinstance(components, dict) else {}
+                      money_gate = components.get("money_signal_gate") or {}
+                      money_gate = money_gate if isinstance(money_gate, dict) else {}
+                      analysis = {"candidate_id": cid, "analysis_id": status.get("analysis_id"),
+                                  "status": status.get("status"), "selection_mode": selection_mode,
+                                  "source_use_policy": "PATTERN_EXTRACTION_NOT_COMMERCIAL_APPROVAL",
+                                  "commercial_evidence": source.get("commercial_evidence") or {"level": "UNKNOWN"},
+                                  "source_relevance": (source.get("source_check") or {}).get("classification", "UNKNOWN"),
+                                  "source_role": (source.get("source_selection") or {}).get("role"),
+                                  "analysis_eligibility": source.get("analysis_eligibility") or {},
+                                  "source_score": score.get("final_score"),
+                                  "source_evidence_scope": "sampled video frames only (count and spacing: material.frame_sampling); mechanism and transferability remain hypotheses",
+                                  "result": saved.get("result"), "warnings": status.get("warnings", []),
+                                  "detail": status.get("detail", "")}
+                      attempt = {"candidate_id": cid, "status": str(status.get("status") or "UNKNOWN").upper(),
+                                 "detail": str(status.get("detail") or "")[:500]}
+                      if analysis_attempt > 1:
+                          attempt["same_candidate_retry"] = True
+                      attempts.append(attempt)
+                      print(f"Source analysis: candidate={cid} attempt={analysis_attempt} status={attempt['status']} detail={attempt['detail']}")
+                      final_status, final_analysis, final_saved = status, analysis, saved
+                      if attempt["status"] == "OK":
+                          selected_candidate = source
+                          break
+                      if attempt["status"] not in retryable_analysis_statuses:
+                          stop_candidate_search = True
+                          break
+                  if selected_candidate is not None or stop_candidate_search:
+                      break
+
+              attempt_artifact = {"selection_mode": selection_mode, "max_candidates": analysis_limit,
+                                  "attempts": attempts, "skipped": skipped,
+                                  "selected_candidate_id": selected_candidate.get("id") if selected_candidate else None}
+              (out / "source_analysis_attempts.json").write_text(
+                  json.dumps(attempt_artifact, ensure_ascii=False, indent=2), encoding="utf-8")
+              with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+                  summary.write("## Source analysis attempts\n\n")
+                  for item in attempts:
+                      summary.write(f"- candidate_id: {item['candidate_id']} · status: {item['status']} · {item['detail'] or '(no detail)'}\n")
+                  if selected_candidate:
+                      summary.write(f"\nSelected candidate: {selected_candidate.get('id')} after {len(attempts)} analysis attempt(s).\n\n")
+                  else:
+                      summary.write(f"\nNo candidate produced a valid analysis after {len(attempts)} attempt(s). See source_analysis_attempts.json.\n\n")
+
+              if selected_candidate is None:
+                  if final_analysis:
+                      (out / "source_analysis.json").write_text(
+                          json.dumps(final_analysis, ensure_ascii=False, indent=2), encoding="utf-8")
+                  failure = {**final_analysis, "status": "SOURCE_ANALYSIS_FAILED",
+                             "analysis_status": final_status.get("status"),
+                             "analysis_attempts": attempts, "skipped_candidates": skipped}
+                  (out / "live_result.json").write_text(
+                      json.dumps(failure, ensure_ascii=False, indent=2), encoding="utf-8")
+                  write_ledger(candidates, attempts=attempts, failure_class="SOURCE_ANALYSIS_FAILED")
+                  attempted_statuses = {item["status"] for item in attempts}
+                  exit_code = 5 if attempted_statuses.intersection({"API_ERROR", "INVALID_OUTPUT"}) else 4
+                  raise SystemExit(exit_code)
+
+              candidate = selected_candidate
+              cid = str(candidate.get("id") or "").strip()
+              status = final_status
+              analysis = final_analysis
+              saved = final_saved
+              score = candidate.get("source_score") or {}
+              score = score if isinstance(score, dict) else {}
+              selection = {"candidate_id": cid, "selection_mode": selection_mode,
+                           "brand": candidate.get("brand_name") or candidate.get("brand"),
+                           "title": candidate.get("title"), "source_url": candidate.get("source_url"),
+                           "video_url_present": bool(candidate.get("video_url")),
+                           "source_check": candidate.get("source_check"), "source_score": score,
+                           "source_selection": candidate.get("source_selection") or {},
+                           "analysis_eligibility": candidate.get("analysis_eligibility") or {},
+                           "performance_evidence": candidate.get("performance_evidence") or {},
+                           "commercial_evidence": candidate.get("commercial_evidence") or {},
+                           "query_product_match": candidate.get("query_product_match"),
+                           "duration_seconds": candidate.get("duration_seconds"),
+                           "find_request": candidate.get("request") or {},
+                           "analysis_attempts": len(attempts)}
+              (out / "selected_candidate.json").write_text(
+                  json.dumps(selection, ensure_ascii=False, indent=2), encoding="utf-8")
+              (out / "source_analysis.json").write_text(
+                  json.dumps(analysis, ensure_ascii=False, indent=2), encoding="utf-8")
+              with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+                  summary.write("## CME source selected\n\n")
+                  summary.write(f"- Mode: {selection_mode}\n")
+                  summary.write(f"- Candidate ID: {cid}\n")
+                  summary.write(f"- Brand/title: {selection.get('brand') or 'unknown'} — {selection.get('title') or '(no title)'}\n")
+                  summary.write(f"- Source role / admission: {(candidate.get('source_selection') or {}).get('role', 'UNKNOWN')} / {(candidate.get('analysis_eligibility') or {}).get('contract', 'n/a')} eligible={(candidate.get('analysis_eligibility') or {}).get('eligible')}; legacy relevance label: {(candidate.get('source_check') or {}).get('classification', 'UNKNOWN')}\n")
+                  summary.write(f"- Source score (metadata): {score.get('final_score')}\n")
+                  summary.write(f"- Analysis attempts: {len(attempts)}\n")
+                  summary.write("- Each source analysis attempt is recorded in source_analysis_attempts.json. Only a successful analysis is handed to production.\n\n")
+              from cme.radar.source_loop import run_source_loop
+
+              initial_candidate, initial_cid = candidate, cid
+              initial_status, initial_analysis, initial_saved = status, analysis, saved
+              # The earlier analysis attempts already consume the candidate budget, except for
+              # the currently selected source which is cached and is not re-analysed here.
+              already_analyzed = {str(item.get("candidate_id") or "") for item in attempts}
+              loop_pool = [initial_candidate] + [
+                  item for item in candidate_pool
+                  if str(item.get("id") or "").strip() not in already_analyzed
+                  and str(item.get("id") or "").strip() != initial_cid
+              ]
+              remaining_limit = max(1, analysis_limit - max(0, len(already_analyzed) - 1))
+
+              def analyze_for_transfer(source):
+                  source_id = str(source.get("id") or "").strip()
+                  if source_id == initial_cid:
+                      return ({"candidate_id": source_id, "status": "OK", "detail": initial_status.get("detail", "")},
+                              {"status": initial_status, "analysis": initial_analysis, "saved": initial_saved})
+                  app.store.ingest([source], "github-find-" + find_reference, "found")
+                  app.store.decide(source_id, "shortlist", "Next ranked source after TRANSFER_REJECTED")
+                  def analyze_once_next():
+                      try:
+                          return app.do_analyze(source_id)
+                      except Exception as exc:
+                          return {"status": "INTERNAL_ERROR", "detail": f"{type(exc).__name__}: {exc}"}
+                  next_analysis_attempts = analyze_with_invalid_output_retry(analyze_once_next, max_retries=1)
+                  status_next = next_analysis_attempts[-1] if next_analysis_attempts else {
+                      "status": "UNKNOWN", "detail": "no fallback analysis attempt returned"}
+                  rows_next = app.store.analyses(source_id)
+                  saved_next = rows_next[0] if rows_next else {}
+                  score_next = source.get("source_score") or {}
+                  score_next = score_next if isinstance(score_next, dict) else {}
+                  components_next = score_next.get("components") or {}
+                  components_next = components_next if isinstance(components_next, dict) else {}
+                  money_next = components_next.get("money_signal_gate") or {}
+                  money_next = money_next if isinstance(money_next, dict) else {}
+                  analysis_next = {"candidate_id": source_id, "analysis_id": status_next.get("analysis_id"),
+                                   "status": status_next.get("status"), "selection_mode": selection_mode,
+                                   "source_use_policy": "PATTERN_EXTRACTION_NOT_COMMERCIAL_APPROVAL",
+                                   "commercial_evidence": source.get("commercial_evidence") or {"level": "UNKNOWN"},
+                                   "source_relevance": (source.get("source_check") or {}).get("classification", "UNKNOWN"),
+                                  "source_role": (source.get("source_selection") or {}).get("role"),
+                                  "analysis_eligibility": source.get("analysis_eligibility") or {},
+                                   "source_score": score_next.get("final_score"),
+                                   "source_evidence_scope": "sampled video frames only (count and spacing: material.frame_sampling); mechanism and transferability remain hypotheses",
+                                   "result": saved_next.get("result"), "warnings": status_next.get("warnings", []),
+                                   "detail": status_next.get("detail", "")}
+                  for next_index, next_status in enumerate(next_analysis_attempts, start=1):
+                      attempt_row = {"candidate_id": source_id,
+                                     "status": str(next_status.get("status") or "UNKNOWN").upper(),
+                                     "detail": str(next_status.get("detail") or "")[:500]}
+                      if next_index > 1:
+                          attempt_row["same_candidate_retry"] = True
+                      attempts.append(attempt_row)
+                      print(f"Transfer fallback analysis: candidate={source_id} attempt={next_index} status={attempt_row['status']} detail={attempt_row['detail']}")
+                  attempt_next = {"candidate_id": source_id, "status": str(status_next.get("status") or "UNKNOWN").upper(),
+                                  "detail": str(status_next.get("detail") or "")[:500],
+                                  "analysis_attempts": len(next_analysis_attempts)}
+                  return attempt_next, {"status": status_next, "analysis": analysis_next, "saved": saved_next}
+
+              def produce_for_transfer(source, _payload):
+                  return app.do_produce(str(source.get("id") or "").strip())
+
+              loop_result = run_source_loop(
+                  loop_pool, limit=remaining_limit, analyze=analyze_for_transfer, produce=produce_for_transfer,
+                  skip_reason=pattern_source_reason,
+                  allow_transfer_fallback=(selection_mode != "manual_from_prior_find"), skipped=skipped)
+
+              # Refresh attempt diagnostics after fallback candidates have run. A later analysis failure
+              # must not be represented by the previous candidate's production rejection.
+              attempt_artifact = {
+                  "selection_mode": selection_mode,
+                  "max_candidates": analysis_limit,
+                  "attempts": attempts,
+                  "skipped": skipped,
+                  "selected_candidate_id": (
+                      str(loop_result.selected.get("id") or "")
+                      if loop_result.last_event == "production" and loop_result.selected else None),
+                  "last_analysis_failure": loop_result.last_analysis_failure,
+              }
+              (out / "source_analysis_attempts.json").write_text(
+                  json.dumps(attempt_artifact, ensure_ascii=False, indent=2), encoding="utf-8")
+
+              if loop_result.last_event == "analysis_failure":
+                  last_failure = loop_result.last_analysis_failure or {
+                      "candidate_id": "", "status": "UNKNOWN", "detail": "analysis failed without status"}
+                  failed_payload = loop_result.last_payload if isinstance(loop_result.last_payload, dict) else {}
+                  failed_analysis = failed_payload.get("analysis")
+                  if isinstance(failed_analysis, dict):
+                      (out / "source_analysis.json").write_text(
+                          json.dumps(failed_analysis, ensure_ascii=False, indent=2), encoding="utf-8")
+                  prior_report = loop_result.last_production_report or loop_result.report
+                  prior_candidate = loop_result.selected or {}
+                  failure_status = str(last_failure.get("status") or "UNKNOWN").upper()
+                  failure_code = 5 if failure_status in {"API_ERROR", "INVALID_OUTPUT"} else 4
+                  failure = {
+                      "status": "SOURCE_ANALYSIS_FAILED",
+                      "failure_class": "SOURCE_ANALYSIS_FAILED",
+                      "exit_code": failure_code,
+                      "candidate_id": last_failure.get("candidate_id"),
+                      "analysis_status": failure_status,
+                      "analysis_detail": last_failure.get("detail", ""),
+                      "analysis_attempts": attempts,
+                      "skipped_candidates": skipped,
+                      "transfer_rejections": loop_result.rejections,
+                      "last_production_candidate_id": prior_candidate.get("id"),
+                      "last_production_report": prior_report,
+                      "detail": ("Fallback source analysis failed after prior transfer rejection: "
+                                 + failure_status + " - " + str(last_failure.get("detail") or ""))[:1500],
+                  }
+                  write_ledger(candidates, attempts=attempts, rejections=loop_result.rejections,
+                               failure_class="SOURCE_ANALYSIS_FAILED")
+                  (out / "source_transfer_attempts.json").write_text(
+                      json.dumps({
+                          "selection_mode": selection_mode,
+                          "rejections": loop_result.rejections,
+                          "selected_candidate_id": None,
+                          "last_failure_class": "SOURCE_ANALYSIS_FAILED",
+                          "last_analysis_failure": last_failure,
+                          "last_production_candidate_id": prior_candidate.get("id"),
+                          "last_production_failure_class": (prior_report or {}).get("failure_class", ""),
+                      }, ensure_ascii=False, indent=2), encoding="utf-8")
+                  (out / "live_result.json").write_text(
+                      json.dumps(failure, ensure_ascii=False, indent=2), encoding="utf-8")
+                  with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+                      summary.write("## Source analysis failed after fallback\n\n")
+                      summary.write(f"- Failed candidate: {last_failure.get('candidate_id')}\n")
+                      summary.write(f"- Analysis status: {failure_status} - {last_failure.get('detail') or '(no detail)'}\n")
+                      summary.write(f"- Prior production outcome: {(prior_report or {}).get('failure_class', 'unknown')}\n")
+                      summary.write("- Previous transfer rejections remain listed separately in live_result.json and source_transfer_attempts.json.\n\n")
+                  raise SystemExit(failure_code)
+
+              if loop_result.selected is None or loop_result.report is None:
+                  details = "; ".join(loop_result.skipped[-5:]) or "no eligible candidate completed analysis"
+                  raise SystemExit("No candidate reached production: " + details)
+              candidate = loop_result.selected
+              cid = str(candidate.get("id") or "").strip()
+              status = loop_result.payload["status"]
+              analysis = loop_result.payload["analysis"]
+              saved = loop_result.payload["saved"]
+              report = loop_result.report
+              transfer_rejections = loop_result.rejections
+
+              score = candidate.get("source_score") or {}
+              score = score if isinstance(score, dict) else {}
+              selection = {"candidate_id": cid, "selection_mode": selection_mode,
+                           "brand": candidate.get("brand_name") or candidate.get("brand"),
+                           "title": candidate.get("title"), "source_url": candidate.get("source_url"),
+                           "video_url_present": bool(candidate.get("video_url")),
+                           "source_check": candidate.get("source_check"), "source_score": score,
+                           "source_selection": candidate.get("source_selection") or {},
+                           "analysis_eligibility": candidate.get("analysis_eligibility") or {},
+                           "performance_evidence": candidate.get("performance_evidence") or {},
+                           "commercial_evidence": candidate.get("commercial_evidence") or {},
+                           "query_product_match": candidate.get("query_product_match"),
+                           "duration_seconds": candidate.get("duration_seconds"),
+                           "find_request": candidate.get("request") or {},
+                           "analysis_attempts": len(attempts)}
+              (out / "selected_candidate.json").write_text(
+                  json.dumps(selection, ensure_ascii=False, indent=2), encoding="utf-8")
+              (out / "source_analysis.json").write_text(
+                  json.dumps(analysis, ensure_ascii=False, indent=2), encoding="utf-8")
+              (out / "source_analysis_attempts.json").write_text(
+                  json.dumps({"selection_mode": selection_mode, "max_candidates": analysis_limit,
+                              "attempts": attempts, "skipped": skipped,
+                              "selected_candidate_id": cid}, ensure_ascii=False, indent=2), encoding="utf-8")
+              (out / "source_transfer_attempts.json").write_text(
+                  json.dumps({"selection_mode": selection_mode, "rejections": transfer_rejections,
+                              "selected_candidate_id": cid,
+                              "last_failure_class": report.get("failure_class", "")},
+                             ensure_ascii=False, indent=2), encoding="utf-8")
+              with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+                  summary.write("## Transfer-decision fallback\n\n")
+                  for item in transfer_rejections:
+                      summary.write(f"- {item['candidate_id']}: {item['reason'] or 'TRANSFER_REJECTED'}\n")
+                  summary.write(f"\nFinal candidate: `{cid}`; manual selection is never replaced.\n\n")
+              work_prod = work / "production" / report["run_id"]
+              dest = out / "production" / report["run_id"]
+              if work_prod.is_dir():
+                  dest.parent.mkdir(parents=True, exist_ok=True)
+                  shutil.copytree(work_prod, dest, dirs_exist_ok=True)
+                  (dest / "source_contract.json").unlink(missing_ok=True)
+              calls = work / "calls.jsonl"
+              if calls.is_file():
+                  shutil.copy2(calls, out / "radar-analysis-calls.jsonl")
+              verdict_values = report.get("verdicts", []) or []
+              verdict_text = json.dumps(verdict_values, ensure_ascii=False).upper()
+              status_text = str(report.get("status", "")).upper()
+              if status_text == "OK" and report.get("exit_code") == 0:
+                  failure_class = "DELIVERED_PASS"
+              elif report.get("failure_class") == "TRANSFER_REJECTED":
+                  failure_class = "TRANSFER_REJECTED"
+              elif report.get("failure_class"):
+                  # Keep provider, contract and QA failure classes from run_result.json intact.
+                  failure_class = str(report.get("failure_class"))
+              elif "UNVERIFIED" in verdict_text or status_text == "UNVERIFIED":
+                  failure_class = "QA_UNVERIFIED"
+              elif "NOT_DELIVERED" in verdict_text or status_text == "NOT_DELIVERED":
+                  failure_class = "NOT_DELIVERED"
+              elif "FAILED_QA" in verdict_text or status_text == "FAILED_QA":
+                  failure_class = "VISUAL_QA_FAILED"
+              elif status_text in {"API_ERROR", "PROVIDER_ERROR", "INFRA_ERROR"}:
+                  failure_class = "INFRASTRUCTURE_OR_PROVIDER_ERROR"
+              else:
+                  failure_class = "PRODUCTION_OR_CONTRACT_ERROR"
+              weak_reasons = weak_source_reasons(candidate, threshold)
+              ledger_rows = write_ledger(candidates, attempts=attempts, rejections=transfer_rejections, selected_id=cid,
+                                         failure_class=failure_class, verdicts=verdict_values)
+              ranked_row = next((row for row in ledger_rows if row["candidate_id"] == cid), {})
+              brief = {"status": report.get("status"), "run_id": report.get("run_id"), "candidate_id": cid,
+                       "selection_mode": selection_mode, "analysis_id": status.get("analysis_id"), "exit_code": report.get("exit_code"),
+                       "failure_class": failure_class,
+                       "weak_source": bool(weak_reasons), "weak_source_reasons": weak_reasons,
+                       "source_rank": ranked_row.get("rank"), "source_threshold": threshold_info,
+                       "offer_name": report.get("offer_name"), "images": report.get("images", []),
+                       "verdicts": verdict_values, "provider_calls_made": report.get("provider_calls_made", 0),
+                       "stdout_tail": report.get("stdout_tail", ""), "stderr_tail": report.get("stderr_tail", ""),
+                       "transfer_rejections": transfer_rejections}
+              (out / "live_result.json").write_text(json.dumps(brief, ensure_ascii=False, indent=2), encoding="utf-8")
+              print(json.dumps(brief, ensure_ascii=False, indent=2))
+              code = report.get("exit_code")
+              if report.get("status") != "OK" or code != 0:
+                  raise SystemExit(int(code) if isinstance(code, int) and code else 7)
+          finally:
+              app.store.close()
+              shutil.rmtree(work, ignore_errors=True)
+          PY
+          elif [[ "$CME_STAGE" == "brain" ]]; then
+            python -m cme.smoke brain --offer out/live_offer.json --source-contract out/source_contract.json --shots "$SHOTS" --brief "$(read_brief)" --out out
+          elif [[ "$CME_STAGE" == "all" ]]; then
+            python -m cme.smoke all --offer out/live_offer.json --source-contract out/source_contract.json --shots "$SHOTS" --brief "$(read_brief)" --out out
+          else
+            attempt=1
+            if [[ -s out/state.json ]]; then
+              attempt="$(python - <<'PY'
+          import json, os
+          from pathlib import Path
+          state = json.loads(Path("out/state.json").read_text(encoding="utf-8"))
+          requested_shot = int(os.environ.get("CME_SHOT", "1"))
+          used = sum(1 for item in state.get("attempts", []) if item.get("shot") == requested_shot and item.get("receipt_id"))
+          print(used + 1)
+          PY
+              )"
+            fi
+            args=(python -m cme.smoke frame --offer out/live_offer.json --out out --shot "$CME_SHOT" --attempt "$attempt")
+            if [[ "$NO_OCR_REQUIRED" == "true" ]]; then
+              args+=(--no-ocr-required)
+            fi
+            "${args[@]}"
+          fi
+          result=$?
+          echo "exit_code=$result" >> "$GITHUB_OUTPUT"
+          {
+            echo "## CME live pipeline result"
+            echo "- Stage: $CME_STAGE"
+            echo "- Workflow run ID: ${GITHUB_RUN_ID}"
+            echo "- Commit: ${GITHUB_SHA}"
+            echo "- CME exit code: $result"
+            if [[ "$CME_STAGE" == "find" && "$result" == "0" ]]; then
+              echo "- Next: select candidate_id from this summary, then run stage=analyze with this run ID in find_run_id to inspect the source without generating images."
+            elif [[ "$CME_STAGE" == "brain" && "$result" == "0" ]]; then
+              echo "- Next: inspect atoms.json, then run stage=frame with this run ID."
+            elif [[ "$result" == "6" ]]; then
+              echo "- QA verdict: UNVERIFIED; artifacts retained."
+            elif [[ "$result" == "7" ]]; then
+              echo "- QA verdict: FAILED_QA or NOT_DELIVERED; artifacts retained."
+            elif [[ "$CME_STAGE" == "all" && "$result" == "0" ]]; then
+              echo "- Pipeline completed. Inspect each generated image and receipt before commercial use."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 0
+
+      - name: Check whether this run executed FIND before saving source history
+        id: find_state_persist
+        if: always() && (inputs.stage == 'find' || inputs.stage == 'all')
+        shell: bash
+        run: |
+          state_dir="${RUNNER_TEMP}/cme-find-state"
+          should_save=false
+          if [[ -f "$state_dir/find-completed" && -s "$state_dir/seen.json" ]]; then
+            should_save=true
+          fi
+          rm -f "$state_dir/find-completed"
+          echo "should_save=$should_save" >> "$GITHUB_OUTPUT"
+          echo "FIND source-history persistence: $should_save"
+
+      - name: Save FIND source history
+        if: always() && (inputs.stage == 'find' || inputs.stage == 'all') && steps.find_state_persist.outputs.should_save == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/cme-find-state
+          key: cme-find-state-${{ runner.os }}-${{ github.ref_name }}-${{ github.run_id }}
+
+      - name: Check verified product-reference cache before saving
+        id: reference_cache_persist
+        if: always() && (inputs.stage == 'frame' || inputs.stage == 'all')
+        shell: bash
+        run: |
+          cache_dir="${RUNNER_TEMP}/cme-reference-cache"
+          should_save=false
+          if [[ -d "$cache_dir" ]] && find "$cache_dir" -maxdepth 1 -type f -name '*.prep.json' -print -quit | grep -q .; then
+            should_save=true
+          fi
+          echo "should_save=$should_save" >> "$GITHUB_OUTPUT"
+          echo "Verified product-reference cache persistence: $should_save"
+
+      - name: Save verified product-reference cache
+        if: always() && (inputs.stage == 'frame' || inputs.stage == 'all') && steps.reference_cache_persist.outputs.should_save == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/cme-reference-cache
+          key: cme-reference-cache-${{ runner.os }}-${{ hashFiles('examples/**', 'cme/branding.py') }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Remove raw source-transfer input from downloadable artifacts
+        if: always() && inputs.stage != 'frame' && inputs.stage != 'analyze'
+        run: rm -f out/source_contract.json
+
+      - name: Upload output, receipts, state, and call log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cme-${{ inputs.stage }}-out
+          path: out/
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Apply CME result as workflow status
+        if: always() && steps.smoke.outcome == 'success'
+        shell: bash
+        run: |
+          code="${{ steps.smoke.outputs.exit_code }}"
+          if [[ -z "$code" ]]; then
+            echo "::error::The smoke command did not record an exit code."
+            exit 1
+          fi
+          if [[ "$code" != "0" ]]; then
+            echo "::error::CME live stage exited with code $code. Artifacts uploaded where available."
+            exit "$code"
+          fi

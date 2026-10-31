@@ -1,0 +1,50 @@
+{
+ "name": "Physical Products",
+ "aliases": ["ecommerce", "e-commerce", "e commerce", "physical goods", "dropshipping", "product ads", "tiktok shop", "товарка", "товарный бизнес"],
+ "software_alias_intent_terms": [],
+ "direct_brands": [],
+ "direct_domains": [],
+ "direct_url_fragments": ["shop.tiktok.com", "tiktok.com/shop", "myshopify.com", "/products/"],
+ "direct_terms": [
+  "shop now", "order now", "buy now", "add to cart", "free shipping", "cash on delivery",
+  "limited stock", "while supplies last", "money back guarantee", "30 day guarantee",
+  "get yours", "tiktok shop", "order today", "limited time offer", "buy one get one",
+  "free delivery", "ships worldwide", "in stock"
+ ],
+ "adjacent_brands": ["shopify", "aliexpress", "amazon", "temu", "etsy", "walmart"],
+ "adjacent_terms": [
+  "gadget", "kitchen", "organizer", "portable", "rechargeable", "cleaner", "massager",
+  "pet", "car accessory", "home", "gift", "lamp", "bottle", "storage", "tool"
+ ],
+ "hard_exclude_brands": [],
+ "hard_exclude_domains": [],
+ "hard_exclude_terms": [
+  "supplement", "supplements", "fat burner", "weight loss", "diabetes", "miracle cure",
+  "testosterone", "male enhancement", "erectile",
+  "vape", "vaping", "cbd", "firearm", "gun", "ammo",
+  "casino", "betting", "forex", "crypto", "loan", "mortgage"
+ ],
+ "conflict_industries": [
+  "software", "saas", "financial services", "banking", "insurance", "gambling",
+  "pharmaceutical", "pharmaceuticals", "healthcare", "dating", "mobile games", "crypto"
+ ],
+ "seed_groups": [],
+ "context_required_brands": [],
+ "ambiguous_seed_terms": [],
+ "entity_context_rules": [],
+ "profile_include_extra": ["product", "shop", "store", "sale", "discount", "offer"],
+ "profile_topical": [
+  "product", "gadget", "kitchen", "home", "pet", "car", "portable", "rechargeable",
+  "organizer", "cleaner", "tool", "massager", "lamp", "bottle", "blender", "shipping",
+  "guarantee", "discount", "sale", "gift"
+ ],
+ "target_context": {
+  "audience": "online shoppers looking for a practical everyday product",
+  "desire": "solve a small daily annoyance with a simple, visible product",
+  "pain": "the current way of doing the task is slow, messy or frustrating",
+  "barrier": "doubt that the product really works and fear of wasting money",
+  "awareness": "problem-aware",
+  "offer_type": "Physical product"
+ },
+ "notes": "Physical-goods direct-response profile. Health-claim and regulated categories are hard-excluded on purpose (platform policy risk). Identity is built from conversion cues and product terms, not brands."
+}

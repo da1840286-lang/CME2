@@ -1,0 +1,70 @@
+{
+ "vertical_id": "physical_goods_us",
+ "title": "Physical goods (e-commerce), US",
+ "geo": "US",
+ "status": "STARTER SET. Not legal advice. Platform and FTC rules change; review before live use.",
+ "sources": [
+  "https://ads.tiktok.com/help/article/tiktok-ads-policy-dangerous-products-or-services",
+  "https://transparency.meta.com/policies/ad-standards/restricted-goods-services/weapons-ammunition-explosives",
+  "FTC Made in USA Labeling Rule (2021) and FTC enforcement sweeps 2025-2026",
+  "FTC Rule on the Use of Consumer Reviews and Testimonials (fake reviews and testimonials)"
+ ],
+ "substantiation_patterns": [
+  {
+   "id": "made_in_usa",
+   "regex": "\\b(made|manufactured|assembled|crafted|built) in (the )?(usa|u\\.s\\.a\\.?|america|united states)\\b|\\bamerican[- ]made\\b|\\bproudly american\\b",
+   "note": "Unqualified US-origin claims need substantiation (FTC Made in USA rule)."
+  },
+  {
+   "id": "implied_origin_imagery",
+   "regex": "\\b(american flag|us flag|u\\.s\\. flag|stars and stripes|map of the (usa|united states))\\b",
+   "note": "Flag or map imagery can imply a US-origin claim."
+  },
+  {
+   "id": "reviews_testimonials",
+   "regex": "\\b(\\d(\\.\\d)?[- ]star|five[- ]star|customer reviews?|customer testimonials?|verified buyers?|thousands of (happy )?customers)\\b",
+   "note": "Reviews and testimonials must be real and substantiated (FTC consumer review rule)."
+  },
+  {
+   "id": "superlatives",
+   "regex": "(#1\\b|\\bnumber one\\b|\\bbest[- ]selling\\b|\\bworld'?s best\\b)",
+   "note": "Superlatives and ranking claims need substantiation."
+  },
+  {
+   "id": "efficacy_authority",
+   "regex": "\\b(clinically (proven|tested)|doctor[- ]recommended|fda[- ]approved|scientifically proven)\\b",
+   "note": "Efficacy and authority claims need substantiation."
+  },
+  {
+   "id": "guarantees",
+   "regex": "\\b(lifetime|money[- ]back|100%) guarantee(d)?\\b",
+   "note": "Guarantee terms must match the actual offer terms."
+  }
+ ],
+ "category_rules": {
+  "knives_culinary": {
+   "blocked_platforms": [],
+   "requirements": [
+    "audience_18_plus",
+    "verify_market_eligibility_on_platform"
+   ],
+   "restricted_context_patterns": [
+    "\\b(weapon|self[- ]defense|tactical|combat|stab(bing)?|assault)\\b"
+   ],
+   "note": "TikTok allows culinary knives only with 18+ targeting in listed markets (verify US). Meta allows culinary knives with 18+; avoid weapon-context language."
+  },
+  "knives_non_culinary": {
+   "blocked_platforms": [
+    "meta"
+   ],
+   "requirements": [
+    "audience_18_plus",
+    "verify_market_eligibility_on_platform"
+   ],
+   "restricted_context_patterns": [
+    "\\b(weapon|self[- ]defense|tactical|combat|stab(bing)?|assault)\\b"
+   ],
+   "note": "Meta prohibits non-culinary knives and blades in ads. TikTok restricts utility knives to 18+ in listed markets (verify US)."
+  }
+ }
+}

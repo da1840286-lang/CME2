@@ -1,0 +1,8 @@
+settings.json
+out/
+__pycache__/
+*.pyc
+radar_data/
+.env
+.env.*
+!.env.example

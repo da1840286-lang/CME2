@@ -1,0 +1,109 @@
+{
+ "status": "OK",
+ "decision": null,
+ "source_use_policy": "PATTERN_EXTRACTION_NOT_COMMERCIAL_APPROVAL",
+ "result": {
+  "hook": {
+   "text": "Man introduces the topic with text overlay 'How to deep clean your car the easy way' and subtitle 'If your car wash has one'.",
+   "kind": "OBSERVED"
+  },
+  "buyer_problem": {
+   "text": "Car interiors accumulate dirt in hard-to-reach areas like cup holders and center console crevices that standard car washes may not address.",
+   "kind": "INFERRED"
+  },
+  "product_intervention": {
+   "text": "Using a vacuum cleaner with attachments and a blue microfiber cloth to vacuum and wipe the center console, cup holders, and gear shift area.",
+   "kind": "OBSERVED"
+  },
+  "result_demo": {
+   "text": "Frames show the cleaning action being performed but do not show a visible 'after' state of a clean car compared to a dirty one; the creator asks 'good or not?' without showing a verified result.",
+   "kind": "INFERRED"
+  },
+  "cta": {
+   "text": "Creator asks viewers 'good or not?' regarding the cleaning method.",
+   "kind": "INFERRED"
+  },
+  "mechanism_hypothesis": {
+   "text": "Vacuum suction removes loose debris from tight spaces, while the cloth wipes down surfaces for a deeper clean than a standard wash.",
+   "kind": "INFERRED"
+  },
+  "transferability": {
+   "text": "This method could transfer to cleaning other vehicle interiors or household crevices using similar vacuum attachments and cloths.",
+   "kind": "INFERRED"
+  },
+  "evidence": [
+   {
+    "t_sec": 0.5,
+    "observation": "Man speaks to camera with text 'How to deep clean your car the easy way' and 'If your car wash has one'.",
+    "frame": 0,
+    "supports": [
+     "hook"
+    ]
+   },
+   {
+    "t_sec": 4.82,
+    "observation": "Person uses a vacuum nozzle to clean the center console cup holder area.",
+    "frame": 1,
+    "supports": [
+     "product_intervention"
+    ]
+   },
+   {
+    "t_sec": 9.13,
+    "observation": "Continued vacuuming of the cup holder area with a blue attachment.",
+    "frame": 2,
+    "supports": [
+     "product_intervention"
+    ]
+   },
+   {
+    "t_sec": 13.45,
+    "observation": "Close-up of vacuum nozzle cleaning the side of the center console near the gear shift.",
+    "frame": 3,
+    "supports": [
+     "product_intervention"
+    ]
+   },
+   {
+    "t_sec": 17.77,
+    "observation": "Arm with blue cloth wipes the area around the gear shift with text 'rest of it'.",
+    "frame": 4,
+    "supports": [
+     "product_intervention"
+    ]
+   },
+   {
+    "t_sec": 22.08,
+    "observation": "Man returns to camera view with text 'good or not?'.",
+    "frame": 5,
+    "supports": [
+     "cta",
+     "result_demo"
+    ]
+   },
+   {
+    "t_sec": 26.4,
+    "observation": "Man speaks to camera with text 'mess'.",
+    "frame": 6,
+    "supports": [
+     "result_demo"
+    ]
+   }
+  ],
+  "limits": {
+   "text": "No before/after comparison is visible; the specific vacuum model is not identified; the effectiveness is not visually proven.",
+   "missing": [
+    "before/after shots",
+    "product brand/link",
+    "visible dirt removal comparison"
+   ]
+  },
+  "ratings": {
+   "problem_clarity": 4,
+   "product_demo": 3,
+   "proof_visibility": 1,
+   "sequence_quality": 4
+  },
+  "warnings": []
+ }
+}

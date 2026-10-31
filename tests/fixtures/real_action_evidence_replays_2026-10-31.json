@@ -1,0 +1,213 @@
+{
+  "source": "sanitized GitHub Actions source_analysis artifacts",
+  "runs": [
+    {
+      "run_id": "41185128123",
+      "candidate_id": "tiktok:ad:7698559663054392597",
+      "evidence": [
+        {
+          "t_sec": 0.5,
+          "observation": "Four silicone bags in green, yellow, pink, and clear are filled with leaves, lemons, broccoli, carrots, and tomatoes; Japanese text introduces the product.",
+          "frame": 0,
+          "supports": [
+            "hook",
+            "product_intervention"
+          ]
+        },
+        {
+          "t_sec": 4.7,
+          "observation": "A clear silicone bag holds strawberries and lemon slices; a hand holds the bottom of the open bag.",
+          "frame": 1,
+          "supports": [
+            "product_intervention"
+          ]
+        },
+        {
+          "t_sec": 8.91,
+          "observation": "Hands place kiwi, mango cubes, and berries into a clear bag; Japanese text explains putting food in and sliding to close.",
+          "frame": 2,
+          "supports": [
+            "product_intervention",
+            "mechanism_hypothesis"
+          ]
+        },
+        {
+          "t_sec": 13.11,
+          "observation": "The sealed bag with fruit sits on a refrigerator shelf among other containers.",
+          "frame": 3,
+          "supports": [
+            "result_demo"
+          ]
+        },
+        {
+          "t_sec": 17.31,
+          "observation": "A hand holds a sealed bag containing a layered sandwich in front of an open microwave; Japanese text states microwave compatibility up to 230°C.",
+          "frame": 4,
+          "supports": [
+            "product_intervention",
+            "result_demo"
+          ]
+        },
+        {
+          "t_sec": 21.52,
+          "observation": "The bag with the sandwich is placed on the microwave turntable.",
+          "frame": 5,
+          "supports": [
+            "result_demo"
+          ]
+        },
+        {
+          "t_sec": 25.72,
+          "observation": "Four bags with different colored seals sit on a kitchen counter; Japanese text lists sizes 500ml to 3000ml.",
+          "frame": 6,
+          "supports": [
+            "product_intervention",
+            "transferability"
+          ]
+        },
+        {
+          "t_sec": 29.92,
+          "observation": "A close-up shows a green bag containing a basil plant with leaves growing out of the top.",
+          "frame": 7,
+          "supports": [
+            "product_intervention",
+            "transferability"
+          ]
+        },
+        {
+          "t_sec": 34.13,
+          "observation": "Four bags are labeled Small, Medium, Large, and Extra Large with green Japanese text overlay urging viewers to check now.",
+          "frame": 8,
+          "supports": [
+            "cta",
+            "product_intervention"
+          ]
+        },
+        {
+          "t_sec": 38.33,
+          "observation": "The same four bags appear empty/clear with the same green text overlay remaining on screen.",
+          "frame": 9,
+          "supports": [
+            "cta"
+          ]
+        }
+      ]
+    },
+    {
+      "run_id": "41148117074",
+      "candidate_id": "tiktok:ad:7700352918590868767",
+      "evidence": [
+        {
+          "t_sec": 0.5,
+          "observation": "Product box displays the RONGTA printer image and feature list; overlay text describes Wireless Bluetooth, Battery-Powered, Compatible with 8.5\" x 11\" US Letter Paper.",
+          "frame": 0,
+          "supports": [
+            "hook",
+            "product_intervention",
+            "mechanism_hypothesis",
+            "transferability"
+          ]
+        },
+        {
+          "t_sec": 4.62,
+          "observation": "A blank white sheet of thermal paper is held up; a box labeled \"Thermal Paper Thermopapier\" is visible at the top edge.",
+          "frame": 1,
+          "supports": [
+            "product_intervention"
+          ]
+        },
+        {
+          "t_sec": 8.74,
+          "observation": "Packaged thermal paper in plastic wrap sits in front of a box labeled \"US Letter\" and \"Thermal Paper Thermopapier\".",
+          "frame": 2,
+          "supports": [
+            "product_intervention",
+            "transferability"
+          ]
+        },
+        {
+          "t_sec": 12.86,
+          "observation": "Close-up of the grey printer body edge against a carpet background; no paper is visible in this frame.",
+          "frame": 3,
+          "supports": [
+            "product_intervention"
+          ]
+        },
+        {
+          "t_sec": 16.98,
+          "observation": "The printer is shown with a green \"Standby\" indicator light illuminated; white paper is being fed into the printer slot.",
+          "frame": 4,
+          "supports": [
+            "product_intervention"
+          ]
+        },
+        {
+          "t_sec": 21.1,
+          "observation": "A hand holds white paper that has exited the printer; the paper appears blank with no visible printed text, labels, or output.",
+          "frame": 5,
+          "supports": [
+            "result_demo"
+          ]
+        }
+      ]
+    },
+    {
+      "run_id": "41206920383",
+      "candidate_id": "tiktok:ad:7697657045536820511",
+      "evidence": [
+        {
+          "t_sec": 0.5,
+          "observation": "Hands hold a clear silicone bag over a baking dish with casserole. Text overlay reads 'Stop wasting money on Aluminum Foil'.",
+          "frame": 0,
+          "supports": [
+            "hook",
+            "buyer_problem"
+          ]
+        },
+        {
+          "t_sec": 2.73,
+          "observation": "Hands lift a sheet of aluminum foil off the same baking dish. Text overlay reads 'You are doing all wrong'.",
+          "frame": 1,
+          "supports": [
+            "buyer_problem"
+          ]
+        },
+        {
+          "t_sec": 4.97,
+          "observation": "Hands place the clear silicone bag over the baking dish containing the food.",
+          "frame": 2,
+          "supports": [
+            "product_intervention"
+          ]
+        },
+        {
+          "t_sec": 7.2,
+          "observation": "The baking dish is fully covered by the clear silicone bag. Text overlay reads 'Eco-friendly'.",
+          "frame": 3,
+          "supports": [
+            "product_intervention",
+            "mechanism_hypothesis"
+          ]
+        },
+        {
+          "t_sec": 9.44,
+          "observation": "The clear bag is held up near the edge of the black baking dish. Text overlay reads 'Oven Safe (Up to 425F)'.",
+          "frame": 4,
+          "supports": [
+            "mechanism_hypothesis",
+            "transferability"
+          ]
+        },
+        {
+          "t_sec": 11.67,
+          "observation": "The baking dish is covered with the clear bag again. Text overlay reads 'And freezer safe'.",
+          "frame": 5,
+          "supports": [
+            "mechanism_hypothesis",
+            "transferability"
+          ]
+        }
+      ]
+    }
+  ]
+}
