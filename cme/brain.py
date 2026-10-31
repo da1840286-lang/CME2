@@ -1201,7 +1201,7 @@ def build_request(offer, brief: str, shots: int, failed=None, source_transfer=No
             "demo, set transferable=false, explain why, and return atoms=[]. If true, preserved lists only source properties "
             "visibly carried by existing MUST image atoms: hook uses keep_hook[_suffix], mechanism uses keep_mechanism[_suffix], "
             "and problem/intervention/result use their matching mech_* atoms. Do not create duplicate keep_intervention or "
-            "keep_result atoms; their mech_* atoms are the causal-link carriers. English only.
+            "keep_result atoms; their mech_* atoms are the causal-link carriers. English only."
         )
     if failed:
         req["only_fix"] = failed  # [{id, errors, previous_text}]
