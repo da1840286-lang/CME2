@@ -1,0 +1,59 @@
+{
+  "provenance": {
+    "brain_run_id": "41252251386",
+    "analyze_run_id": "41251581253",
+    "candidate_id": "tiktok:ad:7693796487330925854",
+    "purpose": "Regression fixture from the first actual Brain response that previously failed after role/prefix and transfer-decision validation."
+  },
+  "source_analysis_result": {
+    "hook": {"text": "A woman stands in a bathroom holding a green and black cordless pressure washer, with text overlay reading \"pov: it's one of those days &\"", "kind": "OBSERVED"},
+    "buyer_problem": {"text": "Not wanting to scrub hard or hurt your back while cleaning", "kind": "INFERRED"},
+    "product_intervention": {"text": "Using a cordless pressure washer to spray foam onto bathroom tiles, fixtures, and shower caddies", "kind": "OBSERVED"},
+    "result_demo": {"text": "Foam is visibly covering the shower tiles, running down the faucet area, coating the wire caddies, and filling the bathtub", "kind": "OBSERVED"},
+    "cta": {"text": "No explicit call-to-action visible in the frames", "kind": "INFERRED"},
+    "mechanism_hypothesis": {"text": "The pressure washer sprays foam or water at pressure to clean bathroom surfaces without manual scrubbing", "kind": "INFERRED"},
+    "transferability": {"text": "Could potentially transfer to other hard-surface cleaning tasks like outdoor furniture, siding, or cars", "kind": "INFERRED"},
+    "limits": {"text": "No before/after comparison of dirty vs clean surfaces is shown; only foam application is visible. No pricing, purchase link, or explicit CTA appears in the frames.", "missing": ["before/after dirty surface comparison", "explicit CTA or purchase information", "product specifications or price"]}
+  },
+  "target_fit_gate": {
+    "transferable": true,
+    "abstract_mechanism": "A cordless pressure washer sprays foam onto hard surfaces without manual scrubbing, visibly coating tiles, fixtures, caddies, and tub to show cleaning coverage.",
+    "target_native_mapping": "The target cordless pressure washer sprays foam onto outdoor hard surfaces such as patio furniture, siding, or a car, visibly coating them to show cleaning coverage without scrubbing.",
+    "target_evidence": ["Cordless pressure washer"],
+    "reason": "The source mechanism is an ordinary visible demo of spraying foam with a cordless pressure washer, which the target product class can plausibly demonstrate. No unverified specs, PSI, accessories, or before/after comparison are required. The",
+    "demo_form_source": "demonstration",
+    "demo_form_target": "demonstration",
+    "source_elements_dropped": [],
+    "source_elements_preserved": [
+      {"element": "hook", "target_form": "Creator holds target cordless pressure washer outdoors with text overlay about a tough cleaning day"},
+      {"element": "problem", "target_form": "Not wanting to scrub hard or hurt your back while cleaning outdoor surfaces"},
+      {"element": "mechanism", "target_form": "Target cordless pressure washer sprays foam onto outdoor hard surfaces without manual scrubbing"},
+      {"element": "intervention", "target_form": "Nozzle sprays foam onto outdoor furniture, siding, or car surfaces"},
+      {"element": "result", "target_form": "Foam visibly coats outdoor surfaces such as furniture, siding, or car"}
+    ]
+  },
+  "brain_response_round_1": {
+    "atoms": [
+      {"id": "keep_hook", "kind": "scene", "text": "Creator holds target cordless pressure washer outdoors with text overlay about a tough cleaning day", "priority": "MUST", "channel": "image", "shot": 1},
+      {"id": "keep_mechanism", "kind": "action", "text": "Target cordless pressure washer sprays foam onto outdoor hard surfaces without manual scrubbing", "priority": "MUST", "channel": "image", "shot": 1},
+      {"id": "mech_problem", "kind": "scene", "text": "Outdoor patio furniture, siding, or car surface shows visible grime before treatment", "priority": "MUST", "channel": "image", "shot": 1},
+      {"id": "mech_intervention", "kind": "action", "text": "Nozzle sprays foam directly onto outdoor furniture, siding, or car surfaces at visible contact point", "priority": "MUST", "channel": "image", "shot": 1},
+      {"id": "mech_result", "kind": "scene", "text": "Foam visibly coats outdoor furniture, siding, or car surfaces after spraying", "priority": "MUST", "channel": "image", "shot": 1},
+      {"id": "comp_", "kind": "scene", "text": "One continuous outdoor surface: untreated dirty area on left, foam-coated treated area on right, nozzle at boundary", "priority": "MUST", "channel": "image", "shot": 1},
+      {"id": "product_vis", "kind": "product", "text": "Target cordless pressure washer body visible, clean unmarked surfaces, recognizable handheld form", "priority": "MUST", "channel": "image", "shot": 1},
+      {"id": "qa_no_text_dup", "kind": "qa_check", "text": "No invented text, pseudo-lettering, logos, brand names or labels appear on product or scene", "priority": "MUST", "channel": "qa", "shot": 1},
+      {"id": "qa_foam_visible", "kind": "qa_check", "text": "Foam coating is visibly present on treated outdoor surface in same frame as nozzle contact", "priority": "MUST", "channel": "qa", "shot": 1}
+    ],
+    "transfer_decision": {
+      "transferable": true,
+      "abstract_mechanism": "A cordless pressure washer sprays foam onto hard surfaces without manual scrubbing, visibly coating them to show cleaning coverage.",
+      "preserved": [
+        {"property": "hook", "atom_id": "keep_hook"},
+        {"property": "mechanism", "atom_id": "keep_mechanism"},
+        {"property": "intervention", "atom_id": "mech_intervention"},
+        {"property": "result", "atom_id": "mech_result"}
+      ],
+      "reason": "The target cordless pressure washer can honestly demonstrate spraying foam onto outdoor hard surfaces without scrubbing, matching the approved causal mechanism using only verified OfferCard facts."
+    }
+  }
+}

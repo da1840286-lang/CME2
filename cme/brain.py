@@ -244,6 +244,17 @@ def _atom_view(atom):
     return get("id") or "", get("priority"), get("channel"), get("kind")
 
 
+def atom_role(atom_id):
+    """Return the logical atom role for bare or underscore-suffixed IDs."""
+    match = re.match(r"^(keep_[a-z]+|mech_[a-z]+|comp)(?:_|$)", str(atom_id or ""))
+    return match.group(1) if match else None
+
+
+def atom_id_matches_role(atom_id, role):
+    """Match an exact role id or a suffix family without accepting partial words."""
+    return atom_role(atom_id) == str(role or "").rstrip("_")
+
+
 def missing_mechanism_links(atoms, links) -> list:
     """Link names that no MUST image atom (not a claim) visibly carries."""
     missing = []
@@ -253,7 +264,7 @@ def missing_mechanism_links(atoms, links) -> list:
         ok = False
         for atom in atoms:
             aid, prio, ch, kind = _atom_view(atom)
-            if str(aid).startswith(prefix) and prio == "MUST" and ch == "image" and kind != "claim":
+            if atom_id_matches_role(aid, prefix) and prio == "MUST" and ch == "image" and kind != "claim":
                 ok = True
                 break
         if not ok:
@@ -624,9 +635,9 @@ def missing_keep_atoms(atoms, fit_gate) -> list:
         if isinstance(item, dict)
     } if isinstance(fit_gate, dict) else {}
     for element in required_keep_elements(fit_gate):
-        prefix = f"keep_{element}_"
+        role = f"keep_{element}"
         target_form = preserved.get(element, "")
-        if not any(str(aid).startswith(prefix) and priority == "MUST" and channel == "image" and kind != "claim"
+        if not any(atom_id_matches_role(aid, role) and priority == "MUST" and channel == "image" and kind != "claim"
                    and _keep_atom_matches_target_form(text, target_form)
                    for aid, priority, channel, kind, text in rows):
             missing.append(element)
@@ -1087,10 +1098,21 @@ def validate_transfer_decision(decision, atoms) -> list:
                     continue
                 atom_id = str(item.get("atom_id") or "")
                 carrier = by_id.get(atom_id)
-                if prop_key in GATE_ELEMENTS and not atom_id.startswith(f"keep_{prop_key}_"):
+                # The hook/mechanism Gate elements have dedicated keep_* atoms.
+                # The causal problem/intervention/result chain is already carried by mech_* atoms;
+                # duplicating it as keep_* would consume the frame budget without adding evidence.
+                required_role = {
+                    "hook": "keep_hook",
+                    "mechanism": "keep_mechanism",
+                    "problem": "mech_problem",
+                    "intervention": "mech_intervention",
+                    "result": "mech_result",
+                }.get(prop_key)
+                if required_role and not atom_id_matches_role(atom_id, required_role):
+                    expected_prefix = required_role + "_"
                     errors.append(
-                        f"transfer_decision.preserved[{index}].atom_id must use the keep_{prop_key}_ prefix "
-                        f"for the preserved source element")
+                        f"transfer_decision.preserved[{index}].atom_id must use the {expected_prefix} prefix "
+                        f"(or exact base id) for the preserved source element")
                     continue
                 if carrier is None or carrier[0] != "MUST" or carrier[1] != "image" or carrier[2] == "claim":
                     errors.append(
@@ -1173,10 +1195,13 @@ def build_request(offer, brief: str, shots: int, failed=None, source_transfer=No
         req["rules"].append(
             "TRANSFER DECISION (required): decide whether the source's causal mechanism can be demonstrated honestly "
             "by the TARGET product. Return transfer_decision {transferable, abstract_mechanism, preserved, reason} "
-            "beside atoms. abstract_mechanism is the brand-free causal idea. If the target cannot demonstrate it without "
-            "inventing features, or the mechanism becomes an unrelated ordinary target-product demo, set transferable=false, "
-            "explain why, and return atoms=[]. If true, preserved lists 1-4 {property, atom_id} entries linking source "
-            "properties to existing MUST image atoms. English only."
+            "beside atoms. The abstract_mechanism is owned by the independently approved Target-Fit Gate; do not broaden "
+            "or substitute its causal idea (code carries the exact approved wording into the final decision). If the target "
+            "cannot demonstrate it without inventing features, or the mechanism becomes an unrelated ordinary target-product "
+            "demo, set transferable=false, explain why, and return atoms=[]. If true, preserved lists only source properties "
+            "visibly carried by existing MUST image atoms: hook uses keep_hook[_suffix], mechanism uses keep_mechanism[_suffix], "
+            "and problem/intervention/result use their matching mech_* atoms. Do not create duplicate keep_intervention or "
+            "keep_result atoms; their mech_* atoms are the causal-link carriers. English only.
         )
     if failed:
         req["only_fix"] = failed  # [{id, errors, previous_text}]
@@ -1233,8 +1258,8 @@ def request_atoms(offer, brief: str, shots: int, call, max_retries: int = 2, ver
         # (keep_mechanism_01 -> keep_mechanism_1). Replace the stale version by role;
         # otherwise retries accumulate duplicate MUST atoms and falsely exhaust the frame budget.
         def retry_family(atom_id):
-            match = re.match(r"^(keep_[a-z]+_|mech_[a-z]+_|comp_)", str(atom_id or ""))
-            return match.group(1) if match else None
+            # A model may return a bare role ID first and add a numeric suffix on retry.
+            return atom_role(atom_id)
 
         valid_incoming = [
             a for a in parsed.atoms
@@ -1284,11 +1309,19 @@ def request_atoms(offer, brief: str, shots: int, call, max_retries: int = 2, ver
         pending.update(structure_errors)
         if source_transfer:
             candidate_decision = offered if isinstance(offered, dict) else held_decision
-            decision_errors = validate_transfer_decision(candidate_decision, by_id.values())
             fit_gate = source_transfer.get("target_fit_gate") if isinstance(source_transfer, dict) else None
             if isinstance(fit_gate, dict) and isinstance(candidate_decision, dict) and candidate_decision.get("transferable") is True:
-                if _normalized_evidence(candidate_decision.get("abstract_mechanism", "")) != _normalized_evidence(fit_gate.get("abstract_mechanism", "")):
-                    decision_errors.append("transfer_decision.abstract_mechanism must preserve the independently approved target-fit mechanism exactly")
+                # The Target-Fit Gate is the single authority for the approved abstract mechanism.
+                # Do not make an LLM re-copy a long canonical string exactly: keep model-authored
+                # decision fields, but carry this field verbatim from the validated Gate.
+                candidate_decision = dict(candidate_decision)
+                approved_mechanism = fit_gate.get("abstract_mechanism")
+                if isinstance(approved_mechanism, str) and approved_mechanism.strip():
+                    if _normalized_evidence(candidate_decision.get("abstract_mechanism", "")) != _normalized_evidence(approved_mechanism):
+                        record["abstract_mechanism_canonicalized"] = True
+                    candidate_decision["abstract_mechanism"] = approved_mechanism
+                    record["abstract_mechanism_source"] = "target_fit_gate"
+            decision_errors = validate_transfer_decision(candidate_decision, by_id.values())
             if decision_errors:
                 pending["#transfer_decision"] = decision_errors
                 held_decision = None

@@ -321,10 +321,19 @@ class TargetFitGateTests(unittest.TestCase):
             "preserved": [{"property": "a visible improvement after an action", "atom_id": "s1_scene"}],
             "reason": "A dramatic product close-up looks persuasive to a potential buyer",
         }
-        with self.assertRaisesRegex(BrainError, "preserve the independently approved target-fit mechanism"):
-            request_atoms(target_offer(), "Make one frame", 1,
-                          lambda _request: {"atoms": [GOOD_ATOM], "transfer_decision": wrong},
-                          max_retries=0, source_transfer=context)
+        calls = []
+        decision_out = {}
+        trace = []
+        atoms = request_atoms(
+            target_offer(), "Make one frame", 1,
+            lambda _request: calls.append(True) or {"atoms": [GOOD_ATOM], "transfer_decision": wrong},
+            max_retries=0, source_transfer=context, decision_out=decision_out, rounds_out=trace,
+        )
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(atoms), 1)
+        self.assertEqual(decision_out["abstract_mechanism"], approved["abstract_mechanism"])
+        self.assertTrue(trace[0]["abstract_mechanism_canonicalized"])
+        self.assertEqual(trace[0]["abstract_mechanism_source"], "target_fit_gate")
 
     def test_smoke_rejects_source_before_second_brain_request(self):
         source_path_data = {"result": {
