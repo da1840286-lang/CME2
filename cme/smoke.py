@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import sys
 import time
@@ -35,6 +36,61 @@ DEFAULT_BRIEF = "One vertical 9:16 ad frame: the product used in a realistic hom
 
 def _sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def _round_provenance_summary(rows) -> dict:
+    """Summarize unique schema/prompt fingerprints and the model routes used by a phase."""
+    rows = rows if isinstance(rows, list) else []
+    result = {}
+    for source_key in ("schema_sha256", "prompt_payload_sha256", "request_sha256"):
+        result[source_key] = sorted({
+            str(row[source_key]) for row in rows
+            if isinstance(row, dict) and row.get(source_key)
+        })
+    result["models"] = [
+        {
+            "primary_adapter": row.get("primary_adapter"),
+            "primary_model_id": row.get("primary_model_id"),
+            "adapter": row.get("adapter"),
+            "provider": row.get("provider"),
+            "model_id": row.get("model_id"),
+            "responded_model": row.get("responded_model"),
+            "fallback_used": bool(row.get("fallback_used", False)),
+        }
+        for row in rows if isinstance(row, dict) and (
+            row.get("primary_model_id") or row.get("model_id") or row.get("responded_model")
+        )
+    ]
+    return result
+
+
+def brain_provenance(run_id: str, trace: dict) -> dict:
+    """Bind the Brain artifact to the GitHub execution and per-round model request fingerprints."""
+    gate_rows = trace.get("gate_rounds") or []
+    brain_rows = trace.get("brain_rounds") or []
+    call_info = {}
+    for row in reversed(brain_rows + gate_rows):
+        if isinstance(row, dict) and any(row.get(k) for k in (
+            "primary_model_id", "model_id", "responded_model"
+        )):
+            call_info = row
+            break
+    return {
+        "git_sha": os.environ.get("GITHUB_SHA") or None,
+        "branch": os.environ.get("GITHUB_REF_NAME") or None,
+        "workflow_run_id": os.environ.get("GITHUB_RUN_ID") or None,
+        "workflow_run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT") or None,
+        "application_run_id": run_id,
+        "primary_adapter": call_info.get("primary_adapter"),
+        "primary_model_id": call_info.get("primary_model_id"),
+        "adapter": call_info.get("adapter"),
+        "provider": call_info.get("provider"),
+        "model_id": call_info.get("model_id"),
+        "responded_model": call_info.get("responded_model"),
+        "fallback_used": bool(call_info.get("fallback_used", False)),
+        "gate": _round_provenance_summary(gate_rows),
+        "brain": _round_provenance_summary(brain_rows),
+    }
 
 
 def offer_fingerprint(offer) -> tuple[str, list]:
@@ -217,6 +273,7 @@ def run_brain(args, offer, settings, catalog, vertical, log, run_id, ctx, out):
                               source_transfer=source_transfer, decision_out=transfer_decision,
                               rounds_out=trace["brain_rounds"])
     finally:
+        trace["provenance"] = brain_provenance(run_id, trace)
         try:
             trace_path.write_text(json.dumps(trace, ensure_ascii=False, indent=1), encoding="utf-8")
         except OSError as exc:
@@ -233,7 +290,8 @@ def run_brain(args, offer, settings, catalog, vertical, log, run_id, ctx, out):
                 "target_fit_gate": target_fit_gate,
                 "brief_sha256": _sha256_bytes(args.brief.encode("utf-8")),
                 "source_contract_sha256": _sha256_bytes(Path(args.source_contract).read_bytes()) if args.source_contract else None,
-                "model_id": call.info.get("model_id"), "responded_model": call.info.get("responded_model")}
+                "model_id": call.info.get("model_id"), "responded_model": call.info.get("responded_model"),
+                "provenance": trace.get("provenance")}
     if transfer_decision:
         manifest["transfer_decision"] = transfer_decision
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=1), encoding="utf-8")

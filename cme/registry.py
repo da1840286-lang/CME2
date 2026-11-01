@@ -226,7 +226,11 @@ def _make_llm(adapter_name, kind, settings, catalog, log, run_id, fallback_name=
         def make_go(used_spec, used_fn):
             def go(ref):
                 out, meta = used_fn(*args)
-                run.info = _info(used_spec, spec) | {"responded_model": meta.get("model")}
+                run.info = _info(used_spec, spec) | {
+                    "primary_adapter": spec.name,
+                    "primary_model_id": spec.model_id,
+                    "responded_model": meta.get("model"),
+                }
                 return out, meta
             return go
 

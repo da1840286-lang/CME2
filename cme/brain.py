@@ -3,6 +3,7 @@
 `call` is injected (provider-specific code lives elsewhere): call(request: dict) -> dict.
 """
 from __future__ import annotations
+import hashlib
 import json
 import re
 from .atoms import (ATOM_SCHEMA, TRANSFER_ATOM_SCHEMA, MODEL_GATE_REASON_MAX, GATE_REASON_MAX_TEXT, GATE_REASON_REWRITE_MAX,
@@ -906,6 +907,37 @@ def validate_transfer_fit_decision(offer, decision, source_transfer=None) -> lis
     return errors
 
 
+def _canonical_sha256(value) -> str:
+    """Hash a JSON-compatible request component with stable key ordering."""
+    payload = json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _request_provenance(request: dict) -> dict:
+    """Fingerprint the exact CME schema and structured prompt payload for one model round."""
+    schema = request.get("schema")
+    prompt_payload = {key: value for key, value in request.items() if key != "schema"}
+    return {
+        "schema_sha256": _canonical_sha256(schema),
+        "prompt_payload_sha256": _canonical_sha256(prompt_payload),
+        "request_sha256": _canonical_sha256(request),
+    }
+
+
+def _call_provenance(call) -> dict:
+    """Capture primary/selected adapter identity and the provider-reported responding model."""
+    info = getattr(call, "info", {}) or {}
+    return {
+        "primary_adapter": info.get("primary_adapter"),
+        "primary_model_id": info.get("primary_model_id"),
+        "adapter": info.get("adapter"),
+        "provider": info.get("provider"),
+        "model_id": info.get("model_id"),
+        "responded_model": info.get("responded_model"),
+        "fallback_used": bool(info.get("fallback_used", False)),
+    }
+
+
 def _trace_excerpt(value, limit: int = 3500) -> str:
     """Bounded JSON text of a model response for the audit trace (no secrets pass through Brain responses)."""
     try:
@@ -1203,14 +1235,17 @@ def request_transfer_fit(offer, brief: str, source_transfer: dict, call, trace_o
         record = {"phase": "target_fit_gate", "round": round_number, "round_budget": max_rounds}
         if previous_errors:
             record["previous_errors"] = list(previous_errors)
+        record.update(_request_provenance(request))
         if trace_out is not None:
             trace_out.append(record)
         try:
             response = call(request)
         except Exception as exc:
+            record.update(_call_provenance(call))
             record["error"] = f"{type(exc).__name__}: {str(exc)[:400]}"
             raise
 
+        record.update(_call_provenance(call))
         record["response_excerpt"] = _trace_excerpt(response)
         decision = None
         if not isinstance(response, dict) or response.get("_error"):
@@ -1525,14 +1560,18 @@ def request_atoms(offer, brief: str, shots: int, call, max_retries: int = 3, ver
                   "only_fix_ids": [item["id"] for item in failed] if failed else []}
         if rounds_out is not None:
             rounds_out.append(record)
+        request = build_request(offer, brief, shots, failed, source_transfer=source_transfer)
+        record.update(_request_provenance(request))
         try:
-            resp = call(build_request(offer, brief, shots, failed, source_transfer=source_transfer))
+            resp = call(request)
         except Exception as exc:
             # A transient provider failure must not erase what earlier rounds already established.
+            record.update(_call_provenance(call))
             record["error"] = f"{type(exc).__name__}: {str(exc)[:400]}"
             record["accepted_ids_before_failure"] = sorted(by_id)
             record["pending_before_failure"] = {k: list(v) for k, v in pending.items()}
             raise
+        record.update(_call_provenance(call))
         record["response_excerpt"] = _trace_excerpt(resp)
         offered = resp.get("transfer_decision") if isinstance(resp, dict) else None
         if source_transfer and isinstance(offered, dict) and offered.get("transferable") is False:

@@ -4,6 +4,7 @@ import hashlib
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from cme.brain import build_request, build_source_transfer_context, request_atoms
 from cme.adapters.openrouter import make_openrouter_brain
@@ -153,14 +154,46 @@ class SourceTransferBridgeTests(unittest.TestCase):
                 "reason": "The target product visibly demonstrates the same causal mechanism and result.",
             }
             out = root / "out"
-            code = smoke_main(["brain", "--settings", str(settings_path), "--out", str(out),
-                               "--source-contract", str(source_path), "--shots", "1"],
-                              {"transport": transport, "openrouter_key": "test-key"})
+            with patch.dict("os.environ", {
+                "GITHUB_SHA": "a" * 40,
+                "GITHUB_REF_NAME": "test/brain-provenance",
+                "GITHUB_RUN_ID": "123456789",
+                "GITHUB_RUN_ATTEMPT": "2",
+            }):
+                code = smoke_main(["brain", "--settings", str(settings_path), "--out", str(out),
+                                   "--source-contract", str(source_path), "--shots", "1",
+                                   "--run-id", "prov-test-001"],
+                                  {"transport": transport, "openrouter_key": "test-key"})
             self.assertEqual(code, 0)
             user = json.loads(sent[0]["messages"][1]["content"])
             self.assertEqual(user["source_transfer"]["mechanism"]["canonical_slug"], "demonstrate-then-prove")
             manifest = json.loads((out / "atoms_manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(manifest["source_contract_sha256"], hashlib.sha256(source_path.read_bytes()).hexdigest())
+            provenance = manifest["provenance"]
+            self.assertEqual(provenance["git_sha"], "a" * 40)
+            self.assertEqual(provenance["branch"], "test/brain-provenance")
+            self.assertEqual(provenance["workflow_run_id"], "123456789")
+            self.assertEqual(provenance["workflow_run_attempt"], "2")
+            self.assertEqual(provenance["application_run_id"], "prov-test-001")
+            self.assertTrue(provenance["primary_model_id"])
+            self.assertTrue(provenance["model_id"])
+            self.assertTrue(provenance["responded_model"])
+            for phase in ("gate", "brain"):
+                self.assertEqual(len(provenance[phase]["schema_sha256"]), 1)
+                self.assertEqual(len(provenance[phase]["prompt_payload_sha256"]), 1)
+                for key in ("schema_sha256", "prompt_payload_sha256", "request_sha256"):
+                    self.assertTrue(all(len(value) == 64 for value in provenance[phase][key]))
+            trace = json.loads((out / "brain_trace.json").read_text(encoding="utf-8"))
+            self.assertEqual(trace["provenance"], provenance)
+            for phase_key in ("gate_rounds", "brain_rounds"):
+                self.assertEqual(len(trace[phase_key]), 1)
+                row = trace[phase_key][0]
+                self.assertEqual(len(row["schema_sha256"]), 64)
+                self.assertEqual(len(row["prompt_payload_sha256"]), 64)
+                self.assertEqual(len(row["request_sha256"]), 64)
+                self.assertTrue(row["primary_model_id"])
+                self.assertTrue(row["model_id"])
+                self.assertTrue(row["responded_model"])
             self.assertTrue(manifest["target_fit_gate"]["transferable"])
             self.assertTrue((out / "target_fit_gate.json").is_file())
 
