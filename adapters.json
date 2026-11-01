@@ -55,6 +55,24 @@
    "notes": "Independent vision judge, deliberately different from the Brain/Analyst model to reduce correlated errors. Free model availability and rate limits may change; every MUST visual atom is required."
   },
   {
+   "name": "openrouter_free_judge_reserve",
+   "kind": "judge",
+   "provider": "openrouter",
+   "model_id": "dots-studio/dots-3-note-preview:free",
+   "tier": "free",
+   "verified": false,
+   "params": {
+    "response_format_mode": "json_object",
+    "temperature": 0,
+    "max_tokens": 1800,
+    "reasoning": {
+     "enabled": false
+    }
+   },
+   "price_hint": "free; endpoint availability and rate limits vary",
+   "notes": "Independent reserve vision Judge from Dots Studio; distinct from the Gemma primary Judge and Nemotron Brain/Analyst. OpenRouter lists text+image input and JSON response formatting. Free preview endpoint, not live-verified in this project; currently listed as scheduled to go away on 2026-12-31 and unavailable through EU in-region routing. Used only after primary transient retries; any reserve failure remains UNVERIFIED and blocks delivery."
+  },
+  {
    "name": "openrouter_free_analyst",
    "kind": "analyst",
    "provider": "openrouter",

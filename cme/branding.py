@@ -134,7 +134,16 @@ def reference_lettering_rule():
 # ---- text localisation ------------------------------------------------------------------------------
 SWEEP_ANGLES = tuple(range(-80, 81, 5))
 SWEEP_MAX_SIDE = 1400
-SOLO_CONF, AGREE_CONF = 60, 40
+ROTATED_DETECTION_MIN_CONF = 40  # retained for diagnostics only; never sufficient to authorize masking
+SOLO_CONF, AGREE_CONF = 60, 55
+# Conservative fail-closed ceilings. The current local calibration set contains two known-good
+# synthetic product-label cases (OCR envelopes ~9.8%, letter masks ~2.0% and ~2.1%) and the real
+# SEESE regression (OCR envelope >27%, letter mask ~22.9%). A candidate or repair mask above its
+# ceiling is rejected, never repaired. Recalibrate only against a broader set of real product
+# photographs before relaxing either value.
+MAX_REFERENCE_REPAIR_COVERAGE = 0.08
+MAX_REFERENCE_CANDIDATE_REGION_COVERAGE = 0.15
+MAX_REFERENCE_CHANGED_COVERAGE = 0.10
 _WORD3 = re.compile(r"[A-Za-z0-9]{3,}")
 
 
@@ -176,7 +185,7 @@ def _sweep_one(job):
                                 int(data["width"][i]), int(data["height"][i]))
         except (IndexError, KeyError, TypeError, ValueError):
             continue
-        if conf < AGREE_CONF or w < 2 or h < 2:
+        if conf < ROTATED_DETECTION_MIN_CONF or w < 2 or h < 2:
             continue
         corners = [(x, y), (x + w, y), (x + w, y + h), (x, y + h)]
         poly = [tuple(c / scale for c in _to_original(c, angle, rotated.size, work_size)) for c in corners]
@@ -184,11 +193,12 @@ def _sweep_one(job):
     return hits
 
 
-def locate_text(image, angles=SWEEP_ANGLES):
+def locate_text(image, angles=SWEEP_ANGLES, *, return_rejected=False):
     """Return [{'poly': 4 corners in image coordinates, 'word', 'conf', 'angle'}] for lettering at any angle.
 
     Standard page segmentation finds horizontal text; a rotation sweep over grey and inverted copies finds stylised
-    or diagonal wordmarks that it misses. A lone weak hit is ignored; weak hits that agree with each other are kept.
+    or diagonal wordmarks that it misses. Detections below SOLO_CONF may authorize masking only when a second
+    independent angle/variant corroborates them at AGREE_CONF or higher. Weaker hits are diagnostics only.
     """
     import os
     from concurrent.futures import ThreadPoolExecutor
@@ -202,20 +212,26 @@ def locate_text(image, angles=SWEEP_ANGLES):
     jobs = [(name, variant, angle, scale, work.size) for name, variant in variants.items() for angle in angles]
     with ThreadPoolExecutor(max_workers=max(1, min(4, os.cpu_count() or 1))) as pool:
         hits = [h for part in pool.map(_sweep_one, jobs) for h in part]
-    kept = []
+    kept, rejected = [], []
     for i, hit in enumerate(hits):
         if hit["conf"] >= SOLO_CONF:
             kept.append(hit)
-        elif any(j != i and _overlap(hit["poly"], other["poly"]) >= 0.3
-                 and (other["angle"], other["variant"]) != (hit["angle"], hit["variant"])
-                 for j, other in enumerate(hits)):
+        elif hit["conf"] >= AGREE_CONF and any(
+            j != i and other["conf"] >= AGREE_CONF
+            and _overlap(hit["poly"], other["poly"]) >= 0.3
+            and (other["angle"], other["variant"]) != (hit["angle"], hit["variant"])
+            for j, other in enumerate(hits)
+        ):
             kept.append(hit)
-    return kept
+        else:
+            # Weak detections are retained as diagnostics, but can never authorize a destructive mask.
+            rejected.append(hit)
+    return (kept, rejected) if return_rejected else kept
 
 
 LETTER_MIN_PIXELS, LETTER_EXPLAINED_SHARE, LETTER_LINE_TOLERANCE, LETTER_DIFF = 30, 0.6, 40, 40
 LETTER_STRONG_DIFF = 90
-REFERENCE_PREPARATION_VERSION = 3
+REFERENCE_PREPARATION_VERSION = 4
 
 
 def _dominant_colour(pixels):
@@ -345,8 +361,8 @@ def _tight_text_region(polygons, width, height):
     return region
 
 
-def _directional_surface_repair(image, polygons):
-    """Remove text by rebuilding its surface from neighbouring pixels; return None if unsafe.
+def _directional_surface_repair(image, polygons, text_mask=None):
+    """Repair only a verified glyph mask; return (image, exact changed-pixel support) or (None, None).
 
     All location, orientation and contrast thresholds derive from the current image and OCR geometry.
     There are no brand names, product-specific colours or fixed image coordinates in this algorithm.
@@ -356,9 +372,14 @@ def _directional_surface_repair(image, polygons):
 
     rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
     height, width = rgb.shape[:2]
-    region = _tight_text_region(polygons, width, height)
+    if text_mask is None:
+        text_mask, _surface = _letter_mask(image, polygons)
+    if text_mask is None:
+        return None, None
+    region = np.asarray(text_mask.convert("L"), dtype=np.uint8)
+    region = np.where(region > 0, 255, 0).astype(np.uint8)
     if cv2.countNonZero(region) < 30:
-        return None
+        return None, None
 
     lab = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
     sigma = max(1.5, min(width, height) / 360.0)
@@ -366,19 +387,19 @@ def _directional_surface_repair(image, polygons):
     contrast = np.linalg.norm(lab - local_surface, axis=2)
     values = contrast[region > 0]
     if values.size < 30:
-        return None
+        return None, None
     threshold = max(10.0, float(np.percentile(values, 60)))
     ink = ((contrast >= threshold) & (region > 0)).astype(np.uint8) * 255
     ink = cv2.morphologyEx(ink, cv2.MORPH_CLOSE,
                            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)), iterations=1)
     ys, xs = np.where(ink > 0)
     if len(xs) < 30:
-        return None
+        return None, None
 
     coords = np.column_stack((xs, ys)).astype(np.float32)
     mean, eigenvectors = cv2.PCACompute(coords, mean=None, maxComponents=2)
     if eigenvectors is None or len(eigenvectors) == 0:
-        return None
+        return None, None
     direction = eigenvectors[0]
     angle = float(np.degrees(np.arctan2(direction[1], direction[0])))
     if angle > 90:
@@ -388,7 +409,7 @@ def _directional_surface_repair(image, polygons):
     covariance = np.cov(coords.T)
     eigenvalues = np.linalg.eigvalsh(covariance)
     if eigenvalues[-1] <= 1.0 or eigenvalues[-1] / max(1.0, eigenvalues[0]) < 1.15:
-        return None
+        return None, None
 
     center = (float(mean[0, 0]), float(mean[0, 1]))
     matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
@@ -402,11 +423,12 @@ def _directional_surface_repair(image, polygons):
     margin = max(2, int(round(max(width, height) / 1400.0 * 6.0)))
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * margin + 1, 2 * margin + 1))
     expanded = cv2.dilate(rotated_ink, kernel, iterations=1)
-    use_word_band = min(abs(angle), abs(abs(angle) - 90.0)) <= 15.0
-    fill_shape = cv2.dilate(rotated_region, kernel, iterations=1) if use_word_band else expanded
+    # Never reconstruct the full OCR rectangle. It can include product bodies, accessories and controls.
+    # Only the verified ink mask plus a small repair margin is eligible for modification.
+    fill_shape = expanded
     rows = np.flatnonzero(np.any(fill_shape > 0, axis=1))
     if rows.size < 2:
-        return None
+        return None, None
 
     detail_source = rotated[:, :, 0].astype(np.float32)
     detail = np.abs(detail_source - cv2.GaussianBlur(detail_source, (0, 0), sigmaX=1.5, sigmaY=1.5))
@@ -426,7 +448,7 @@ def _directional_surface_repair(image, polygons):
         # For textured surfaces, use a narrow glyph mask and inpainting, never a flat rectangle.
         inpaint_mask = cv2.dilate(ink, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)), iterations=1)
         repaired = cv2.inpaint(cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR), inpaint_mask, 3.0, cv2.INPAINT_TELEA)
-        return Image.fromarray(cv2.cvtColor(repaired, cv2.COLOR_BGR2RGB), mode="RGB")
+        return Image.fromarray(cv2.cvtColor(repaired, cv2.COLOR_BGR2RGB), mode="RGB"), inpaint_mask
 
     changed = rotated.copy()
     band = np.zeros((height, width), dtype=np.uint8)
@@ -449,53 +471,111 @@ def _directional_surface_repair(image, polygons):
 
     restored = cv2.warpAffine(changed, inverse, (width, height), flags=cv2.INTER_CUBIC,
                               borderMode=cv2.BORDER_REFLECT_101)
-    blend = cv2.warpAffine(cv2.GaussianBlur(band, (0, 0), sigmaX=1.5, sigmaY=1.5), inverse,
-                           (width, height), flags=cv2.INTER_LINEAR,
-                           borderMode=cv2.BORDER_CONSTANT, borderValue=0).astype(np.float32) / 255.0
+    blend_u8 = cv2.warpAffine(cv2.GaussianBlur(band, (0, 0), sigmaX=1.5, sigmaY=1.5), inverse,
+                              (width, height), flags=cv2.INTER_LINEAR,
+                              borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+    blend = blend_u8.astype(np.float32) / 255.0
     result = (rgb.astype(np.float32) * (1.0 - blend[:, :, None]) +
               restored.astype(np.float32) * blend[:, :, None]).clip(0, 255).astype(np.uint8)
-    return Image.fromarray(result, mode="RGB")
+    return Image.fromarray(result, mode="RGB"), blend_u8
 
 
 def _fill_clusters(image, clusters):
-    """Remove text by reconstructing surface texture and lighting, not by painting a solid colour."""
+    """Remove only coherent, small text masks; reject any region too large to trust."""
+    import numpy as np
     cleaned, accepted, rejected = image.copy(), [], 0
+    height, width = image.height, image.width
+    affected = np.zeros((height, width), dtype=np.uint8)
+    cluster_reports = []
     for cluster in clusters:
-        repaired = _directional_surface_repair(cleaned, cluster)
+        candidate_region = _tight_text_region(cluster, width, height)
+        candidate_coverage = float(np.count_nonzero(candidate_region)) / float(width * height)
+        if candidate_coverage > MAX_REFERENCE_CANDIDATE_REGION_COVERAGE:
+            rejected += 1
+            cluster_reports.append({"status": "REJECTED", "reason": "OCR_REGION_TOO_LARGE",
+                                    "candidate_region_ratio": candidate_coverage,
+                                    "mask_coverage_ratio": None, "changed_area_ratio": None})
+            continue
+
+        text_mask, _surface = _letter_mask(cleaned, cluster)
+        if text_mask is None:
+            rejected += 1
+            cluster_reports.append({"status": "REJECTED", "reason": "LETTER_MASK_NOT_CONFIDENT",
+                                    "candidate_region_ratio": candidate_coverage,
+                                    "mask_coverage_ratio": 0.0, "changed_area_ratio": None})
+            continue
+        mask_coverage = float(np.count_nonzero(np.asarray(text_mask))) / float(width * height)
+        if mask_coverage > MAX_REFERENCE_REPAIR_COVERAGE:
+            rejected += 1
+            cluster_reports.append({"status": "REJECTED", "reason": "LETTER_MASK_TOO_LARGE",
+                                    "candidate_region_ratio": candidate_coverage,
+                                    "mask_coverage_ratio": mask_coverage, "changed_area_ratio": None})
+            continue
+
+        repaired, repair_mask = _directional_surface_repair(cleaned, cluster, text_mask=text_mask)
         if repaired is None:
             rejected += 1
+            cluster_reports.append({"status": "REJECTED", "reason": "SURFACE_REPAIR_UNSAFE",
+                                    "candidate_region_ratio": candidate_coverage,
+                                    "mask_coverage_ratio": mask_coverage, "changed_area_ratio": None})
+            continue
+        before = np.asarray(cleaned.convert("RGB"), dtype=np.int16)
+        after = np.asarray(repaired.convert("RGB"), dtype=np.int16)
+        absolute_delta = np.abs(before - after)
+        changed = np.max(absolute_delta, axis=2) > 8
+        changed_ratio = float(np.count_nonzero(changed)) / float(width * height)
+        if changed_ratio > MAX_REFERENCE_CHANGED_COVERAGE:
+            rejected += 1
+            cluster_reports.append({"status": "REJECTED", "reason": "CHANGED_AREA_TOO_LARGE",
+                                    "candidate_region_ratio": candidate_coverage,
+                                    "mask_coverage_ratio": mask_coverage,
+                                    "changed_area_ratio": changed_ratio})
+            continue
+        # The repair function must not alter a pixel outside the exact support of its own blend/inpaint mask.
+        support = np.asarray(repair_mask) > 0
+        outside_delta = absolute_delta[~support]
+        outside_mae = float(outside_delta.mean()) if outside_delta.size else 0.0
+        outside_max_delta = int(outside_delta.max()) if outside_delta.size else 0
+        # Pixels outside the exact repair support must remain bit-identical. This is a code invariant,
+        # not a similarity threshold guessed from one photo; any drift rejects the candidate.
+        outside_changes = int(np.count_nonzero(np.any(absolute_delta > 0, axis=2) & ~support))
+        if outside_changes or outside_mae > 0.0 or outside_max_delta > 0:
+            rejected += 1
+            cluster_reports.append({"status": "REJECTED", "reason": "CHANGES_OUTSIDE_REPAIR_MASK",
+                                    "candidate_region_ratio": candidate_coverage,
+                                    "mask_coverage_ratio": mask_coverage,
+                                    "changed_area_ratio": changed_ratio,
+                                    "outside_changed_pixels": outside_changes,
+                                    "outside_mae": outside_mae,
+                                    "outside_max_abs_delta": outside_max_delta})
             continue
         cleaned = repaired
         accepted.extend(cluster)
-    return cleaned, accepted, rejected
+        affected = np.maximum(affected, np.asarray(repair_mask, dtype=np.uint8))
+        cluster_reports.append({"status": "MASKED", "reason": None,
+                                "candidate_region_ratio": candidate_coverage,
+                                "mask_coverage_ratio": mask_coverage,
+                                "changed_area_ratio": changed_ratio,
+                                "outside_changed_pixels": 0,
+                                "outside_mae": outside_mae,
+                                "outside_max_abs_delta": 0})
+    return cleaned, accepted, rejected, affected, cluster_reports
 
 
 def _merge_polygons(found):
-    """Merge overlapping OCR detections of the same wordmark using image-space geometry only."""
+    """Group detections only when the original polygons overlap; never merge their expanded bounding boxes.
+
+    The strongest detection is the fixed group anchor. This prevents a chain of unrelated OCR boxes from
+    growing an ever-larger union rectangle and swallowing product details.
+    """
     groups = []
     for hit in sorted(found, key=lambda h: -h["conf"]):
         for group in groups:
-            if any(_overlap(hit["poly"], existing["poly"]) >= 0.3 for existing in group):
+            if _overlap(hit["poly"], group[0]["poly"]) >= 0.3:
                 group.append(hit)
                 break
         else:
             groups.append([hit])
-    changed = True
-    while changed:
-        changed = False
-        for i in range(len(groups)):
-            if changed:
-                break
-            box_i = _bbox([point for hit in groups[i] for point in hit["poly"]])
-            poly_i = [(box_i[0], box_i[1]), (box_i[2], box_i[1]), (box_i[2], box_i[3]), (box_i[0], box_i[3])]
-            for j in range(i + 1, len(groups)):
-                box_j = _bbox([point for hit in groups[j] for point in hit["poly"]])
-                poly_j = [(box_j[0], box_j[1]), (box_j[2], box_j[1]), (box_j[2], box_j[3]), (box_j[0], box_j[3])]
-                if _overlap(poly_i, poly_j) >= 0.3:
-                    groups[i].extend(groups[j])
-                    del groups[j]
-                    changed = True
-                    break
     return [[h["poly"] for h in group] for group in groups]
 
 
@@ -510,8 +590,8 @@ def _sha(path):
 def prepare_unbranded_reference(source: str | Path, destination: str | Path):
     """Mask lettering in the image-provider input; the original stays the identity reference for QA.
 
-    Returns a report. 'NO_CONFIDENT_TEXT_FOUND' is NOT proof that the image is clean: the caller must confirm the
-    prepared image independently (visual Judge) before it is sent to a generator.
+    Returns a report. Weak OCR detections never enter a repair mask; an ambiguous or oversized region fails closed.
+    'NO_CONFIDENT_TEXT_FOUND' is NOT proof that the image is clean: the caller must confirm it independently.
     """
     import json
     source, destination = Path(source), Path(destination)
@@ -524,11 +604,14 @@ def prepare_unbranded_reference(source: str | Path, destination: str | Path):
                     and cached.get("prepared_sha256") == _sha(destination)
                     and cached.get("sweep") == len(SWEEP_ANGLES)
                     and cached.get("algorithm_version") == REFERENCE_PREPARATION_VERSION
-                    and cached.get("status") in {
-                        "TEXT_REGIONS_MASKED", "NO_CONFIDENT_TEXT_FOUND", "MASK_INCOMPLETE"}):
+                    and cached.get("status") in {"TEXT_REGIONS_MASKED", "NO_CONFIDENT_TEXT_FOUND"}):
                 return {**cached, "path": str(destination), "cached": True}
     except (OSError, ValueError):
         pass
+    # A stale cache restore or a candidate from an earlier attempt must never survive a
+    # failed preparation under a filename that claims the image is unbranded.
+    destination.unlink(missing_ok=True)
+    sidecar.unlink(missing_ok=True)
     try:
         import pytesseract  # noqa: F401
         from PIL import Image as _Image  # noqa: F401
@@ -537,7 +620,7 @@ def prepare_unbranded_reference(source: str | Path, destination: str | Path):
     try:
         with Image.open(source) as opened:
             image = opened.convert("RGB")
-        found = list(locate_text(image))
+        found, uncertain = locate_text(image, return_rejected=True)
         # Horizontal pass keeps the previous behaviour for ordinary captions.
         for psm in (3, 11, 12):
             data = pytesseract.image_to_data(image, config=f"--psm {psm}", output_type=pytesseract.Output.DICT)
@@ -554,29 +637,95 @@ def prepare_unbranded_reference(source: str | Path, destination: str | Path):
                                   "conf": conf, "angle": 0, "variant": f"psm{psm}"})
         destination.parent.mkdir(parents=True, exist_ok=True)
         words = sorted({str(f["word"]) for f in found})[:12]
-        if not found:
+        uncertain_words = sorted({str(f["word"]) for f in uncertain})[:20]
+        if not found and uncertain:
+            # Do not turn low-confidence rotated OCR noise into a large destructive mask. This photo
+            # contains nine such hits; leave the original pixels untouched and require a new clean reference.
+            uncertain_region = _tight_text_region([f["poly"] for f in uncertain], *image.size)
+            report = {
+                "status": "REFERENCE_CLEANING_FAILED",
+                "failure_reason": "AMBIGUOUS_LOW_CONFIDENCE_OCR",
+                "masked_regions": 0,
+                "rejected_regions": 0,
+                "residual_regions": 0,
+                "uncertain_detections": [
+                    {"word": str(f["word"]), "confidence": round(float(f["conf"]), 1),
+                     "angle": int(f["angle"]), "variant": str(f["variant"])}
+                    for f in uncertain[:20]
+                ],
+                "uncertain_region_ratio": float(__import__("numpy").count_nonzero(uncertain_region)) / float(image.width * image.height),
+                "detected_words": uncertain_words,
+            }
+        elif not found:
             image.save(destination, format="PNG")
             report = {"status": "NO_CONFIDENT_TEXT_FOUND", "masked_regions": 0, "residual_regions": 0, "detected_words": []}
         else:
             clusters = _merge_polygons(found)
-            cleaned, polys, rejected = _fill_clusters(image, clusters)
-            cleaned.save(destination, format="PNG")
+            cleaned, polys, rejected, affected_mask, cluster_reports = _fill_clusters(image, clusters)
+            import numpy as np
+            original_pixels = np.asarray(image.convert("RGB"), dtype=np.int16)
+            cleaned_pixels = np.asarray(cleaned.convert("RGB"), dtype=np.int16)
+            changed = np.max(np.abs(original_pixels - cleaned_pixels), axis=2) > 8
+            changed_ratio = float(np.count_nonzero(changed)) / float(image.width * image.height)
+            support = np.asarray(affected_mask) > 0
+            outside_changed_pixels = int(np.count_nonzero(changed & ~support))
+            affected_ratio = float(np.count_nonzero(support)) / float(image.width * image.height)
+            outside = ~support
+            outside_mae = (float(np.abs(original_pixels - cleaned_pixels)[outside].mean())
+                           if np.any(outside) else 0.0)
+            outside_similarity = max(0.0, 1.0 - outside_mae / 255.0)
             seen_angles = {h["angle"] for h in found}
             recheck = sorted({0, *seen_angles, *(a + d for a in seen_angles for d in (-5, 5))})
-            leftovers = locate_text(cleaned, angles=[a for a in recheck if -80 <= a <= 80])
+            leftovers, weak_leftovers = locate_text(
+                cleaned, angles=[a for a in recheck if -80 <= a <= 80], return_rejected=True)
             # Only lettering that survives where we masked counts as incomplete; stray hits elsewhere are noise
             # that the independent visual check of the prepared image still gets to judge.
             residual = sum(1 for h in leftovers if any(_overlap(h["poly"], poly) >= 0.3 for poly in polys))
             masked = len(clusters) - rejected
-            report = {"status": ("MASK_INCOMPLETE" if residual or rejected else
-                                 "TEXT_REGIONS_MASKED" if masked else "NO_CONFIDENT_TEXT_FOUND"),
-                      "masked_regions": masked, "rejected_regions": rejected, "residual_regions": residual,
+            if rejected or residual or weak_leftovers or changed_ratio > MAX_REFERENCE_CHANGED_COVERAGE or outside_changed_pixels:
+                failure_reason = (
+                    "UNSAFE_OR_REJECTED_MASK" if rejected else
+                    "RESIDUAL_TEXT_AFTER_MASKING" if residual or weak_leftovers else
+                    "CHANGED_AREA_TOO_LARGE" if changed_ratio > MAX_REFERENCE_CHANGED_COVERAGE else
+                    "CHANGES_OUTSIDE_REPAIR_MASK"
+                )
+                # Never publish either a damaged candidate or the branded original under an
+                # "unbranded" filename. The source file remains untouched at its source path.
+                report = {"status": "REFERENCE_CLEANING_FAILED", "failure_reason": failure_reason,
+                          "masked_regions": 0, "rejected_regions": rejected, "residual_regions": residual,
+                          "uncertain_detections": len(weak_leftovers),
+                          "candidate_mask_coverage_ratio": affected_ratio,
+                          "candidate_changed_area_ratio": changed_ratio,
+                          "outside_changed_pixels": outside_changed_pixels,
+                          "outside_mask_similarity": outside_similarity,
+                          "cluster_reports": cluster_reports,
+                          "detected_words": words}
+            else:
+                cleaned.save(destination, format="PNG")
+                report = {"status": "TEXT_REGIONS_MASKED", "masked_regions": masked,
+                          "rejected_regions": rejected, "residual_regions": residual,
+                          "uncertain_detections": 0,
+                          "candidate_mask_coverage_ratio": affected_ratio,
+                          "candidate_changed_area_ratio": changed_ratio,
+                          "outside_changed_pixels": outside_changed_pixels,
+                          "outside_mask_similarity": outside_similarity,
+                          "cluster_reports": cluster_reports,
                       "unrelated_hits": len(leftovers) - residual,
-                      "detected_words": words}
-        report.update({"path": str(destination), "source_sha256": source_sha, "prepared_sha256": _sha(destination),
+                          "detected_words": words}
+        failed = report.get("status") == "REFERENCE_CLEANING_FAILED"
+        if failed:
+            destination.unlink(missing_ok=True)
+            prepared_path = None
+            prepared_sha = None
+        else:
+            prepared_path = str(destination)
+            prepared_sha = _sha(destination)
+        report.update({"path": prepared_path, "source_sha256": source_sha, "prepared_sha256": prepared_sha,
                        "sweep": len(SWEEP_ANGLES), "algorithm_version": REFERENCE_PREPARATION_VERSION, "cached": False})
         sidecar.write_text(json.dumps(report, ensure_ascii=False, indent=1), encoding="utf-8")
         return report
     except Exception as exc:
+        destination.unlink(missing_ok=True)
+        sidecar.unlink(missing_ok=True)
         kind = "OCR_UNAVAILABLE" if "tesseract" in str(exc).lower() else "OCR_FAILED"
-        return {"path": str(source), "status": kind, "masked_regions": 0, "error_type": type(exc).__name__}
+        return {"path": None, "status": kind, "masked_regions": 0, "error_type": type(exc).__name__}

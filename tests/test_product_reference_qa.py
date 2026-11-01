@@ -8,8 +8,10 @@ from PIL import Image, ImageDraw
 
 from cme.adapters.openrouter import make_openrouter_judge
 from cme.offer import load_offer
+from cme.branding import NO_BRANDING
 from cme.qa import (
     PRODUCT_IDENTITY_CHECK_ID,
+    SYSTEM_NO_TEXT_ID,
     CheckResult,
     make_qa_checks,
     validate_product_references,
@@ -114,6 +116,29 @@ class ProductIdentityJudgeTests(unittest.TestCase):
             identity = next(x for x in qa(generated) if x.check_id == PRODUCT_IDENTITY_CHECK_ID)
             self.assertEqual(identity.status, "FAIL")
             self.assertTrue(identity.required)
+
+
+    def test_no_branding_requires_a_confirmed_visual_judge_when_ocr_is_empty(self):
+        with tempfile.TemporaryDirectory() as d:
+            generated = Path(d) / "generated.png"
+            reference = Path(d) / "target.png"
+            generated.write_bytes(png_bytes())
+            varied_png(reference)
+            atom = A("product_main", "Target product is clear", kind="product")
+
+            def unavailable(_path, _atoms, _refs):
+                raise RuntimeError("HTTP 429 rate limited")
+
+            qa = make_qa_checks(
+                [atom], 1, judge_fn=unavailable, ocr=lambda _p: "", product_references=[reference],
+                branding_policy=NO_BRANDING,
+            )
+            checks = {row.check_id: row for row in qa(generated)}
+            self.assertEqual(checks["no_text"].status, "NOT_RUN")
+            self.assertFalse(checks["no_text"].required)
+            self.assertEqual(checks[SYSTEM_NO_TEXT_ID].status, "NOT_RUN")
+            self.assertTrue(checks[SYSTEM_NO_TEXT_ID].required)
+            self.assertIn("429", checks[SYSTEM_NO_TEXT_ID].detail)
 
     def test_generation_receipt_records_exact_reference_roles_order_and_hashes(self):
         offer = load_offer(EX)

@@ -26,7 +26,7 @@ from .offer import OfferError, load_offer
 from .providers import CallLog, InfraError, ProviderCallError, ProviderPolicyError
 from .qa import brand_tokens, make_qa_checks, validate_product_references
 from .registry import SettingsError, load_catalog, load_settings, make_brain_call, make_image_provider, make_judge
-from .run import AttemptLimit, produce_shot
+from .run import AttemptLimit, ReferenceCleaningError, produce_shot
 from .state import StateMismatch, load_state, new_run, save_state
 from .vertical import GateError, check_vertical, load_vertical
 
@@ -452,6 +452,11 @@ def main(argv=None, ctx=None) -> int:
     except InfraError as e:
         message=f"Сбой инфраструктуры (квота, лимит, сеть): {e}\nЗапись попытки сохранена в {out}. Повторите позже или объявите fallback."
         print(message); write_run_result(out,args.command,2,"INFRASTRUCTURE_ERROR",message); return 2
+    except ReferenceCleaningError as e:
+        message = f"REFERENCE_CLEANING_FAILED: {e}"
+        print(message)
+        write_run_result(out, args.command, 3, "REFERENCE_CLEANING_FAILED", message)
+        return 3
     except (GateError, BudgetError, AttemptLimit, ProviderPolicyError, StateMismatch, OfferError) as e:
         message=f"Остановлено до платного вызова или политикой: {e}"; print(message); write_run_result(out,args.command,3,"CONTRACT_OR_PREFLIGHT_BLOCKED",message); return 3
     except TransferRejected as e:

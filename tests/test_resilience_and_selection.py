@@ -16,7 +16,7 @@ from cme.radar.select import (
     SourceThreshold, block_reason, effective_source_classification, rank_transfer_candidates,
     select_transfer_candidate, weak_source_reasons,
 )
-from cme.registry import AdapterSpec, Settings, SettingsError, load_settings, make_brain_call
+from cme.registry import AdapterSpec, Settings, SettingsError, load_settings, make_brain_call, make_judge
 from tests.test_brand_selection_audit import cand
 from tests.test_source_loop import _FAKE_RADAR_APP, _embedded_all_stage_script
 
@@ -33,6 +33,7 @@ def catalog():
         "b": AdapterSpec("b", "brain", "openrouter", "vendor/primary:free", "free", {}, verified=True),
         "b2": AdapterSpec("b2", "brain", "openrouter", "vendor/reserve:free", "free", {}, verified=True),
         "j": AdapterSpec("j", "judge", "openrouter", "vendor/judge:free", "free", {}, verified=True),
+        "j2": AdapterSpec("j2", "judge", "openrouter", "vendor/judge-reserve:free", "free", {}, verified=False),
     }
 
 
@@ -149,6 +150,30 @@ class TransientRetryTests(unittest.TestCase):
             self.assertTrue(call.info["semantic_retry_route"])
             self.assertEqual(call.info["call_status"], "ERROR")
 
+    def test_judge_429_uses_declared_vision_reserve_and_keeps_provenance(self):
+        sent = []
+
+        def fake_build(spec, *args, **kwargs):
+            def adapter(*call_args):
+                sent.append(spec.model_id)
+                if spec.name == "j":
+                    raise InfraError("HTTP 429 rate limited")
+                return {"system_no_text_policy": {"pass": True, "evidence": "no visible lettering"}}, {
+                    "model": spec.model_id, "cost": 0,
+                }
+            return adapter
+
+        with tempfile.TemporaryDirectory() as d, patch("cme.registry.build_adapter", side_effect=fake_build):
+            log = CallLog(Path(d) / "judge-calls.jsonl")
+            settings = Settings(judge_adapter="j", judge_fallback_adapter="j2", allow_free=True,
+                                transient_retries=0)
+            judge = make_judge(settings, catalog(), log, "judge-reserve-test")
+            result = judge("unused-image-path", [])
+            self.assertEqual(result["system_no_text_policy"]["pass"], True)
+            self.assertEqual(sent, ["vendor/judge:free", "vendor/judge-reserve:free"])
+            self.assertTrue(judge.info["fallback_used"])
+            self.assertEqual(judge.info["model_id"], "vendor/judge-reserve:free")
+
     def test_no_reserve_declared_means_no_silent_switch(self):
         sent = []
 
@@ -192,7 +217,18 @@ class TransientRetryTests(unittest.TestCase):
         settings = load_settings(ROOT / "settings.example.json")
         self.assertFalse(SourceThreshold.from_settings(settings).active)
         self.assertEqual((settings.brain_fallback_adapter, settings.judge_fallback_adapter),
-                         ("openrouter_free_brain_reserve", ""))
+                         ("openrouter_free_brain_reserve", "openrouter_free_judge_reserve"))
+        adapters = {item["name"]: item for item in json.loads((ROOT / "adapters.json").read_text())["adapters"]}
+        reserve = adapters["openrouter_free_judge_reserve"]
+        self.assertEqual(reserve["kind"], "judge")
+        self.assertEqual(reserve["model_id"], "dots-studio/dots-3-note-preview:free")
+        self.assertFalse(reserve["verified"])
+        self.assertEqual(reserve["params"]["response_format_mode"], "json_object")
+        self.assertNotIn(reserve["model_id"], {
+            adapters["openrouter_free_judge"]["model_id"],
+            adapters["openrouter_free_brain"]["model_id"],
+            adapters["openrouter_free_analyst"]["model_id"],
+        }, "Judge reserve must remain independent from primary Judge, Brain and Analyst models")
 
 
 class SourceThresholdTests(unittest.TestCase):

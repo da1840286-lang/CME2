@@ -12,7 +12,7 @@ from unittest.mock import patch
 from PIL import Image
 
 from cme.brain import request_transfer_fit
-from cme.branding import NO_BRANDING, SWEEP_ANGLES, reference_lettering_rule
+from cme.branding import NO_BRANDING, REFERENCE_PREPARATION_VERSION, SWEEP_ANGLES, reference_lettering_rule
 from cme.offer import load_offer
 from cme.qa import CheckResult
 from cme.radar.find import _query_offer_conflict
@@ -269,7 +269,7 @@ class ReferenceVerdictCacheTests(unittest.TestCase):
             Image.new("RGB", (64, 64), (40, 70, 100)).save(destination)
             report = {"path": str(destination), "status": "TEXT_REGIONS_MASKED", "masked_regions": 1,
                       "residual_regions": 0, "detected_words": ["x"], "sweep": len(SWEEP_ANGLES), "cached": False,
-                      "algorithm_version": 3,
+                      "algorithm_version": REFERENCE_PREPARATION_VERSION,
                       "source_sha256": hashlib.sha256(Path(source).read_bytes()).hexdigest(),
                       "prepared_sha256": hashlib.sha256(destination.read_bytes()).hexdigest()}
             sidecar.write_text(json.dumps(report), encoding="utf-8")

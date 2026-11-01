@@ -24,6 +24,10 @@ class AttemptLimit(Exception):
     pass
 
 
+class ReferenceCleaningError(GateError):
+    """The no-branding target reference could not be prepared and independently confirmed."""
+
+
 def _blocked(state, out, shot, attempt, status, detail):
     record_attempt(state, shot, "", status, detail)
     _write(out, f"blocked_{state.run_id}_s{shot:02d}_a{attempt:02d}",
@@ -134,6 +138,14 @@ def _preparation_record(item: dict) -> dict:
     record = {"status": item.get("status"), "masked_regions": item.get("masked_regions", 0),
               "rejected_regions": item.get("rejected_regions", 0), "residual_regions": item.get("residual_regions", 0),
               "detected_words": list(item.get("detected_words") or [])[:12],
+              "failure_reason": item.get("failure_reason"),
+              "uncertain_detections": item.get("uncertain_detections", 0),
+              "uncertain_region_ratio": item.get("uncertain_region_ratio"),
+              "candidate_mask_coverage_ratio": item.get("candidate_mask_coverage_ratio"),
+              "candidate_changed_area_ratio": item.get("candidate_changed_area_ratio"),
+              "outside_changed_pixels": item.get("outside_changed_pixels"),
+              "outside_mask_similarity": item.get("outside_mask_similarity"),
+              "cluster_reports": list(item.get("cluster_reports") or [])[:12],
               "source_sha256": item.get("source_sha256"), "prepared_sha256": item.get("prepared_sha256"),
               "cached": bool(item.get("cached"))}
     if item.get("verification"):
@@ -209,14 +221,33 @@ def produce_shot(*, offer, atoms, shot, contract_id, state, out_dir, image_provi
                     f"{report.get('status')} ({report.get('error_type', 'unknown error')}); "
                     "install a working Tesseract OCR engine before generation"
                 )
-                _blocked(state, out, shot, attempt, "BLOCKED_BRANDING_REFERENCE", detail)
-                raise GateError([detail])
-            if report.get("status") == "MASK_INCOMPLETE":
-                detail = (f"no_branding could not remove lettering from target reference {Path(source).name}: "
-                          f"{report.get('residual_regions', 0)} region(s) still read as text after masking "
-                          f"({', '.join(report.get('detected_words', [])[:6])}); supply a clean product photo")
-                _blocked(state, out, shot, attempt, "BLOCKED_BRANDING_REFERENCE", detail)
-                raise GateError([detail])
+                prepared_path = Path(report.get("path") or destination)
+                prepared_path.unlink(missing_ok=True)
+                prepared_path.with_suffix(".prep.json").unlink(missing_ok=True)
+                report["path"] = None
+                report["prepared_sha256"] = None
+                _blocked(state, out, shot, attempt, "REFERENCE_CLEANING_FAILED", detail)
+                raise ReferenceCleaningError([detail])
+            if report.get("status") in {"MASK_INCOMPLETE", "REFERENCE_CLEANING_FAILED"}:
+                if report.get("status") == "MASK_INCOMPLETE":
+                    reason = (f"{report.get('residual_regions', 0)} region(s) still read as text after masking")
+                else:
+                    reason = (
+                        f"reason={report.get('failure_reason') or report.get('status')}; "
+                        f"residual={report.get('residual_regions', 0)}; "
+                        f"mask_coverage={report.get('candidate_mask_coverage_ratio')}; "
+                        f"changed_area={report.get('candidate_changed_area_ratio')}"
+                    )
+                detail = (f"no_branding could not safely prepare target reference {Path(source).name}: {reason}; "
+                          f"detected={', '.join(report.get('detected_words', [])[:8])}; "
+                          "the original reference was retained unchanged. Supply a clean product photo or review the OCR result.")
+                prepared_path = Path(report.get("path") or destination)
+                prepared_path.unlink(missing_ok=True)
+                prepared_path.with_suffix(".prep.json").unlink(missing_ok=True)
+                report["path"] = None
+                report["prepared_sha256"] = None
+                _blocked(state, out, shot, attempt, "REFERENCE_CLEANING_FAILED", detail)
+                raise ReferenceCleaningError([detail])
             # An empty OCR result is not proof of a clean image: only an independent visual check confirms it.
             verdict = report.get("verification") or check_reference_unbranded(report["path"], reference_judge, shot)
             if hasattr(verdict, "status"):
@@ -228,8 +259,15 @@ def produce_shot(*, offer, atoms, shot, contract_id, state, out_dir, image_provi
                           f"{report['verification']['evidence']} (preparation: {report.get('status')}, "
                           f"{report.get('masked_regions', 0)} region(s) masked). Supply a clean product photo "
                           "or use target_brand_allowed.")
-                _blocked(state, out, shot, attempt, "BLOCKED_BRANDING_REFERENCE", detail)
-                raise GateError([detail])
+                # A failed visual verification must not leave a candidate file under the
+                # target_product_unbranded_* name. The original lives only at its source path.
+                prepared_path = Path(report.get("path") or destination)
+                prepared_path.unlink(missing_ok=True)
+                prepared_path.with_suffix(".prep.json").unlink(missing_ok=True)
+                report["path"] = None
+                report["prepared_sha256"] = None
+                _blocked(state, out, shot, attempt, "REFERENCE_CLEANING_FAILED", detail)
+                raise ReferenceCleaningError([detail])
             if report["verification"]["status"] == "PASS" and Path(report["path"]).with_suffix(".prep.json").is_file():
                 sidecar = Path(report["path"]).with_suffix(".prep.json")
                 try:

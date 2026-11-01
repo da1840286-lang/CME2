@@ -10,11 +10,12 @@ from unittest.mock import patch
 from PIL import Image, ImageDraw
 from cme.brain import build_request
 from cme.branding import (NO_BRANDING, TARGET_BRAND_ALLOWED, allowed_brand_tokens,
-                          prepare_unbranded_reference, qa_branding_rule, resolve_branding_contract)
+                          prepare_unbranded_reference, qa_branding_rule, resolve_branding_contract,
+                          _fill_clusters, _merge_polygons)
 from cme.compiler import compile_image_prompt
 from cme.offer import load_offer
 from cme.qa import CheckResult, SYSTEM_NO_TEXT_ID, make_qa_checks
-from cme.run import produce_shot
+from cme.run import ReferenceCleaningError, produce_shot
 from cme.state import new_run
 from cme.vertical import GateError
 from tests.helpers import A, png_bytes
@@ -157,6 +158,109 @@ class CampaignBrandingPolicyTests(unittest.TestCase):
             self.assertLess(float(error[130:225, 90:535].mean()), 3.0,
                             "restoration must preserve gradual surface shading rather than create a patch")
 
+    @unittest.skipUnless(shutil.which("tesseract"), "tesseract not installed")
+    def test_seese_real_reference_fails_closed_without_publishing_original_as_unbranded(self):
+        source = ROOT / "tests" / "fixtures" / "seese_product_reference.jpg"
+        with tempfile.TemporaryDirectory() as d:
+            destination = Path(d) / "out" / "target_product_unbranded_01.png"
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            # Simulate a stale cache restore from an older version: it must be removed before a failed retry.
+            destination.write_bytes(png_bytes())
+            destination.with_suffix(".prep.json").write_text(
+                json.dumps({"status": "MASK_INCOMPLETE", "algorithm_version": 2}), encoding="utf-8")
+            source_before = source.read_bytes()
+            report = prepare_unbranded_reference(source, destination)
+            self.assertEqual(report["status"], "REFERENCE_CLEANING_FAILED", report)
+            self.assertEqual(report["failure_reason"], "AMBIGUOUS_LOW_CONFIDENCE_OCR")
+            self.assertGreaterEqual(len(report["uncertain_detections"]), 1)
+            self.assertIsNone(report["path"])
+            self.assertIsNone(report["prepared_sha256"])
+            self.assertFalse(destination.exists(), "failed preparation must not publish an image as unbranded")
+            sidecar = destination.with_suffix(".prep.json")
+            self.assertTrue(sidecar.exists(), "diagnostic sidecar may remain without an image payload")
+            sidecar_data = json.loads(sidecar.read_text(encoding="utf-8"))
+            self.assertEqual(sidecar_data["status"], "REFERENCE_CLEANING_FAILED")
+            self.assertIsNone(sidecar_data["path"])
+            self.assertIsNone(sidecar_data["prepared_sha256"])
+            self.assertEqual(source.read_bytes(), source_before, "the original branded source must remain untouched")
+
+    @unittest.skipUnless(shutil.which("tesseract"), "tesseract not installed")
+    def test_seese_real_reference_blocks_frame_before_generator_and_records_distinct_status(self):
+        source = ROOT / "tests" / "fixtures" / "seese_product_reference.jpg"
+        with tempfile.TemporaryDirectory() as d:
+            offer = replace(load_offer(EX), photos=(str(source),), branding_policy=NO_BRANDING)
+            provider_calls = []
+            state = new_run("seese-reference-test")
+            with self.assertRaises(ReferenceCleaningError):
+                produce_shot(
+                    offer=offer,
+                    atoms=[A("product_main", "Cordless pressure washer body is visible", kind="product")],
+                    shot=1,
+                    contract_id="seese-reference-contract",
+                    state=state,
+                    out_dir=Path(d) / "out",
+                    image_provider=lambda prompt, images: (provider_calls.append((prompt, images)), png_bytes())[1],
+                    qa_checks=lambda _p: [CheckResult("file", "PASS", True, "code")],
+                    reference_judge=self._judge(True),
+                )
+            self.assertEqual(provider_calls, [], "the image generator must not receive a damaged or ambiguous reference")
+            self.assertEqual(state.attempts[-1]["status"], "REFERENCE_CLEANING_FAILED")
+            blocked = list((Path(d) / "out" / "receipts").glob("blocked_*.json"))
+            self.assertEqual(len(blocked), 1)
+            self.assertEqual(json.loads(blocked[0].read_text())["overall"], "REFERENCE_CLEANING_FAILED")
+            self.assertFalse((Path(d) / "out" / "reference_inputs" / "target_product_unbranded_01.png").exists())
+
+    def test_failed_reference_judge_removes_candidate_unbranded_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(GateError):
+                self._run(d, None, status="NO_CONFIDENT_TEXT_FOUND")
+            self.assertFalse((Path(d) / "out" / "reference_inputs" / "target_product_unbranded_01.png").exists())
+
+    def test_polygon_groups_do_not_merge_by_their_expanded_union_box(self):
+        def hit(box, word):
+            x0, y0, x1, y1 = box
+            return {"poly": [(x0, y0), (x1, y0), (x1, y1), (x0, y1)],
+                    "word": word, "conf": 90, "angle": 0, "variant": "gray"}
+        # A and B overlap and form one text group. C does not overlap either original polygon by 30%,
+        # but the old expanded union rectangle of A+B overlapped C and incorrectly merged the groups.
+        groups = _merge_polygons([
+            hit((0, 0, 100, 100), "A"),
+            hit((40, 0, 140, 100), "B"),
+            hit((110, 40, 160, 100), "C"),
+        ])
+        self.assertEqual(len(groups), 2)
+
+    def test_reference_repair_rejects_large_regions_and_any_change_outside_support(self):
+        import numpy as np
+
+        image = Image.new("RGB", (100, 100), (40, 70, 100))
+        large_polygon = [[(5, 5), (95, 5), (95, 95), (5, 95)]]
+        unchanged, accepted, rejected, _support, reports = _fill_clusters(image, [large_polygon])
+        self.assertEqual(rejected, 1)
+        self.assertEqual(reports[0]["reason"], "OCR_REGION_TOO_LARGE")
+        self.assertEqual(list(unchanged.getdata()), list(image.getdata()))
+
+        small_polygon = [[(35, 35), (55, 35), (55, 55), (35, 55)]]
+        repair_support = Image.new("L", image.size, 0)
+        ImageDraw.Draw(repair_support).rectangle((42, 42, 47, 47), fill=255)
+        glyph_mask = repair_support
+
+        def letter_mask(_image, _polygons):
+            return glyph_mask, (40, 70, 100)
+
+        def unsafe_repair(source, _polygons, text_mask=None):
+            pixels = np.asarray(source.convert("RGB")).copy()
+            pixels[0, 0] = (255, 0, 0)  # deliberate drift outside the declared repair support
+            return Image.fromarray(pixels), np.asarray(repair_support)
+
+        with patch("cme.branding._letter_mask", side_effect=letter_mask), \
+             patch("cme.branding._directional_surface_repair", side_effect=unsafe_repair):
+            unchanged, accepted, rejected, _support, reports = _fill_clusters(image, [small_polygon])
+        self.assertEqual(rejected, 1)
+        self.assertEqual(reports[0]["reason"], "CHANGES_OUTSIDE_REPAIR_MASK")
+        self.assertEqual(reports[0]["outside_changed_pixels"], 1)
+        self.assertEqual(list(unchanged.getdata()), list(image.getdata()))
+
     def test_multicolour_regions_are_left_alone(self):
         from cme.branding import _letter_mask
         image = Image.new("RGB", (200, 120), (20, 20, 20))
@@ -223,7 +327,7 @@ class CampaignBrandingPolicyTests(unittest.TestCase):
             self.assertIn("LABEL", str(cm.exception))
             blocked = list((Path(d) / "out" / "receipts").glob("blocked_*.json"))
             self.assertEqual(len(blocked), 1)
-            self.assertEqual(json.loads(blocked[0].read_text())["overall"], "BLOCKED_BRANDING_REFERENCE")
+            self.assertEqual(json.loads(blocked[0].read_text())["overall"], "REFERENCE_CLEANING_FAILED")
 
     def test_generation_is_blocked_when_nothing_can_confirm_the_reference(self):
         with tempfile.TemporaryDirectory() as d:
