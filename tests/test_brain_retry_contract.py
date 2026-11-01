@@ -105,7 +105,7 @@ class BrainRetryContractTests(unittest.TestCase):
         self.assertIn("Do not describe the product as merely resting beside", rules)
         self.assertIn("visible contact point linking the action to the change", rules)
 
-    def test_retry_replaces_old_role_ids_and_ignores_system_owned_branding_qa(self):
+    def test_retry_replaces_only_the_structurally_requested_role_and_ignores_other_rewrites(self):
         calls = []
 
         def call(request):
@@ -119,18 +119,13 @@ class BrainRetryContractTests(unittest.TestCase):
         ids = {a.id for a in atoms}
         image_must = [a for a in atoms if a.channel == "image" and a.priority == "MUST"]
         self.assertEqual(len(calls), 2)  # only the genuinely missing mechanism result caused a retry
-        self.assertIn("keep_hook_1", ids)
-        self.assertNotIn("keep_hook_01", ids)
-        self.assertIn("keep_mechanism_1", ids)
-        self.assertNotIn("keep_mechanism_01", ids)
-        self.assertIn("mech_problem_1", ids)
-        self.assertNotIn("mech_problem_01", ids)
-        self.assertIn("mech_intervention_1", ids)
-        self.assertNotIn("mech_intervention_01", ids)
+        self.assertIn("keep_hook_01", ids)
+        self.assertIn("keep_mechanism_01", ids)
+        self.assertIn("mech_problem_01", ids)
+        self.assertIn("mech_intervention_01", ids)
         self.assertIn("mech_result_1", ids)
-        self.assertNotIn("mech_result_01", ids)
-        self.assertIn("comp_1", ids)
-        self.assertNotIn("comp_01", ids)
+        self.assertIn("comp_01", ids)
+        self.assertGreater(len(calls[1]["retry_contract"]["allowed_role"]), 0)
         self.assertFalse(any(a.kind == "qa_check" for a in atoms))
         self.assertLessEqual(len(image_must), 7)
 
@@ -176,15 +171,17 @@ class BrainRetryContractTests(unittest.TestCase):
             source_transfer=source_transfer, decision_out=decision_out, rounds_out=rounds_out,
         )
 
-        self.assertEqual(len(calls), 2, "unfinished composition and incomplete Gate preservation must be retried")
-        self.assertEqual(len(rounds_out), 2)
+        self.assertEqual(len(calls), 4, "composition, hook and transfer-decision repairs are handled as separate bounded units")
+        self.assertEqual(len(rounds_out), 4)
         self.assertTrue(rounds_out[0]["pending"])
         self.assertIn("DEMO_FORM_CONFLICT", json.dumps(rounds_out[0]["pending"]))
         self.assertIn("Gate-preserved source element 'problem'", json.dumps(rounds_out[0]["pending"]))
-        self.assertEqual(rounds_out[1]["pending"], {})
+        self.assertEqual(rounds_out[-1]["pending"], {})
         self.assertEqual(decision_out["abstract_mechanism"], fixture["target_fit_gate"]["abstract_mechanism"])
         self.assertEqual(rounds_out[0]["abstract_mechanism_source"], "target_fit_gate")
         self.assertTrue(rounds_out[0].get("abstract_mechanism_canonicalized"))
+        self.assertEqual(len({row["request_sha256"] for row in rounds_out}), 4)
+        self.assertTrue(rounds_out[1]["ignored_rewrites"])
 
         by_id = {item.id: item for item in atoms}
         for atom_id in ("keep_hook", "keep_mechanism", "mech_problem", "mech_intervention",
@@ -196,7 +193,7 @@ class BrainRetryContractTests(unittest.TestCase):
         )
         self.assertFalse(any(a.id.startswith("keep_intervention") or a.id.startswith("keep_result") for a in atoms))
 
-    def test_retry_replaces_bare_real_run_ids_with_suffixed_replacements(self):
+    def test_retry_adds_required_role_without_renaming_other_accepted_atoms(self):
         fixture_path = Path(__file__).parent / "fixtures" / "brain_failed_run_41252251386.json"
         fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
         source_transfer = build_source_transfer_context({"result": fixture["source_analysis_result"]})
@@ -235,9 +232,13 @@ class BrainRetryContractTests(unittest.TestCase):
         self.assertEqual(len(calls), 2)
         self.assertTrue(rounds[0]["pending"])
         self.assertEqual(rounds[1]["pending"], {})
-        for role in ("keep_hook", "keep_mechanism", "mech_problem", "mech_intervention", "mech_result", "comp"):
-            self.assertIn(f"{role}_1", ids)
-            self.assertNotIn(role, ids)
+        for role in ("keep_hook", "keep_mechanism", "mech_problem", "mech_intervention"):
+            self.assertIn(role, ids)
+            self.assertNotIn(f"{role}_1", ids)
+        self.assertIn("comp_", ids)
+        self.assertIn("mech_result_1", ids)
+        self.assertEqual(rounds[1]["allowed_atom_role"], "mech_result")
+        self.assertTrue(rounds[1]["ignored_rewrites"])
         self.assertLessEqual(sum(a.channel == "image" and a.priority == "MUST" for a in atoms), 7)
 
     def test_preserved_intervention_and_result_use_existing_mechanism_link_atoms(self):

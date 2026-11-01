@@ -147,8 +147,13 @@ class MechanismCoverageTests(unittest.TestCase):
                     if len(calls) == 1 else {"atoms": FULL[1:], "transfer_decision": transfer_decision()})
         atoms = request_atoms(offer, "b", 1, call, source_transfer=ctx)
         self.assertEqual(missing_mechanism_links(atoms, ["problem", "intervention", "result"]), [])
-        fix_ids = {f["id"] for f in calls[1]["only_fix"]}
-        self.assertEqual(fix_ids, {"#mechanism_intervention", "#mechanism_result", "#composition"})
+        self.assertEqual(len(calls), 4, "each structural repair is isolated to its own bounded retry")
+        self.assertEqual(
+            [[item["id"] for item in request["only_fix"]] for request in calls[1:]],
+            [["#composition"], ["#mechanism_intervention"], ["#mechanism_result"]],
+        )
+        self.assertTrue(all(request["schema"]["properties"]["atoms"]["maxItems"] == 1
+                            for request in calls[1:]))
 
     def test_brain_fails_closed_when_a_link_is_never_carried(self):
         with self.assertRaises(BrainError) as cm:

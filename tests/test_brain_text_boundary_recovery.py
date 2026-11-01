@@ -250,6 +250,11 @@ class BrainTextBoundaryRecoveryTests(unittest.TestCase):
     def test_brain_uses_three_retries_then_accepts_real_fourth_response(self):
         failed = copy.deepcopy(self.responses["run_41295468437_brain_1"])
         repaired = copy.deepcopy(self.responses["run_41305261765_brain_1"])
+        # Direct atom repair keeps the exact requested ID; suffix changes are allowed
+        # only when an active structural key explicitly requires a new role atom.
+        for atom in repaired["atoms"]:
+            if atom.get("id") == "comp_01":
+                atom["id"] = "comp_1"
         for response in (failed, repaired):
             hook_atom = next(
                 atom for atom in response["atoms"] if atom["id"].startswith("keep_hook")
@@ -275,7 +280,7 @@ class BrainTextBoundaryRecoveryTests(unittest.TestCase):
         self.assertEqual(trace[1]["only_fix_ids"], ["comp_1"])
         self.assertEqual(trace[2]["only_fix_ids"], ["comp_1"])
         self.assertEqual(trace[3]["only_fix_ids"], ["comp_1"])
-        self.assertIn("comp_01", {atom.id for atom in result})
+        self.assertIn("comp_1", {atom.id for atom in result})
         self.assertFalse(any(row.get("pending") for row in trace[-1:]))
 
     def test_brain_exhausts_all_four_attempts_and_never_returns_partial_contract(self):

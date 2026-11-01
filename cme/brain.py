@@ -3,6 +3,7 @@
 `call` is injected (provider-specific code lives elsewhere): call(request: dict) -> dict.
 """
 from __future__ import annotations
+import copy
 import hashlib
 import json
 import re
@@ -1543,10 +1544,167 @@ def build_request(offer, brief: str, shots: int, failed=None, source_transfer=No
     return req
 
 
-def request_atoms(offer, brief: str, shots: int, call, max_retries: int = 3, vertical=None, source_transfer=None, decision_out=None, rounds_out=None) -> list:
-    """Retry only what failed; max_retries counts retries after the initial call."""
-    if type(max_retries) is not int or max_retries < 0:
-        raise ValueError("max_retries must be a non-negative integer")
+def _retry_target(pending: dict, by_id: dict) -> dict:
+    """Choose one repair unit and explicitly describe which atom IDs that unit may change."""
+    direct_ids = sorted(key for key in pending if not str(key).startswith("#"))
+    if direct_ids:
+        atom_id = direct_ids[0]
+        return {"key": atom_id, "mode": "exact", "id": atom_id, "role": atom_role(atom_id)}
+
+    structural = sorted(str(key) for key in pending)
+    for key in structural:
+        match = re.fullmatch(r"#keep_([a-z]+)", key)
+        if match:
+            return {"key": key, "mode": "role", "role": f"keep_{match.group(1)}"}
+        match = re.fullmatch(r"#mechanism_shot_([a-z]+)", key)
+        if match:
+            expected_shot = {"problem": 1, "intervention": 1, "result": 2}.get(match.group(1))
+            if expected_shot is not None:
+                return {"key": key, "mode": "role_shot", "role": f"mech_{match.group(1)}",
+                        "shot": expected_shot}
+        match = re.fullmatch(r"#mechanism_([a-z]+)", key)
+        if match:
+            return {"key": key, "mode": "role", "role": f"mech_{match.group(1)}"}
+        if key == "#composition":
+            return {"key": key, "mode": "role", "role": "comp"}
+        match = re.fullmatch(r"#shot_(\d+)", key)
+        if match:
+            return {"key": key, "mode": "shot", "shot": int(match.group(1))}
+        if key == "#transfer_decision":
+            return {"key": key, "mode": "decision"}
+
+    # A malformed first response can be safely re-requested in full only when no
+    # accepted atoms exist yet. Once atoms are accepted, unknown structural errors
+    # must not reopen the whole contract and allow the model to rewrite them.
+    if not by_id:
+        return {"key": structural[0] if structural else "#root", "mode": "full"}
+    return {"key": structural[0] if structural else "#retry", "mode": "blocked"}
+
+
+def _retry_request(offer, brief, shots, source_transfer, target, errors, previous_text, retry_number):
+    """Build a one-atom repair request with a narrower schema and a distinct strategy per retry."""
+    strategy = {
+        1: {"name": "single_atom_primary", "route": "primary", "text_max_chars": 100,
+            "instruction": "Rewrite only the failed atom. Remove introductory scene-setting and secondary details; state the visible action directly."},
+        2: {"name": "single_atom_reserve", "route": "fallback", "text_max_chars": 100,
+            "instruction": "Use a different sentence construction. Keep only the indispensable visible subject, action and result cue; do not reuse the earlier sentence structure."},
+        3: {"name": "single_atom_reserve_compact", "route": "fallback", "text_max_chars": 80,
+            "instruction": "Final compact repair. Write the shortest complete sentence that preserves the required visual meaning. Remove all optional qualifiers."},
+    }.get(retry_number, {"name": "single_atom_primary_compact", "route": "primary", "text_max_chars": 80,
+                       "instruction": "Write the shortest complete sentence preserving the required visual meaning."})
+    failed = [{"id": target["key"], "errors": list(errors), "previous_text": previous_text or ""}]
+    request = build_request(offer, brief, shots, failed, source_transfer=source_transfer)
+    schema = copy.deepcopy(request["schema"])
+    atoms_schema = schema["properties"]["atoms"]
+    atoms_schema["minItems"] = 0 if target["mode"] in ("decision", "blocked") else 1
+    atoms_schema["maxItems"] = 0 if target["mode"] in ("decision", "blocked") else (None if target["mode"] == "full" else 1)
+    if atoms_schema["maxItems"] is None:
+        atoms_schema.pop("maxItems", None)
+    item_schema = atoms_schema.get("items", {}).get("properties", {})
+    if target["mode"] not in ("decision", "blocked", "full"):
+        # Keep provider-side schema headroom above the hard code limit (160 vs 120).
+        # The shorter 100/80-character target is prompt guidance and remains enforced
+        # as a quality preference; it must not become a provider truncation boundary.
+        # In particular, structured-output providers may cut a value at maxLength.
+        id_schema = item_schema.get("id")
+        if isinstance(id_schema, dict):
+            if target["mode"] == "exact":
+                id_schema["const"] = target["id"]
+            elif target["mode"] in ("role", "role_shot"):
+                id_schema["pattern"] = rf"^{re.escape(target['role'])}(?:_[a-z0-9_]+)?$"
+        if target["mode"] in ("shot", "role_shot"):
+            shot_schema = item_schema.get("shot")
+            if isinstance(shot_schema, dict):
+                shot_schema["const"] = target["shot"]
+    request["schema"] = schema
+    request["retry_strategy"] = {
+        "attempt": retry_number,
+        "name": strategy["name"],
+        "route": strategy["route"],
+        "text_max_chars": strategy["text_max_chars"],
+    }
+    request["retry_contract"] = {
+        "mode": target["mode"],
+        "target_key": target["key"],
+        "expected_id": target.get("id"),
+        "allowed_role": target.get("role"),
+        "required_shot": target.get("shot"),
+        "max_atoms": 0 if target["mode"] in ("decision", "blocked") else (None if target["mode"] == "full" else 1),
+    }
+    request["rules"].append(
+        "REPAIR RESPONSE CONTRACT: return only the single requested repair atom and no other atoms. "
+        "Keep every previously accepted atom unchanged; do not regenerate, rename, summarize or improve it. "
+        "The code will ignore every atom outside retry_contract. The full code-side validators still apply. "
+        f"{strategy['instruction']} The repaired text must be a complete English sentence no longer than "
+        f"{strategy['text_max_chars']} characters."
+    )
+    if target["mode"] == "exact":
+        request["rules"].append(f"The only allowed atom id is exactly '{target['id']}'. Return that exact id.")
+    elif target["mode"] == "role":
+        request["rules"].append(
+            f"Return exactly one atom whose id belongs to role '{target['role']}' (same role prefix, optional suffix)."
+        )
+    elif target["mode"] == "role_shot":
+        request["rules"].append(
+            f"Return exactly one MUST image atom for role '{target['role']}' in shot {target['shot']}."
+        )
+    elif target["mode"] == "shot":
+        request["rules"].append(
+            f"Return exactly one MUST image atom for shot {target['shot']}; do not return atoms for another shot."
+        )
+    elif target["mode"] == "decision":
+        request["rules"].append(
+            "This is a transfer_decision-only repair. Return atoms as an empty list; repair only transfer_decision."
+        )
+    elif target["mode"] == "blocked":
+        request["rules"].append(
+            "No safe atom ID is authorized for this unresolved structural error. Return atoms as an empty list; do not alter existing atoms."
+        )
+    return request, strategy
+
+
+def _retry_atom_allowed(atom: dict, target: dict) -> bool:
+    """Check the explicit retry allow-list before parsing or validating returned atoms."""
+    if not isinstance(atom, dict):
+        return False
+    atom_id = atom.get("id")
+    if not isinstance(atom_id, str):
+        return False
+    mode = target.get("mode")
+    if mode == "exact":
+        return atom_id == target.get("id")
+    if mode == "role":
+        return atom_role(atom_id) == target.get("role")
+    if mode == "role_shot":
+        return (atom_role(atom_id) == target.get("role")
+                and type(atom.get("shot")) is int and atom.get("shot") == target.get("shot")
+                and atom.get("priority") == "MUST" and atom.get("channel") == "image")
+    if mode == "shot":
+        return (type(atom.get("shot")) is int and atom.get("shot") == target.get("shot")
+                and atom.get("priority") == "MUST" and atom.get("channel") == "image")
+    if mode == "full":
+        return True
+    return False
+
+
+def _ignored_rewrite(atom) -> dict:
+    """Record the identity and text digest of an unrequested rewrite without retaining its text."""
+    atom = atom if isinstance(atom, dict) else {}
+    value = atom.get("text")
+    digest = hashlib.sha256(str(value or "").encode("utf-8")).hexdigest() if value is not None else None
+    return {"id": atom.get("id") if isinstance(atom.get("id"), str) else None,
+            "text_sha256": digest, "reason": "outside_retry_contract"}
+
+
+def _is_recomputed_structural_key(key: str) -> bool:
+    return (key in ("#root", "#composition", "#transfer_decision")
+            or key.startswith("#shot_") or key.startswith("#mechanism_") or key.startswith("#keep_"))
+
+
+def request_atoms(offer, brief: str, shots: int, call, max_retries: int = 3, vertical=None, source_transfer=None, decision_out=None, rounds_out=None, atom_provenance_out=None) -> list:
+    """Build atoms with bounded, one-target repair rounds; max_retries counts retries after the initial call."""
+    if type(max_retries) is not int or not 0 <= max_retries <= 3:
+        raise ValueError("max_retries must be an integer from 0 to 3; the BRAIN repair budget is fixed")
     total_rounds = max_retries + 1
     by_id: dict = {}
     pending: dict = {}
@@ -1554,43 +1712,137 @@ def request_atoms(offer, brief: str, shots: int, call, max_retries: int = 3, ver
     required_links = derive_mechanism_links(source_transfer)
     fit_gate = source_transfer.get("target_fit_gate") if isinstance(source_transfer, dict) else None
     held_decision = None
+    decision_draft = None
+    accepted_atom_provenance: dict = {}
     for round_number in range(1, total_rounds + 1):
+        previous_pending = {key: list(value) for key, value in pending.items()}
+        retry_target = _retry_target(pending, by_id) if round_number > 1 and pending else None
         record = {"phase": "brain_atoms", "round": round_number, "round_budget": total_rounds,
                   "retry_budget": max_retries,
-                  "only_fix_ids": [item["id"] for item in failed] if failed else []}
+                  "only_fix_ids": [retry_target["key"]] if retry_target else []}
         if rounds_out is not None:
             rounds_out.append(record)
-        request = build_request(offer, brief, shots, failed, source_transfer=source_transfer)
+        if retry_target:
+            target_errors = pending.get(retry_target["key"], [])
+            previous_text = ""
+            failed_previous = next((item.get("previous_text", "") for item in (failed or [])
+                                    if item.get("id") == retry_target["key"]), "")
+            if failed_previous:
+                previous_text = failed_previous
+            elif retry_target.get("id") and retry_target["id"] in by_id:
+                previous_text = by_id[retry_target["id"]].text
+            elif retry_target.get("role"):
+                previous = next((a for a in by_id.values() if atom_role(a.id) == retry_target["role"]), None)
+                previous_text = previous.text if previous else ""
+            request, strategy = _retry_request(
+                offer, brief, shots, source_transfer, retry_target,
+                target_errors, previous_text, round_number - 1,
+            )
+            record["retry_strategy"] = strategy["name"]
+            record["requested_route"] = strategy["route"]
+            record["retry_target"] = retry_target["key"]
+            if retry_target["mode"] == "exact":
+                record["allowed_atom_ids"] = [retry_target["id"]]
+            elif retry_target["mode"] in ("role", "role_shot"):
+                record["allowed_atom_role"] = retry_target["role"]
+                if retry_target["mode"] == "role_shot":
+                    record["allowed_shot"] = retry_target["shot"]
+            elif retry_target["mode"] == "shot":
+                record["allowed_shot"] = retry_target["shot"]
+            else:
+                record["allowed_atom_ids"] = []
+        else:
+            request = build_request(offer, brief, shots, failed, source_transfer=source_transfer)
+            strategy = {"name": "initial_full_contract", "route": "primary", "text_max_chars": None}
+            record["retry_strategy"] = strategy["name"]
+            record["requested_route"] = "primary"
         record.update(_request_provenance(request))
+        route = strategy.get("route", "primary")
+        if retry_target and retry_target.get("mode") == "blocked":
+            # Never spend a provider call when the structural failure has no explicit safe
+            # atom allow-list (for example, an unresolved frame-budget conflict).
+            record["retry_strategy"] = "blocked_no_safe_allowlist"
+            record["requested_route"] = "none"
+            record["actual_route"] = "not_called"
+            record["accepted_ids"] = sorted(by_id)
+            record["accepted_atom_provenance"] = {key: accepted_atom_provenance[key] for key in sorted(accepted_atom_provenance)}
+            record["pending"] = {key: list(value) for key, value in pending.items()}
+            if isinstance(atom_provenance_out, dict):
+                atom_provenance_out.clear()
+                atom_provenance_out.update(accepted_atom_provenance)
+            raise BrainError(pending)
         try:
-            resp = call(request)
+            has_fallback = getattr(call, "has_fallback", None)
+            fallback_callable = callable(getattr(call, "call_fallback", None))
+            if route == "fallback" and fallback_callable and has_fallback is not False:
+                record["actual_route"] = "fallback"
+                resp = call.call_fallback(request)
+            else:
+                if route == "fallback":
+                    record["actual_route"] = "primary_fallback_unconfigured"
+                    record["route_note"] = "brain_fallback_adapter is not configured; this repair used the primary model"
+                else:
+                    record["actual_route"] = "primary"
+                resp = call(request)
         except Exception as exc:
-            # A transient provider failure must not erase what earlier rounds already established.
             record.update(_call_provenance(call))
             record["error"] = f"{type(exc).__name__}: {str(exc)[:400]}"
             record["accepted_ids_before_failure"] = sorted(by_id)
             record["pending_before_failure"] = {k: list(v) for k, v in pending.items()}
             raise
         record.update(_call_provenance(call))
-        record["response_excerpt"] = _trace_excerpt(resp)
         offered = resp.get("transfer_decision") if isinstance(resp, dict) else None
         if source_transfer and isinstance(offered, dict) and offered.get("transferable") is False:
             rejection_errors = validate_transfer_decision(offered, [])
             if not rejection_errors:
                 raise TransferRejected(offered)
         raw = resp.get("atoms", []) if isinstance(resp, dict) else []
-        parsed = parse_atoms(raw)
+        raw_for_parse = raw
+        ignored_rewrites = []
+        retry_contract_error = None
+        if retry_target and retry_target["mode"] != "full":
+            raw_for_parse = []
+            if isinstance(raw, list):
+                permitted = [item for item in raw if _retry_atom_allowed(item, retry_target)]
+                ignored_rewrites = [_ignored_rewrite(item) for item in raw if not _retry_atom_allowed(item, retry_target)]
+                if len(permitted) > 1:
+                    retry_contract_error = "RETRY_SINGLE_ATOM_REQUIRED: one repair round may return at most one authorized atom"
+                    ignored_rewrites.extend({**_ignored_rewrite(item),
+                                             "reason": "single_atom_contract_violation"}
+                                            for item in permitted)
+                    permitted = []
+                raw_for_parse = permitted
+                if retry_target["mode"] not in ("decision", "blocked") and not permitted:
+                    retry_contract_error = (
+                        "RETRY_TARGET_MISSING: response did not return the requested atom or a structurally required atom"
+                    )
+            elif retry_target["mode"] not in ("decision", "blocked"):
+                retry_contract_error = "RETRY_TARGET_MISSING: response atoms must be a list containing the requested atom"
+            record["ignored_rewrites"] = ignored_rewrites
+            if isinstance(resp, dict):
+                audited_response = dict(resp)
+                audited_response["atoms"] = raw_for_parse
+            else:
+                audited_response = resp
+            record["response_excerpt"] = _trace_excerpt(audited_response)
+        else:
+            record["response_excerpt"] = _trace_excerpt(resp)
+        parsed = parse_atoms(raw_for_parse)
         round_errs = {k: list(v) for k, v in parsed.errors.items()}
-        # Parser-rejected atoms are absent from parsed.atoms. Remove any earlier
-        # accepted value with the same ID so stale text cannot satisfy structure
-        # checks while a correction for that ID is still pending.
+        if retry_contract_error:
+            round_errs[retry_target["key"]] = [retry_contract_error]
+        # Parser-rejected atoms are absent from parsed.atoms. Remove only those IDs that
+        # this round was authorized to repair; ignored rewrites never touch accepted state.
         for rejected_id in parsed.errors:
             if not rejected_id.startswith("#"):
                 by_id.pop(rejected_id, None)
+                accepted_atom_provenance.pop(rejected_id, None)
         for atom in parsed.atoms:
             if atom.shot > shots:
                 round_errs.setdefault(atom.id, []).append(f"shot {atom.shot} is outside requested range 1..{shots}")
-        if resp.get("_error"):
+        if not isinstance(resp, dict):
+            round_errs["#root"] = ["Brain response must be a JSON object"]
+        elif resp.get("_error"):
             round_errs["#root"] = [str(resp["_error"])]
         for aid, errs in check_claims(parsed.atoms, offer).items():
             round_errs.setdefault(aid, []).extend(errs)
@@ -1609,11 +1861,8 @@ def request_atoms(offer, brief: str, shots: int, call, max_retries: int = 3, ver
         if vertical is not None:
             for aid, errs in check_vertical(parsed.atoms, offer, vertical).items():
                 round_errs.setdefault(aid, []).extend(errs)
-        # A retry may regenerate the same logical atom with a new numeric suffix
-        # (keep_mechanism_01 -> keep_mechanism_1). Replace the stale version by role;
-        # otherwise retries accumulate duplicate MUST atoms and falsely exhaust the frame budget.
+
         def retry_family(atom_id):
-            # A model may return a bare role ID first and add a numeric suffix on retry.
             return atom_role(atom_id)
 
         valid_incoming = [
@@ -1621,27 +1870,74 @@ def request_atoms(offer, brief: str, shots: int, call, max_retries: int = 3, ver
             if a.id not in round_errs and a.id not in reserved_no_text_ids
         ]
         incoming_families = {family for family in (retry_family(a.id) for a in valid_incoming) if family}
+        # A new suffix is permitted only when an active structural key explicitly
+        # requires a role, never when a direct atom ID was requested for repair.
+        if not retry_target or retry_target.get("mode") in ("role", "role_shot"):
+            replacement_families = incoming_families
+        else:
+            replacement_families = set()
         for old_id in list(by_id):
-            if retry_family(old_id) in incoming_families:
+            if retry_family(old_id) in replacement_families:
                 by_id.pop(old_id, None)
-        # Clear stale per-atom errors when a valid replacement arrives under a new suffix.
+                accepted_atom_provenance.pop(old_id, None)
         for old_id in list(pending):
-            if not old_id.startswith("#") and retry_family(old_id) in incoming_families:
+            if not old_id.startswith("#") and retry_family(old_id) in replacement_families:
                 pending.pop(old_id, None)
 
-        for a in parsed.atoms:
-            if a.id in reserved_no_text_ids:
-                by_id.pop(a.id, None)
-                pending.pop(a.id, None)
+        for atom in parsed.atoms:
+            if atom.id in reserved_no_text_ids:
+                by_id.pop(atom.id, None)
+                accepted_atom_provenance.pop(atom.id, None)
+                pending.pop(atom.id, None)
                 continue
-            if a.id in round_errs:
-                by_id.pop(a.id, None)
+            if atom.id in round_errs:
+                by_id.pop(atom.id, None)
+                accepted_atom_provenance.pop(atom.id, None)
             else:
-                by_id[a.id] = a
-                pending.pop(a.id, None)
-        # '#...' keys describe the previous response, not an id: they are recomputed every round
-        pending = {k: v for k, v in pending.items() if not k.startswith("#")}
-        pending.update(round_errs)
+                by_id[atom.id] = atom
+                pending.pop(atom.id, None)
+                accepted_atom_provenance[atom.id] = {
+                    **_call_provenance(call),
+                    "round": round_number,
+                    "retry_strategy": strategy["name"],
+                }
+
+        # Narrow retries only update their selected issue. Other atom errors remain
+        # pending until their own repair round; structural errors are recomputed below.
+        if retry_target:
+            pending = {
+                key: value for key, value in previous_pending.items()
+                if not _is_recomputed_structural_key(key) and key != retry_target["key"]
+            }
+            pending.update(round_errs)
+            if retry_target["mode"] == "blocked":
+                pending[retry_target["key"]] = previous_pending.get(
+                    retry_target["key"], ["RETRY_TARGET_UNMAPPED: no safe atom ID is authorized for this structural error"]
+                )
+            target_satisfied = False
+            if retry_target["mode"] == "exact":
+                target_satisfied = any(a.id == retry_target["id"] for a in valid_incoming)
+            elif retry_target["mode"] == "role":
+                target_satisfied = any(atom_role(a.id) == retry_target["role"] for a in valid_incoming)
+            elif retry_target["mode"] == "role_shot":
+                target_satisfied = any(
+                    atom_role(a.id) == retry_target["role"] and a.shot == retry_target["shot"]
+                    and a.channel == "image" and a.priority == "MUST" for a in valid_incoming
+                )
+            elif retry_target["mode"] == "shot":
+                target_satisfied = any(a.shot == retry_target["shot"] and a.channel == "image" and a.priority == "MUST" for a in valid_incoming)
+            elif retry_target["mode"] == "decision":
+                target_satisfied = not any(key == retry_target["key"] for key in round_errs)
+            elif retry_target["mode"] == "blocked":
+                target_satisfied = False
+            elif retry_target["mode"] == "full":
+                target_satisfied = not any(key.startswith("#") for key in round_errs)
+            if target_satisfied:
+                pending.pop(retry_target["key"], None)
+        else:
+            pending = {k: v for k, v in pending.items() if not k.startswith("#")}
+            pending.update(round_errs)
+
         for k in range(1, shots + 1):
             if not any(a.shot == k and a.channel == "image" and a.priority == "MUST" for a in by_id.values()):
                 pending[f"#shot_{k}"] = [f"shot {k} has no MUST image atom"]
@@ -1658,6 +1954,7 @@ def request_atoms(offer, brief: str, shots: int, call, max_retries: int = 3, ver
         for aid in list(structure_errors):
             if not aid.startswith("#"):
                 by_id.pop(aid, None)
+                accepted_atom_provenance.pop(aid, None)
         for name in missing_mechanism_links(by_id.values(), required_links):
             pending[f"#mechanism_{name}"] = [f"mechanism link '{name}' has no MUST image atom with id prefix mech_{name}_"]
         for name in missing_keep_atoms(by_id.values(), fit_gate):
@@ -1683,12 +1980,35 @@ def request_atoms(offer, brief: str, shots: int, call, max_retries: int = 3, ver
         ):
             pending.pop("#composition", None)
         if source_transfer:
-            candidate_decision = offered if isinstance(offered, dict) else held_decision
+            # Atom repair must not let the model silently rewrite unrelated preserved-ID
+            # references. Keep a draft of the original decision and merge only the entry
+            # corresponding to a structurally requested atom role. A decision-only retry
+            # may replace the full decision because that is its explicit repair target.
+            if isinstance(offered, dict):
+                if not retry_target or retry_target.get("mode") in ("full", "decision") or decision_draft is None:
+                    decision_draft = copy.deepcopy(offered)
+                else:
+                    target_role = retry_target.get("role")
+                    target_property = None
+                    if target_role and target_role.startswith("keep_"):
+                        target_property = target_role[len("keep_"):]
+                    elif target_role and target_role.startswith("mech_"):
+                        target_property = target_role[len("mech_"):]
+                    if target_property:
+                        merged = copy.deepcopy(decision_draft)
+                        old_preserved = merged.get("preserved") if isinstance(merged.get("preserved"), list) else []
+                        new_preserved = offered.get("preserved") if isinstance(offered.get("preserved"), list) else []
+                        replacement = next((item for item in new_preserved
+                                            if isinstance(item, dict) and item.get("property") == target_property), None)
+                        if replacement:
+                            old_preserved = [item for item in old_preserved
+                                             if not (isinstance(item, dict) and item.get("property") == target_property)]
+                            old_preserved.append(copy.deepcopy(replacement))
+                            merged["preserved"] = old_preserved
+                        decision_draft = merged
+            candidate_decision = copy.deepcopy(decision_draft) if isinstance(decision_draft, dict) else held_decision
             fit_gate = source_transfer.get("target_fit_gate") if isinstance(source_transfer, dict) else None
             if isinstance(fit_gate, dict) and isinstance(candidate_decision, dict) and candidate_decision.get("transferable") is True:
-                # The Target-Fit Gate is the single authority for the approved abstract mechanism.
-                # Do not make an LLM re-copy a long canonical string exactly: keep model-authored
-                # decision fields, but carry this field verbatim from the validated Gate.
                 candidate_decision = dict(candidate_decision)
                 approved_mechanism = fit_gate.get("abstract_mechanism")
                 if isinstance(approved_mechanism, str) and approved_mechanism.strip():
@@ -1702,12 +2022,20 @@ def request_atoms(offer, brief: str, shots: int, call, max_retries: int = 3, ver
                 held_decision = None
             else:
                 held_decision = candidate_decision
+                record["transfer_decision_source"] = _call_provenance(call) if isinstance(offered, dict) else "previous_valid_round"
         record["accepted_ids"] = sorted(by_id)
+        record["accepted_atom_provenance"] = {key: accepted_atom_provenance[key] for key in sorted(accepted_atom_provenance)}
+        if isinstance(atom_provenance_out, dict):
+            atom_provenance_out.clear()
+            atom_provenance_out.update(accepted_atom_provenance)
         record["pending"] = {k: list(v) for k, v in pending.items()}
         if not pending:
             if isinstance(decision_out, dict) and held_decision is not None:
                 decision_out.clear()
                 decision_out.update(held_decision)
+            if isinstance(atom_provenance_out, dict):
+                atom_provenance_out.clear()
+                atom_provenance_out.update(accepted_atom_provenance)
             return list(by_id.values())
         prev_text = {i["id"]: i.get("text", "") for i in raw if isinstance(i, dict) and i.get("id")}
         failed = [{"id": k, "errors": v, "previous_text": prev_text.get(k, "")} for k, v in pending.items()]

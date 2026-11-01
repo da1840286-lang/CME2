@@ -225,11 +225,23 @@ def _make_llm(adapter_name, kind, settings, catalog, log, run_id, fallback_name=
     def run(*args):
         def make_go(used_spec, used_fn):
             def go(ref):
-                out, meta = used_fn(*args)
-                run.info = _info(used_spec, spec) | {
+                base_info = _info(used_spec, spec) | {
                     "primary_adapter": spec.name,
                     "primary_model_id": spec.model_id,
+                }
+                run.info = base_info | {"call_status": "STARTED"}
+                try:
+                    out, meta = used_fn(*args)
+                except Exception as exc:
+                    run.info = base_info | {
+                        "call_status": "ERROR",
+                        "error_type": type(exc).__name__,
+                        "error": str(exc)[:300],
+                    }
+                    raise
+                run.info = base_info | {
                     "responded_model": meta.get("model"),
+                    "call_status": "OK",
                 }
                 return out, meta
             return go
@@ -256,7 +268,41 @@ def _make_llm(adapter_name, kind, settings, catalog, log, run_id, fallback_name=
             return call_with_policy(fb_spec.ref, make_go(fb_spec, fb_fn), log, run_id, allow_free=settings.allow_free)
         raise last
 
+    def call_fallback(*args):
+        """Invoke the explicitly configured reserve model for one semantic-repair call."""
+        if fb_spec is None or fb_fn is None:
+            raise ProviderPolicyError(f"{kind}_fallback_adapter is not configured in settings.json")
+
+        def go(ref):
+            base_info = _info(fb_spec, spec) | {
+                "primary_adapter": spec.name,
+                "primary_model_id": spec.model_id,
+                "semantic_retry_route": True,
+            }
+            run.info = base_info | {"call_status": "STARTED"}
+            try:
+                out, meta = fb_fn(*args)
+            except Exception as exc:
+                run.info = base_info | {
+                    "call_status": "ERROR",
+                    "error_type": type(exc).__name__,
+                    "error": str(exc)[:300],
+                }
+                raise
+            run.info = base_info | {
+                "responded_model": meta.get("model"),
+                "call_status": "OK",
+            }
+            return out, meta
+
+        return call_with_policy(
+            fb_spec.ref, go, log, run_id, allow_free=settings.allow_free,
+            requested_primary=spec.ref, force_fallback=True,
+        )
+
     run.info = {}
+    run.call_fallback = call_fallback
+    run.has_fallback = fb_spec is not None
     return run
 
 

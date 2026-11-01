@@ -115,6 +115,40 @@ class TransientRetryTests(unittest.TestCase):
             self.assertEqual(call.info["model_id"], "vendor/reserve:free")
             self.assertIn("brain_fallback", [r.get("component") for r in self.rows(log)])
 
+    def test_semantic_retry_can_force_the_declared_reserve_for_one_call(self):
+        sent = []
+
+        def transport(method, url, headers, payload):
+            sent.append(payload["model"])
+            return 200, completion(json.dumps({"atoms": []}), payload["model"])
+
+        with tempfile.TemporaryDirectory() as d:
+            call, log = self.build(d, transport, brain_fallback_adapter="b2")
+            self.assertEqual(call.call_fallback(REQUEST), {"atoms": []})
+            self.assertEqual(sent, ["vendor/reserve:free"])
+            self.assertTrue(call.info["fallback_used"])
+            self.assertTrue(call.info["semantic_retry_route"])
+            self.assertEqual(call.info["primary_model_id"], "vendor/primary:free")
+            rows = self.rows(log)
+            self.assertTrue(rows[-1]["fallback_used"])
+            self.assertTrue(rows[-1]["semantic_retry_route"])
+            self.assertEqual(rows[-1]["requested_model"], "vendor/primary:free")
+            self.assertEqual(rows[-1]["selected_model"], "vendor/reserve:free")
+
+    def test_semantic_reserve_failure_keeps_the_attempted_model_in_provenance(self):
+        def transport(method, url, headers, payload):
+            return 400, b'{"error":{"code":400,"message":"invalid request"}}'
+
+        with tempfile.TemporaryDirectory() as d:
+            call, _ = self.build(d, transport, brain_fallback_adapter="b2")
+            with self.assertRaises(ProviderCallError):
+                call.call_fallback(REQUEST)
+            self.assertEqual(call.info["adapter"], "b2")
+            self.assertEqual(call.info["model_id"], "vendor/reserve:free")
+            self.assertTrue(call.info["fallback_used"])
+            self.assertTrue(call.info["semantic_retry_route"])
+            self.assertEqual(call.info["call_status"], "ERROR")
+
     def test_no_reserve_declared_means_no_silent_switch(self):
         sent = []
 
@@ -157,7 +191,8 @@ class TransientRetryTests(unittest.TestCase):
     def test_example_settings_keep_the_threshold_off(self):
         settings = load_settings(ROOT / "settings.example.json")
         self.assertFalse(SourceThreshold.from_settings(settings).active)
-        self.assertEqual((settings.brain_fallback_adapter, settings.judge_fallback_adapter), ("", ""))
+        self.assertEqual((settings.brain_fallback_adapter, settings.judge_fallback_adapter),
+                         ("openrouter_free_brain_reserve", ""))
 
 
 class SourceThresholdTests(unittest.TestCase):

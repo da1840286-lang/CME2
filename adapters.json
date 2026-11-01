@@ -19,6 +19,24 @@
    "notes": "Smoke test of the Brain path only, not commercial transfer quality. Requests strict JSON Schema output for the atoms contract."
   },
   {
+   "name": "openrouter_free_brain_reserve",
+   "kind": "brain",
+   "provider": "openrouter",
+   "model_id": "google/gemma-4-26b-a4b-it:free",
+   "tier": "free",
+   "verified": false,
+   "params": {
+    "response_format_mode": "json_object",
+    "temperature": 0.2,
+    "max_tokens": 2500,
+    "reasoning": {
+     "enabled": false
+    }
+   },
+   "price_hint": "free; endpoint availability and rate limits vary",
+   "notes": "Semantic-repair reserve for Brain only. Free endpoint currently advertises JSON output, not JSON-schema enforcement; CME therefore applies the single-atom allow-list and all normal code validators after parsing. Not live-verified in this project."
+  },
+  {
    "name": "openrouter_free_judge",
    "kind": "judge",
    "provider": "openrouter",
@@ -29,7 +47,9 @@
     "response_format_mode": "json_object",
     "temperature": 0,
     "max_tokens": 1500,
-    "reasoning": {"enabled": false}
+    "reasoning": {
+     "enabled": false
+    }
    },
    "price_hint": "free; rate limited",
    "notes": "Independent vision judge, deliberately different from the Brain/Analyst model to reduce correlated errors. Free model availability and rate limits may change; every MUST visual atom is required."

@@ -84,18 +84,18 @@ class CompositionRecoveryTests(unittest.TestCase):
         self.assertIn("at most 100 characters", message)
         self.assertIn("Do not extend a truncated fragment", message)
 
-    def test_incomplete_composition_retries_only_that_atom_and_accepts_new_suffix(self):
+    def test_incomplete_composition_retries_only_that_atom_and_requires_same_id(self):
         first = brain_response(
             "comp_1",
             "One uninterrupted outdoor scene shows cordless pressure washer spraying foam onto hard surface with foam covering and",
         )
         corrected = brain_response(
-            "comp_2",
+            "comp_1",
             "One close view shows the nozzle lifting crumbs from a narrow seat crevice.",
         )
         # The retry contract asks only for the failed atom. Other accepted atoms
         # must remain held by request_atoms and survive this one-atom response.
-        corrected["atoms"] = [item for item in corrected["atoms"] if item["id"] == "comp_2"]
+        corrected["atoms"] = [item for item in corrected["atoms"] if item["id"] == "comp_1"]
         calls: list[dict] = []
         rounds: list[dict] = []
 
@@ -117,12 +117,12 @@ class CompositionRecoveryTests(unittest.TestCase):
         self.assertEqual(rounds[1]["only_fix_ids"], ["comp_1"])
         self.assertEqual([item["id"] for item in calls[1]["only_fix"]], ["comp_1"])
         self.assertEqual(rounds[1]["pending"], {})
-        self.assertIn("comp_2", {item.id for item in result})
+        self.assertIn("comp_1", {item.id for item in result})
         self.assertTrue({
             "keep_hook_1", "keep_mechanism_1", "mech_problem_1",
             "mech_intervention_1", "mech_result_1",
         }.issubset({item.id for item in result}))
-        self.assertNotIn("comp_1", {item.id for item in result})
+        self.assertEqual(len([item for item in result if item.id.startswith("comp_")]), 1)
         self.assertEqual(len([item for item in result if item.id.startswith("comp_")]), 1)
 
     def test_parser_does_not_change_its_existing_dangling_word_behavior(self):
@@ -158,7 +158,7 @@ class CompositionRecoveryTests(unittest.TestCase):
         self.assertIn("at most 100 characters", conjunction_message)
         self.assertIn("Do not extend a truncated fragment", conjunction_message)
 
-    def test_parser_rejection_evicts_previously_accepted_atom_with_the_same_id(self):
+    def test_retry_ignores_malformed_rewrite_of_an_unrequested_accepted_atom(self):
         first = brain_response(
             "comp_1",
             "One uninterrupted scene shows the pressure washer spraying foam onto a patio surface.",
@@ -181,22 +181,21 @@ class CompositionRecoveryTests(unittest.TestCase):
             calls.append(request)
             return first if len(calls) == 1 else malformed
 
-        with self.assertRaises(BrainError):
-            request_atoms(
-                target_offer(),
-                "Show one uninterrupted target-native pressure-washing demonstration.",
-                1,
-                call,
-                max_retries=1,
-                source_transfer=source_context(),
-                rounds_out=rounds,
-            )
+        result = request_atoms(
+            target_offer(),
+            "Show one uninterrupted target-native pressure-washing demonstration.",
+            1,
+            call,
+            max_retries=1,
+            source_transfer=source_context(),
+            rounds_out=rounds,
+        )
 
         self.assertEqual(len(calls), 2)
-        self.assertIn("comp_1", rounds[1]["pending"])
-        self.assertIn("at most 100 characters", rounds[1]["pending"]["comp_1"][0])
-        self.assertNotIn("comp_1", rounds[1]["accepted_ids"])
-        self.assertNotIn("#composition", rounds[1]["pending"])
+        self.assertEqual(rounds[1]["pending"], {})
+        by_id = {item.id: item for item in result}
+        self.assertEqual(by_id["comp_1"].text, "One uninterrupted scene shows the pressure washer spraying foam onto a patio surface.")
+        self.assertTrue(any(item["id"] == "comp_1" for item in rounds[1]["ignored_rewrites"]))
 
     def test_missing_composition_still_raises_composition_required(self):
         response = brain_response(None)

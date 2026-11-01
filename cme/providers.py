@@ -69,8 +69,9 @@ class CallLog:
 
 
 def call_with_policy(primary: ModelRef, fn, log: CallLog, run_id: str, fallback: ModelRef | None = None,
-                     allow_free: bool = False):
-    """fn(model_ref) -> (result, meta). Fallback only on InfraError and only if declared."""
+                     allow_free: bool = False, *, requested_primary: ModelRef | None = None,
+                     force_fallback: bool = False):
+    """fn(model_ref) -> (result, meta). Fallback only on InfraError unless explicitly routed by the caller."""
     check_model(primary, allow_free)
     if fallback:
         check_model(fallback, allow_free)
@@ -81,18 +82,23 @@ def call_with_policy(primary: ModelRef, fn, log: CallLog, run_id: str, fallback:
             result, meta = fn(ref)
             responded = meta.get("model")
             if responded and _base_model(responded) != _base_model(ref.model_id):
-                log.write(run_id=run_id, requested_model=ref.model_id, responded_model=responded,
-                          provider=ref.provider, tier=ref.tier, status="model_mismatch", fallback_used=is_fallback)
+                log.write(run_id=run_id, requested_model=(requested_primary or primary).model_id,
+                          selected_model=ref.model_id, responded_model=responded,
+                          provider=ref.provider, tier=ref.tier, status="model_mismatch",
+                          fallback_used=bool(is_fallback or force_fallback),
+                          semantic_retry_route=bool(force_fallback))
                 raise ModelMismatch(f"asked for {ref.model_id!r} but {responded!r} answered")
             record = {
                 "run_id": run_id,
-                "requested_model": primary.model_id,
+                "requested_model": (requested_primary or primary).model_id,
+                "selected_model": ref.model_id,
                 "responded_model": responded or "unreported",
                 "provider": ref.provider,
                 "tier": ref.tier,
                 "cost": meta.get("cost"),
                 "status": "ok",
-                "fallback_used": is_fallback,
+                "fallback_used": bool(is_fallback or force_fallback),
+                "semantic_retry_route": bool(force_fallback),
             }
             # Provider adapters may attach bounded, redacted diagnostics for a structurally invalid response.
             if meta.get("diagnostic") is not None:
@@ -100,14 +106,19 @@ def call_with_policy(primary: ModelRef, fn, log: CallLog, run_id: str, fallback:
             log.write(**record)
             return result
         except InfraError as e:
-            log.write(run_id=run_id, requested_model=ref.model_id, status="infra_error", error=str(e),
-                      fallback_used=is_fallback)
+            log.write(run_id=run_id, requested_model=(requested_primary or primary).model_id,
+                      selected_model=ref.model_id, status="infra_error", error=str(e),
+                      fallback_used=bool(is_fallback or force_fallback),
+                      semantic_retry_route=bool(force_fallback))
             if is_fallback or fallback is None:
                 raise
         except ModelMismatch:
             raise  # already logged above
         except Exception as e:  # real failures are logged too, then raised
-            log.write(run_id=run_id, requested_model=ref.model_id, provider=ref.provider, tier=ref.tier,
-                      status="error", error_type=type(e).__name__, error=str(e), fallback_used=is_fallback)
+            log.write(run_id=run_id, requested_model=(requested_primary or primary).model_id,
+                      selected_model=ref.model_id, provider=ref.provider, tier=ref.tier,
+                      status="error", error_type=type(e).__name__, error=str(e),
+                      fallback_used=bool(is_fallback or force_fallback),
+                      semantic_retry_route=bool(force_fallback))
             raise
     raise InfraError("no provider available")

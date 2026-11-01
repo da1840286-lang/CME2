@@ -9,7 +9,7 @@
  "analyst_adapter": "openrouter_free_analyst",
  "transient_retries": 1,
  "retry_delay_seconds": 3,
- "brain_fallback_adapter": "",
+ "brain_fallback_adapter": "openrouter_free_brain_reserve",
  "judge_fallback_adapter": "",
  "source_selection": {
   "min_final_score": null,

@@ -258,6 +258,8 @@ def run_brain(args, offer, settings, catalog, vertical, log, run_id, ctx, out):
     trace = {"run_id": run_id, "gate_rounds": [], "brain_rounds": []}
     trace_path = out / "brain_trace.json"
     trace_path.unlink(missing_ok=True)
+    transfer_decision = {}
+    atom_provenance = {}
     try:
         if source_transfer is not None:
             # Gate before atom generation: an incompatible source should be rejected without
@@ -268,11 +270,11 @@ def run_brain(args, offer, settings, catalog, vertical, log, run_id, ctx, out):
             if target_fit_gate.get("transferable") is not True:
                 raise TransferRejected(target_fit_gate)
             source_transfer = {**source_transfer, "target_fit_gate": target_fit_gate}
-        transfer_decision = {}
         atoms = request_atoms(offer, args.brief, args.shots, call, vertical=vertical,
                               source_transfer=source_transfer, decision_out=transfer_decision,
-                              rounds_out=trace["brain_rounds"])
+                              rounds_out=trace["brain_rounds"], atom_provenance_out=atom_provenance)
     finally:
+        trace["accepted_atom_provenance"] = atom_provenance
         trace["provenance"] = brain_provenance(run_id, trace)
         try:
             trace_path.write_text(json.dumps(trace, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -291,7 +293,8 @@ def run_brain(args, offer, settings, catalog, vertical, log, run_id, ctx, out):
                 "brief_sha256": _sha256_bytes(args.brief.encode("utf-8")),
                 "source_contract_sha256": _sha256_bytes(Path(args.source_contract).read_bytes()) if args.source_contract else None,
                 "model_id": call.info.get("model_id"), "responded_model": call.info.get("responded_model"),
-                "provenance": trace.get("provenance")}
+                "provenance": trace.get("provenance"),
+                "atom_provenance": atom_provenance}
     if transfer_decision:
         manifest["transfer_decision"] = transfer_decision
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=1), encoding="utf-8")

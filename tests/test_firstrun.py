@@ -202,6 +202,17 @@ class OpenRouterBrainTests(unittest.TestCase):
         self.assertEqual(meta["model"], "vendor/model:free")
         self.assertEqual(data["atoms"][0]["id"], "scene_a")
 
+    def test_retry_strategy_and_allow_list_are_passed_to_the_model_payload(self):
+        calls = []
+        fn = make_openrouter_brain(self.PARAMS, "key", self.sender(calls=calls))
+        request = self.request()
+        request["retry_strategy"] = {"attempt": 1, "name": "single_atom_primary", "route": "primary"}
+        request["retry_contract"] = {"mode": "exact", "target_key": "comp_01", "expected_id": "comp_01", "max_atoms": 1}
+        fn(request)
+        user = json.loads(calls[0][2]["messages"][1]["content"])
+        self.assertEqual(user["retry_contract"]["expected_id"], "comp_01")
+        self.assertEqual(user["retry_strategy"]["name"], "single_atom_primary")
+
     def test_fenced_and_prose_wrapped_json(self):
         self.assertEqual(extract_json('```json\n{"atoms": []}\n```'), {"atoms": []})
         self.assertEqual(extract_json('Sure! {"atoms": []} Hope this helps'), {"atoms": []})
@@ -218,6 +229,8 @@ class OpenRouterBrainTests(unittest.TestCase):
         self.assertEqual(catalog["openrouter_free_brain"].params["response_format_mode"], "json_schema")
         self.assertEqual(catalog["openrouter_free_judge"].params["response_format_mode"], "json_object")
         self.assertEqual(catalog["openrouter_free_analyst"].params["response_format_mode"], "json_object")
+        self.assertEqual(catalog["openrouter_free_brain_reserve"].kind, "brain")
+        self.assertEqual(catalog["openrouter_free_brain_reserve"].params["response_format_mode"], "json_object")
 
     def test_json_schema_mode_is_sent_to_openrouter(self):
         calls = []
@@ -276,7 +289,8 @@ class BrainRetryTests(unittest.TestCase):
             n.append(req)
             return {"atoms": [], "_error": "not json"} if len(n) == 1 else {"atoms": [atom("scene_a", "A kitchen counter")]}
         self.assertEqual(len(request_atoms(offer, "b", 1, call)), 1)
-        self.assertIn("#root", [f["id"] for f in n[1]["only_fix"]])
+        self.assertIn("#shot_1", [f["id"] for f in n[1]["only_fix"]])
+        self.assertEqual(n[1]["retry_contract"]["mode"], "shot")
 
     def test_empty_answer_never_succeeds(self):
         with self.assertRaises(BrainError):
