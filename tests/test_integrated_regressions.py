@@ -102,7 +102,7 @@ class CrossStageContractTests(unittest.TestCase):
             "priority": "MUST", "channel": "image", "shot": 1,
         }
         bad = parse_atoms([base])
-        self.assertTrue(any("ATOM_TEXT_INCOMPLETE" in error for error in bad.errors["mech_result_1"]))
+        self.assertTrue(any("TEXT_REWRITE_REQUIRED" in error for error in bad.errors["mech_result_1"]))
         good = parse_atoms([{**base, "text": "The changed result is visible after the tool passes."}])
         self.assertEqual(good.errors, {})
 

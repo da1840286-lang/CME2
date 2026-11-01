@@ -70,6 +70,9 @@ class FinalMinimalFixTests(unittest.TestCase):
             "Stand-up base for filling and storage",
             "Secure seal",
         ]
+        second["transfer_decision"]["reason"] = (
+            "The target supports the same visible food-storage action without unsupported claims."
+        )
         replies = [first, second]
         captured = []
 

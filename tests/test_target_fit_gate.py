@@ -60,8 +60,8 @@ def decision(transferable, evidence=None, account=None):
         "abstract_mechanism": "Magnetic coupling connects portable storage directly to a phone",
         "target_native_mapping": "The target must demonstrate the same causal intervention, not just general convenience",
         "target_evidence": evidence or [],
-        "reason": ("The source intervention depends on magnetic phone-storage coupling absent from the target"
-                   if not transferable else "The target evidence supports the same causal intervention in this offer"),
+        "reason": ("The source intervention depends on magnetic phone-storage coupling absent from the target."
+                   if not transferable else "The target evidence supports the same causal intervention in this offer."),
     }}
 
 
@@ -91,7 +91,7 @@ class TargetFitGateTests(unittest.TestCase):
             "abstract_mechanism": "Show visible crumbs, remove them, then reveal a clean patch",
             "target_native_mapping": "Show crumbs on a car seat and one achievable cleaning pass",
             "target_evidence": ["cordless handheld car vacuum"],
-            "reason": "A visible dry-debris demo is normal use and needs no unverified numeric claim",
+            "reason": "A visible dry-debris demo is normal use and needs no unverified numeric claim.",
             **gate_account(),
         }
         calls = []
@@ -163,7 +163,7 @@ class TargetFitGateTests(unittest.TestCase):
             "target_native_mapping": "Show the cordless target vacuum removing visible crumbs from a car mat",
             "reason": (
                 "The source mechanism maps directly to this target product class, and ordinary "
-                "vacuuming can be demonstrated without unsupported 4-in-1 claims"
+                "vacuuming can be demonstrated without unsupported 4-in-1 claims."
             ),
         }
         corrected = {
@@ -172,7 +172,7 @@ class TargetFitGateTests(unittest.TestCase):
             "target_native_mapping": "Show the cordless target vacuum removing visible crumbs from a car mat",
             "reason": (
                 "The target is a cordless handheld vacuum, so a visible dry-debris demo preserves "
-                "the source mechanism without claiming the unsupported blower feature"
+                "the source mechanism without claiming the unsupported blower feature."
             ),
         }
         responses = [rejected_but_contradictory, corrected]
@@ -292,10 +292,11 @@ class TargetFitGateTests(unittest.TestCase):
                 target_offer(), "Create an original ad", source_context(), call, trace_out=trace,
             )
 
-        self.assertEqual(len(calls), 2, "Target-Fit must not loop indefinitely on malformed output")
-        self.assertEqual(len(trace), 2)
+        self.assertEqual(len(calls), 3, "Target-Fit must use exactly three total rounds")
+        self.assertEqual(len(trace), 3)
         self.assertTrue(trace[1]["previous_errors"])
-        self.assertTrue(trace[1]["validation_errors"])
+        self.assertTrue(trace[2]["previous_errors"])
+        self.assertTrue(trace[2]["validation_errors"])
 
     def test_gate_fails_closed_on_invalid_or_uncertain_output(self):
         with self.assertRaises(BrainError):
@@ -310,7 +311,7 @@ class TargetFitGateTests(unittest.TestCase):
             "abstract_mechanism": "Show the messy surface, then prove a visibly cleaner path",
             "target_native_mapping": "Demonstrate one achievable vacuum pass on a car seat",
             "target_evidence": ["Cordless car vacuum"],
-            "reason": "The OfferCard supports a target-native visible cleaning demonstration",
+            "reason": "The OfferCard supports a target-native visible cleaning demonstration.",
         }
         context = {"target_fit_gate": approved}
         req = build_request(target_offer(), "Make one frame", 1, source_transfer=context)
@@ -319,7 +320,7 @@ class TargetFitGateTests(unittest.TestCase):
             "transferable": True,
             "abstract_mechanism": "Use a dramatic close-up to make the product look premium",
             "preserved": [{"property": "a visible improvement after an action", "atom_id": "s1_scene"}],
-            "reason": "A dramatic product close-up looks persuasive to a potential buyer",
+            "reason": "A dramatic product close-up looks persuasive to a potential buyer."
         }
         calls = []
         decision_out = {}

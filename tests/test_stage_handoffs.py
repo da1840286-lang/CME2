@@ -178,7 +178,7 @@ class BrainToFrameChainTests(unittest.TestCase):
         fit = {"transferable": True, "abstract_mechanism": "Show a visible task being completed by hand",
                "target_native_mapping": "Show the bag holding food and one zip closure action",
                "target_evidence": ["Reusable and dishwasher safe"],
-               "reason": "The target class can honestly show the same visible task and result", **account}
+               "reason": "The target class can honestly show the same visible task and result.", **account}
         atoms = [
             atom("keep_hook_1", "Open on the distinctive attention hook before the product action appears"),
             atom("keep_mechanism_1", "Show the problem, target intervention, and resulting improvement as one visible sequence", kind="action"),
@@ -195,7 +195,7 @@ class BrainToFrameChainTests(unittest.TestCase):
                         {"property": "problem", "atom_id": "mech_problem_1"},
                         {"property": "intervention", "atom_id": "mech_intervention_1"},
                         {"property": "result", "atom_id": "mech_result_1"},
-                    ], "reason": "same visible sequence"}
+                    ], "reason": "Same visible sequence."}
         self.sent = []
 
         def transport(method, url, headers, payload):

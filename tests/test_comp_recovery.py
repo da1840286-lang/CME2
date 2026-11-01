@@ -80,9 +80,9 @@ class CompositionRecoveryTests(unittest.TestCase):
         self.assertEqual(len(text), 117)
         errors = atom_text_quality_errors([atom("comp_1", text)])
         message = errors["comp_1"][0]
-        self.assertIn(f"{MAX_TEXT}-character limit", message)
-        self.assertIn("at most 90 characters", message)
-        self.assertIn("Do NOT extend the fragment", message)
+        self.assertIn(f"{MAX_TEXT}-character code limit", message)
+        self.assertIn("at most 100 characters", message)
+        self.assertIn("Do not extend a truncated fragment", message)
 
     def test_incomplete_composition_retries_only_that_atom_and_accepts_new_suffix(self):
         first = brain_response(
@@ -133,8 +133,8 @@ class CompositionRecoveryTests(unittest.TestCase):
 
         # The second Brain validator still catches the same tail and owns its repair message.
         message = atom_text_quality_errors(parsed.atoms)["comp_word"][0]
-        self.assertIn("ATOM_TEXT_INCOMPLETE", message)
-        self.assertIn("dangling article, conjunction, or preposition", message)
+        self.assertIn("TEXT_REWRITE_REQUIRED", message)
+        self.assertIn("article, conjunction, or preposition", message)
 
     def test_parser_and_brain_use_the_same_short_rewrite_for_near_limit_dangling_endings(self):
         comma_text = (
@@ -149,14 +149,14 @@ class CompositionRecoveryTests(unittest.TestCase):
         parser_message = parsed.errors["comp_1"][0]
         brain_message = atom_text_quality_errors([raw_atom])["comp_1"][0]
         self.assertEqual(parser_message, brain_message)
-        self.assertIn("at most 90 characters", parser_message)
-        self.assertIn("Do NOT extend the fragment", parser_message)
+        self.assertIn("at most 100 characters", parser_message)
+        self.assertIn("Do not extend a truncated fragment", parser_message)
 
         conjunction_text = "One uninterrupted outdoor demonstration shows the cordless pressure washer spraying foam across patio furniture and"
         self.assertGreaterEqual(len(conjunction_text), MAX_TEXT - 8)
         conjunction_message = atom_text_quality_errors([atom("comp_2", conjunction_text)])["comp_2"][0]
-        self.assertIn("at most 90 characters", conjunction_message)
-        self.assertIn("Do NOT extend the fragment", conjunction_message)
+        self.assertIn("at most 100 characters", conjunction_message)
+        self.assertIn("Do not extend a truncated fragment", conjunction_message)
 
     def test_parser_rejection_evicts_previously_accepted_atom_with_the_same_id(self):
         first = brain_response(
@@ -194,7 +194,7 @@ class CompositionRecoveryTests(unittest.TestCase):
 
         self.assertEqual(len(calls), 2)
         self.assertIn("comp_1", rounds[1]["pending"])
-        self.assertIn("at most 90 characters", rounds[1]["pending"]["comp_1"][0])
+        self.assertIn("at most 100 characters", rounds[1]["pending"]["comp_1"][0])
         self.assertNotIn("comp_1", rounds[1]["accepted_ids"])
         self.assertNotIn("#composition", rounds[1]["pending"])
 

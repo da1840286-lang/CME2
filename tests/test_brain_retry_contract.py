@@ -269,7 +269,7 @@ class BrainRetryContractTests(unittest.TestCase):
 
     def test_incomplete_atom_tail_is_rejected(self):
         errors = atom_text_quality_errors([atom("comp_1", "One continuous patio surface, with a")])
-        self.assertIn("ATOM_TEXT_INCOMPLETE", errors["comp_1"][0])
+        self.assertIn("TEXT_REWRITE_REQUIRED", errors["comp_1"][0])
         self.assertEqual(
             atom_text_quality_errors([atom("comp_1", "One continuous patio demo shows foam coating the sprayed area.")]),
             {},
@@ -321,7 +321,7 @@ class BrainRetryContractTests(unittest.TestCase):
         )
         comp = next(item for item in result if item.id == "comp_1")
         self.assertEqual(len(calls), 2)
-        self.assertIn("ATOM_TEXT_INCOMPLETE", json.dumps(rounds[0]["pending"]))
+        self.assertIn("TEXT_REWRITE_REQUIRED", json.dumps(rounds[0]["pending"]))
         self.assertEqual(rounds[1]["pending"], {})
         self.assertTrue(comp.text.endswith("lifted."))
 

@@ -5,7 +5,8 @@
 from __future__ import annotations
 import json
 import re
-from .atoms import ATOM_SCHEMA, TRANSFER_ATOM_SCHEMA, atom_text_incomplete_error, check_claims, check_language, parse_atoms
+from .atoms import (ATOM_SCHEMA, TRANSFER_ATOM_SCHEMA, MODEL_GATE_REASON_MAX, GATE_REASON_MAX_TEXT, GATE_REASON_REWRITE_MAX,
+                    atom_text_incomplete_error, check_claims, check_language, parse_atoms, text_boundary_rewrite_error)
 from .branding import TARGET_BRAND_ALLOWED, brain_branding_rule, resolved_brand_marks
 from .vertical import check_vertical
 
@@ -526,7 +527,7 @@ TRANSFER_FIT_SCHEMA = {
                 "abstract_mechanism": {"type": "string", "minLength": 10, "maxLength": 200},
                 "target_native_mapping": {"type": "string", "minLength": 10, "maxLength": 240},
                 "target_evidence": {"type": "array", "maxItems": 3, "items": {"type": "string", "minLength": 1, "maxLength": 120}},
-                "reason": {"type": "string", "minLength": 10, "maxLength": 240},
+                "reason": {"type": "string", "minLength": 10, "maxLength": MODEL_GATE_REASON_MAX},
                 "demo_form_source": {"type": "string", "enum": list(DEMO_FORMS)},
                 "demo_form_target": {"type": "string", "enum": list(DEMO_FORMS)},
                 "source_elements_preserved": {
@@ -733,13 +734,28 @@ def validate_transfer_fit_decision(offer, decision, source_transfer=None) -> lis
     if type(decision.get("transferable")) is not bool:
         errors.append("transfer_decision.transferable must be a boolean")
     for key, minimum, maximum in (("abstract_mechanism", 10, 200),
-                                  ("target_native_mapping", 10, 240),
-                                  ("reason", 10, 240)):
+                                  ("target_native_mapping", 10, 240)):
         value = decision.get(key)
         if not isinstance(value, str) or not minimum <= len(value.strip()) <= maximum:
             errors.append(f"transfer_decision.{key} must contain {minimum}-{maximum} characters")
         elif _CYRILLIC.search(value):
             errors.append(f"transfer_decision.{key} must be in English")
+    reason = decision.get("reason")
+    if not isinstance(reason, str) or len(reason.strip()) < 10:
+        errors.append("transfer_decision.reason must contain at least 10 characters")
+    else:
+        reason_error = text_boundary_rewrite_error(
+            reason,
+            field="target_fit_gate.reason",
+            hard_limit=GATE_REASON_MAX_TEXT,
+            rewrite_limit=GATE_REASON_REWRITE_MAX,
+            allow_exact_limit=False,
+            require_terminal_punctuation=True,
+        )
+        if reason_error:
+            errors.append(reason_error)
+        if _CYRILLIC.search(reason):
+            errors.append("transfer_decision.reason must be in English")
     evidence = decision.get("target_evidence")
     if not isinstance(evidence, list) or len(evidence) > 3 or any(
         not isinstance(item, str) or not 1 <= len(item.strip()) <= 120 for item in (evidence or [])
@@ -990,8 +1006,8 @@ def _negative_gate_evidence_gap(decision) -> str:
     """A rejection whose every dropped element is justified only by missing target evidence for a source feature.
 
     Missing evidence for a feature (a readout, a rating, a spec number) is a data gap, not proof that the target
-    product class cannot perform the source's causal action. The model gets one extra round to name a real
-    incompatibility; this never turns a rejection into an approval.
+    product class cannot perform the source's causal action. This correction is requested only within the
+    fixed Gate round budget; exhausting that budget never turns a rejection into an approval.
     """
     if not isinstance(decision, dict) or decision.get("transferable") is not False:
         return ""
@@ -1011,8 +1027,8 @@ def _negative_gate_evidence_gap(decision) -> str:
     )
 
 
-def request_transfer_fit(offer, brief: str, source_transfer: dict, call, trace_out=None, max_rounds: int = 2) -> dict:
-    """Run the pre-generation fit gate, allowing one correction for invalid model output.
+def request_transfer_fit(offer, brief: str, source_transfer: dict, call, trace_out=None, max_rounds: int = 3) -> dict:
+    """Run the pre-generation fit gate with a fixed, auditable total-round budget.
 
     Only malformed/invalid responses are retried. A valid transferable=false verdict is final,
     and provider exceptions are left to the registry's infrastructure retry policy.
@@ -1051,13 +1067,13 @@ def request_transfer_fit(offer, brief: str, source_transfer: dict, call, trace_o
             "ELEMENT ACCOUNT (required): account for EVERY name in required_source_elements exactly once, either in source_elements_preserved (element, source_form = what it is in the source, target_form = how it appears with the target product, evidence_t_sec = timestamps selected from source_evidence_refs) or in source_elements_dropped (element, why). Do not list an element as preserved when its target_form is only a generic demo of the target product. If source_evidence_refs are supplied, every preserved element must cite 1-3 exact supplied timestamps that support the source observation; do not invent timestamps.",
             "MECHANISM IS NON-NEGOTIABLE: transferable=true is impossible unless the source element 'mechanism' is in source_elements_preserved. Preserving only the hook, visual style, result, or product action is not a mechanism transfer. If the causal mechanism cannot be carried to the target honestly, set transferable=false.",
             "demo_form_source and demo_form_target name the demonstration shape of the source and of your target plan (comparison, before_after, demonstration, testimonial, tutorial, other). A comparison or before_after source must keep a comparison or before_after target. Code rejects a missing source mechanism and rejects a comparison downgraded to an ordinary demonstration, whatever transferable says.",
+            "Keep transfer_decision.reason below 220 characters and end it with a complete sentence. The response schema permits 320 characters only so code can detect over-limit output; never use that extra schema allowance.",
             "Return transfer_decision with transferable, abstract_mechanism, target_native_mapping, target_evidence, reason, demo_form_source, demo_form_target, source_elements_preserved and source_elements_dropped. Explain the source-specific causal mechanism and how the target can or cannot demonstrate it.",
         ],
     }
 
     previous_errors = []
     last_errors = []
-    gap_round_granted = False
     gap_decision = None
     round_number = 0
     while round_number < max_rounds:
@@ -1071,7 +1087,7 @@ def request_transfer_fit(offer, brief: str, source_transfer: dict, call, trace_o
                 "return the complete response, and do not weaken any transferability or target-evidence requirement."
             )
 
-        record = {"phase": "target_fit_gate", "round": round_number}
+        record = {"phase": "target_fit_gate", "round": round_number, "round_budget": max_rounds}
         if previous_errors:
             record["previous_errors"] = list(previous_errors)
         if trace_out is not None:
@@ -1106,9 +1122,6 @@ def request_transfer_fit(offer, brief: str, source_transfer: dict, call, trace_o
             last_errors = errors
             gap_only = len(errors) == 1 and errors[0].startswith(_EVIDENCE_GAP_ERROR)
             gap_decision = decision if gap_only else None
-            if gap_only and not gap_round_granted and round_number >= max_rounds:
-                gap_round_granted = True   # one extra round to name a real incompatibility, or reconsider
-                max_rounds += 1
             continue
 
         result = {key: decision[key] for key in GATE_DECISION_KEYS}
@@ -1149,6 +1162,16 @@ def validate_transfer_decision(decision, atoms, fit_gate=None) -> list:
         value = decision.get(key)
         if isinstance(value, str) and _CYRILLIC.search(value):
             errors.append(f"transfer_decision.{key} must be in English")
+    if isinstance(reason, str) and len(reason.strip()) >= 10:
+        reason_error = text_boundary_rewrite_error(
+            reason,
+            field="transfer_decision.reason",
+            hard_limit=GATE_REASON_MAX_TEXT,
+            rewrite_limit=GATE_REASON_REWRITE_MAX,
+            allow_exact_limit=False,
+        )
+        if reason_error:
+            errors.append(reason_error)
     if decision.get("transferable") is True:
         mechanism = decision.get("abstract_mechanism")
         if not isinstance(mechanism, str) or len(mechanism.strip()) < 10:
@@ -1256,6 +1279,7 @@ def build_request(offer, brief: str, shots: int, failed=None, source_transfer=No
                      "Never use a forbidden claim.",
                      "When target-product reference photos are supplied, preserve the actual target product's form factor, silhouette, proportions, and distinctive visible parts. Keep the target product body recognizable in the frame; do not substitute a generic lookalike or change a compact handheld product into an upright/stick device.",
                      "Write every atom text in English, even when the input context is in another language. Translate the source statements; never copy non-English words into atoms.",
+                     "Aim to keep each atom text at or below 100 characters. Complete atoms up to the 120-character code limit remain valid; do not pad or add secondary details just to use the available length.",
                      "Frame budget: at most %d MUST image atoms per shot; use only one layout atom per shot; do not repeat the same visible requirement in a scene, action and mechanism atom. The mech_* atom carries the idea; other atoms add only distinct requirements." % MAX_MUST_IMAGE_PER_SHOT]}
     if source_transfer:
         req["source_transfer"] = source_transfer
@@ -1359,6 +1383,7 @@ def build_request(offer, brief: str, shots: int, failed=None, source_transfer=No
             "cannot demonstrate it without inventing features, or the mechanism becomes an unrelated ordinary target-product "
             "demo, set transferable=false, explain why, and return atoms=[]. If true, preserved must list EVERY element in "
             "source_elements_preserved exactly once (1-5 entries), and must not list any element in source_elements_dropped. "
+            "Keep transfer_decision.reason below 220 characters; the response schema allows extra headroom only so code can detect an over-limit answer. "
             "Each property must use its canonical Gate element name and point to an existing MUST image carrier: hook uses "
             "keep_hook[_suffix], mechanism uses keep_mechanism[_suffix], and problem/intervention/result use their matching "
             "mech_* atoms. Do not create duplicate keep_intervention or keep_result atoms; their mech_* atoms are the causal-link "
@@ -1369,16 +1394,20 @@ def build_request(offer, brief: str, shots: int, failed=None, source_transfer=No
     return req
 
 
-def request_atoms(offer, brief: str, shots: int, call, max_retries: int = 2, vertical=None, source_transfer=None, decision_out=None, rounds_out=None) -> list:
-    """Retry only what failed. An id's error clears only when that id arrives valid in a later round."""
+def request_atoms(offer, brief: str, shots: int, call, max_retries: int = 3, vertical=None, source_transfer=None, decision_out=None, rounds_out=None) -> list:
+    """Retry only what failed; max_retries counts retries after the initial call."""
+    if type(max_retries) is not int or max_retries < 0:
+        raise ValueError("max_retries must be a non-negative integer")
+    total_rounds = max_retries + 1
     by_id: dict = {}
     pending: dict = {}
     failed = None
     required_links = derive_mechanism_links(source_transfer)
     fit_gate = source_transfer.get("target_fit_gate") if isinstance(source_transfer, dict) else None
     held_decision = None
-    for round_number in range(1, max_retries + 2):
-        record = {"phase": "brain_atoms", "round": round_number,
+    for round_number in range(1, total_rounds + 1):
+        record = {"phase": "brain_atoms", "round": round_number, "round_budget": total_rounds,
+                  "retry_budget": max_retries,
                   "only_fix_ids": [item["id"] for item in failed] if failed else []}
         if rounds_out is not None:
             rounds_out.append(record)
@@ -1488,7 +1517,7 @@ def request_atoms(offer, brief: str, shots: int, call, max_retries: int = 2, ver
         # active and is re-evaluated as soon as a valid comp_* replacement arrives.
         incomplete_comp_pending = any(
             key.startswith("comp_")
-            and any(str(error).startswith("ATOM_TEXT_INCOMPLETE") for error in errors)
+            and any(str(error).startswith("TEXT_REWRITE_REQUIRED") for error in errors)
             for key, errors in pending.items()
         )
         composition_pending = pending.get("#composition") or []

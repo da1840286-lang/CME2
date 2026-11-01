@@ -123,7 +123,7 @@ class SourceTransferBridgeTests(unittest.TestCase):
                             "abstract_mechanism": DECISION["abstract_mechanism"],
                             "target_native_mapping": "Show the target product solving a recognizable task with visible proof",
                             "target_evidence": ["kitchen storage"],
-                            "reason": "The target offer can demonstrate a problem and inspectable improvement",
+                            "reason": "The target offer can demonstrate a problem and inspectable improvement.",
                             **gate_account(preserved=("mechanism", "problem", "intervention", "result"), dropped=("hook",))}
             def transport(method, url, headers, payload):
                 sent.append(payload)

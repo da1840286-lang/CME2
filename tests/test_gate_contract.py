@@ -35,7 +35,7 @@ def gate_answer(transferable=True, evidence=("Cordless car vacuum",), **account_
             "abstract_mechanism": "Compare the old way with the new tool on the same debris",
             "target_native_mapping": "Show the old way of cleaning next to the target vacuum on one car seat",
             "target_evidence": list(evidence),
-            "reason": "The target can show a visible comparison against the old way of cleaning",
+            "reason": "The target can show a visible comparison against the old way of cleaning.",
             **gate_account(**account_kwargs),
         },
     }

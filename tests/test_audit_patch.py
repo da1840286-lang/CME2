@@ -174,7 +174,7 @@ class MechanismCoverageTests(unittest.TestCase):
                             "abstract_mechanism": transfer_decision()["abstract_mechanism"],
                             "target_native_mapping": "Show a target product fixing a visible problem and prove the result",
                             "target_evidence": ["kitchen storage"],
-                            "reason": "The target can demonstrate a familiar task and visible improvement",
+                            "reason": "The target can demonstrate a familiar task and visible improvement.",
                             **gate_account(preserved=("mechanism", "problem", "intervention", "result"), dropped=("hook",))}
             def transport(method, url, headers, payload):
                 user_payload = json.loads(payload["messages"][1]["content"])

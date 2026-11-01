@@ -37,14 +37,14 @@ def dropped_everything(why):
 def negative(why):
     return {"transferable": False, "abstract_mechanism": "Visible dry debris is removed by a handheld action",
             "target_native_mapping": "Show debris and one cleaning pass", "target_evidence": [],
-            "reason": "see element account", **dropped_everything(why)}
+            "reason": "See the element account.", **dropped_everything(why)}
 
 
 def positive():
     return {"transferable": True, "abstract_mechanism": "Visible dry debris is removed by a handheld action",
             "target_native_mapping": "Show crumbs on a car seat and one cleaning pass",
             "target_evidence": ["cordless handheld car vacuum"],
-            "reason": "The target class performs the same visible action", **gate_account()}
+            "reason": "The target class performs the same visible action.", **gate_account()}
 
 
 class EvidenceGapGateTests(unittest.TestCase):
@@ -59,7 +59,7 @@ class EvidenceGapGateTests(unittest.TestCase):
             return {"atoms": [], "transfer_decision": decisions[min(len(calls), len(decisions)) - 1]}
         return request_transfer_fit(target_offer(), "brief", source_context(), call), calls
 
-    def test_evidence_gap_rejection_gets_one_extra_round_and_can_be_reconsidered(self):
+    def test_evidence_gap_rejection_can_be_reconsidered_within_the_fixed_budget(self):
         result, calls = self.run_gate([negative(self.GAP), positive()])
         self.assertTrue(result["transferable"])
         self.assertEqual(len(calls), 2)
@@ -69,7 +69,7 @@ class EvidenceGapGateTests(unittest.TestCase):
         result, calls = self.run_gate([negative(self.GAP)])
         self.assertFalse(result["transferable"])
         self.assertEqual(result["rejection_basis"], "EVIDENCE_GAP")
-        self.assertEqual(len(calls), 3)  # the default two rounds plus one granted round
+        self.assertEqual(len(calls), 3)  # The Gate has a fixed three-call budget; no hidden fourth round.
 
     def test_naming_a_real_incompatibility_after_the_hint_is_final_without_a_gap_label(self):
         result, calls = self.run_gate([negative(self.GAP), negative(self.REAL)])

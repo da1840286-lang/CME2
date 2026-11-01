@@ -8,9 +8,12 @@ import unicodedata
 from collections import Counter
 from dataclasses import dataclass, asdict
 
-MAX_TEXT = 120
-# A malformed ending close to the schema limit is usually a truncated thought, not a punctuation typo.
-ATOM_TEXT_REWRITE_THRESHOLD = MAX_TEXT - 8  # 112 characters for the current 120-character contract
+MAX_TEXT = 120  # Hard code-side limit for atoms; complete values up to this length remain valid.
+MODEL_ATOM_TEXT_MAX = 160  # Leave schema headroom so providers cannot silently cut output at the code limit.
+MODEL_GATE_REASON_MAX = 320  # Gate reasons are validated against the lower code-side limit (240).
+GATE_REASON_MAX_TEXT = 240
+ATOM_TEXT_REWRITE_MAX = 100
+GATE_REASON_REWRITE_MAX = 220
 PRIORITIES = ("MUST", "SHOULD", "MAY")
 CHANNELS = ("image", "motion", "qa")
 KINDS = ("scene", "product", "action", "composition", "light", "claim", "anchor", "text_rule", "motion", "qa_check")
@@ -25,7 +28,7 @@ _ATOM_ITEM_SCHEMA = {
     "properties": {
         "id": {"type": "string", "pattern": "^[a-z0-9_]{2,40}$"},
         "kind": {"type": "string", "enum": list(KINDS)},
-        "text": {"type": "string", "minLength": 3, "maxLength": MAX_TEXT},
+        "text": {"type": "string", "minLength": 3, "maxLength": MODEL_ATOM_TEXT_MAX},
         "priority": {"type": "string", "enum": list(PRIORITIES)},
         "channel": {"type": "string", "enum": list(CHANNELS)},
         "shot": {"type": "integer", "minimum": 1},
@@ -45,7 +48,7 @@ _TRANSFER_DECISION_SCHEMA = {
                 "atom_id": {"type": "string", "pattern": "^[a-z0-9_]{2,40}$"},
             },
         }},
-        "reason": {"type": "string", "maxLength": 240},
+        "reason": {"type": "string", "maxLength": MODEL_GATE_REASON_MAX},
     },
 }
 ATOM_SCHEMA = {
@@ -92,33 +95,53 @@ _DANGLING_WORD = re.compile(
 )
 
 
-def atom_text_incomplete_error(value: str, *, include_dangling_words: bool = True) -> str | None:
-    """Return the canonical repair instruction for a dangling atom ending.
+def text_boundary_rewrite_error(
+    value: str,
+    *,
+    field: str,
+    hard_limit: int,
+    rewrite_limit: int,
+    allow_exact_limit: bool = True,
+    require_terminal_punctuation: bool = False,
+    detect_dangling_words: bool = False,
+    detect_dangling_separators: bool = False,
+) -> str | None:
+    """Shared fail-closed check for text that is over budget or visibly unfinished.
 
-    This is shared by the parser and Brain's post-parse quality checks so a defect
-    cannot receive different guidance depending on which validator detects it.
-    Near-limit fragments get a deliberately short rewrite target instead of being
-    extended past the model's text budget.
+    Provider response schemas deliberately allow more characters than the code-side
+    contract. This validator therefore sees the model's uncut text and can distinguish
+    an over-budget value from a provider-truncated value at the old schema boundary.
     """
     text = str(value or "").strip()
-    separator = bool(_DANGLING_SEPARATOR.search(text))
-    dangling_word = include_dangling_words and bool(_DANGLING_WORD.search(text))
-    if not (separator or dangling_word):
+    too_long = len(text) > hard_limit or (not allow_exact_limit and len(text) >= hard_limit)
+    dangling_word = detect_dangling_words and bool(_DANGLING_WORD.search(text))
+    dangling_separator = detect_dangling_separators and bool(_DANGLING_SEPARATOR.search(text))
+    missing_terminal = require_terminal_punctuation and not text.endswith((".", "!", "?"))
+    if not (too_long or dangling_word or dangling_separator or missing_terminal):
         return None
 
-    ending = "a dangling separator (comma, semicolon, or colon)" if separator else "a dangling article, conjunction, or preposition"
-    if len(text) >= ATOM_TEXT_REWRITE_THRESHOLD:
-        return (
-            f"ATOM_TEXT_INCOMPLETE: text is close to the {MAX_TEXT}-character limit "
-            f"({len(text)} chars) and ends with {ending}; it may be truncated. "
-            "Do NOT extend the fragment. Rewrite it as ONE grammatically complete sentence "
-            "of at most 90 characters, ending with a concrete noun or verb; drop secondary details."
-        )
-    if separator:
-        return "ATOM_TEXT_INCOMPLETE: text ends with a dangling separator; complete or rewrite the atom"
+    ending_rule = (
+        "and finish with a period, exclamation mark, or question mark"
+        if require_terminal_punctuation else
+        "and finish on a complete word, not a dangling separator, article, conjunction, or preposition"
+    )
     return (
-        "ATOM_TEXT_INCOMPLETE: text ends with a dangling article, conjunction, or preposition; "
-        "rewrite the atom as one grammatically complete sentence before accepting it"
+        f"TEXT_REWRITE_REQUIRED: {field} is incomplete or exceeds its {hard_limit}-character code limit "
+        f"({len(text)} characters). Rewrite the entire value as one complete sentence of at most "
+        f"{rewrite_limit} characters {ending_rule}. Do not extend a truncated fragment; remove secondary details."
+    )
+
+
+def atom_text_incomplete_error(value: str, *, include_dangling_words: bool = True) -> str | None:
+    """Compatibility wrapper for atom text checks; the shared boundary helper owns the message."""
+    return text_boundary_rewrite_error(
+        value,
+        field="atom.text",
+        hard_limit=MAX_TEXT,
+        rewrite_limit=ATOM_TEXT_REWRITE_MAX,
+        allow_exact_limit=True,
+        detect_dangling_words=include_dangling_words,
+        detect_dangling_separators=True,
     )
 
 
@@ -162,10 +185,16 @@ def parse_atoms(raw) -> ParseResult:
             if item["channel"] not in CHANNELS:
                 errs.append(f"bad channel {item['channel']}")
             text = item["text"].strip()
-            if len(text) > MAX_TEXT:
-                errs.append(f"text {len(text)} chars > {MAX_TEXT}: split or shorten")
-            # Preserve parser semantics: dangling words are handled by Brain's quality validator.
-            incomplete_ending = atom_text_incomplete_error(text, include_dangling_words=False)
+            # Preserve parser semantics: dangling words are handled by Brain's second validator.
+            incomplete_ending = text_boundary_rewrite_error(
+                text,
+                field="atom.text",
+                hard_limit=MAX_TEXT,
+                rewrite_limit=ATOM_TEXT_REWRITE_MAX,
+                allow_exact_limit=True,
+                detect_dangling_words=False,
+                detect_dangling_separators=True,
+            )
             if incomplete_ending:
                 errs.append(incomplete_ending)
             if len(text) < 3:

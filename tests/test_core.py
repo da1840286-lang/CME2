@@ -1,6 +1,6 @@
 import json, tempfile, unittest
 from pathlib import Path
-from cme.atoms import ATOM_SCHEMA, MAX_TEXT, check_claims, parse_atoms
+from cme.atoms import ATOM_SCHEMA, MAX_TEXT, MODEL_ATOM_TEXT_MAX, check_claims, parse_atoms
 from cme.brain import build_request
 from cme.compiler import BudgetError, compile_image_prompt, compile_motion_prompt
 from cme.offer import OfferError, load_offer
@@ -42,7 +42,7 @@ class AtomTests(unittest.TestCase):
 
     def test_schema_carries_length_limit(self):
         item = ATOM_SCHEMA["properties"]["atoms"]["items"]["properties"]["text"]
-        self.assertEqual(item["maxLength"], MAX_TEXT)
+        self.assertEqual(item["maxLength"], MODEL_ATOM_TEXT_MAX)
 
     def test_parse_collects_per_atom_errors(self):
         raw = [self.good(), self.good(id="b_2", text="x" * 121), self.good(id="c_3", priority="HIGH"),
@@ -51,7 +51,7 @@ class AtomTests(unittest.TestCase):
         self.assertEqual(r.atoms, [])  # a_1 is used twice: every occurrence is rejected
         self.assertEqual(set(r.errors), {"b_2", "c_3", "a_1"})
         self.assertIn("2 times", r.errors["a_1"][0])
-        self.assertIn("split or shorten", r.errors["b_2"][0])
+        self.assertIn("TEXT_REWRITE_REQUIRED", r.errors["b_2"][0])
 
     def test_claims_verified_verbatim_only(self):
         o = load_offer(EX)
