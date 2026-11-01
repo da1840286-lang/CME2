@@ -5,7 +5,7 @@
 from __future__ import annotations
 import json
 import re
-from .atoms import ATOM_SCHEMA, TRANSFER_ATOM_SCHEMA, check_claims, check_language, parse_atoms
+from .atoms import ATOM_SCHEMA, MAX_TEXT, TRANSFER_ATOM_SCHEMA, check_claims, check_language, parse_atoms
 from .branding import TARGET_BRAND_ALLOWED, brain_branding_rule, resolved_brand_marks
 from .vertical import check_vertical
 
@@ -269,11 +269,20 @@ def atom_text_quality_errors(atoms) -> dict:
     for atom in atoms:
         aid, _priority, _channel, _kind = _atom_view(atom)
         text = atom.get("text", "") if isinstance(atom, dict) else getattr(atom, "text", "")
-        if _INCOMPLETE_ATOM_END.search(str(text or "").strip()):
-            errors[str(aid)] = [
-                "ATOM_TEXT_INCOMPLETE: text ends with a dangling article, conjunction, or preposition; "
-                "complete the phrase before accepting this atom"
-            ]
+        stripped = str(text or "").strip()
+        if _INCOMPLETE_ATOM_END.search(stripped):
+            if len(stripped) >= MAX_TEXT - 6:
+                errors[str(aid)] = [
+                    f"ATOM_TEXT_INCOMPLETE: text is near the {MAX_TEXT}-character limit and may have been cut "
+                    f"mid-sentence ({len(stripped)} chars; dangling ending). Do NOT extend the fragment. "
+                    "Rewrite it as ONE grammatically complete sentence of at most 90 characters, ending with "
+                    "a concrete noun or verb; drop secondary details."
+                ]
+            else:
+                errors[str(aid)] = [
+                    "ATOM_TEXT_INCOMPLETE: text ends with a dangling article, conjunction, or preposition; "
+                    "rewrite the atom as one grammatically complete sentence before accepting it"
+                ]
     return errors
 
 
@@ -1486,6 +1495,20 @@ def request_atoms(offer, brief: str, shots: int, call, max_retries: int = 2, ver
             **atom_budget_errors(by_id.values(), shots, fit_gate=fit_gate),
         }
         pending.update(structure_errors)
+        # A composition atom rejected for unfinished wording still exists as a logical
+        # requirement. Do not turn that one atom-level repair into a second, contradictory
+        # request to create a new composition atom. The structural requirement remains
+        # active and is re-evaluated as soon as a valid comp_* replacement arrives.
+        incomplete_comp_pending = any(
+            key.startswith("comp_")
+            and any(str(error).startswith("ATOM_TEXT_INCOMPLETE") for error in errors)
+            for key, errors in pending.items()
+        )
+        composition_pending = pending.get("#composition") or []
+        if incomplete_comp_pending and composition_pending and all(
+            str(error).startswith("COMPOSITION_REQUIRED") for error in composition_pending
+        ):
+            pending.pop("#composition", None)
         if source_transfer:
             candidate_decision = offered if isinstance(offered, dict) else held_decision
             fit_gate = source_transfer.get("target_fit_gate") if isinstance(source_transfer, dict) else None
