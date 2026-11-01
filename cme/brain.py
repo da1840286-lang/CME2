@@ -7,7 +7,7 @@ import json
 import re
 from .atoms import (ATOM_SCHEMA, TRANSFER_ATOM_SCHEMA, MODEL_GATE_REASON_MAX, GATE_REASON_MAX_TEXT, GATE_REASON_REWRITE_MAX,
                     atom_text_incomplete_error, check_claims, check_language, parse_atoms, text_boundary_rewrite_error)
-from .branding import TARGET_BRAND_ALLOWED, brain_branding_rule, resolved_brand_marks
+from .branding import NO_BRANDING, TARGET_BRAND_ALLOWED, brain_branding_rule, resolved_brand_marks
 from .vertical import check_vertical
 
 
@@ -265,6 +265,24 @@ def atom_text_quality_errors(atoms) -> dict:
         message = atom_text_incomplete_error(text)
         if message:
             errors[str(aid)] = [message]
+    return errors
+
+
+def atom_target_text_policy_errors(atoms, branding_policy=TARGET_BRAND_ALLOWED) -> dict:
+    """Reject model-authored image atoms that reintroduce text prohibited by campaign policy."""
+    errors = {}
+    for atom in atoms:
+        aid, _priority, channel, kind = _atom_view(atom)
+        if channel != "image" or kind == "claim":
+            continue
+        text = atom.get("text", "") if isinstance(atom, dict) else getattr(atom, "text", "")
+        if _positive_text_display_directive(
+            text, forbid_product_marks=(branding_policy == NO_BRANDING)
+        ):
+            errors[str(aid)] = [
+                "NO_ADDED_TEXT_POLICY: image atom requests a text overlay, caption, subtitle, title card, UI, "
+                "watermark or prohibited product lettering. Rewrite it as a visual-only scene."
+            ]
     return errors
 
 
@@ -585,7 +603,58 @@ def required_gate_elements(source_transfer) -> tuple:
     return tuple(name for name in GATE_ELEMENTS if present.get(name))
 
 
-def validate_gate_elements(decision, source_transfer=None) -> list:
+_TARGET_TEXT_DISPLAY_DIRECTIVE = re.compile(
+    r"\b(?:text\s+overlays?|overlay\s+text|on[- ]screen\s+text|captions?|subtitles?|"
+    r"title\s+cards?|speech\s+bubbles?|watermarks?|promotional\s+(?:text|wording|copy)|"
+    r"written\s+(?:words?|text)|(?:text|words?)\s+(?:reading|saying)|"
+    r"readable\s+(?:text|lettering)|screen\s+text|ui\s+text)\b",
+    re.I,
+)
+_TARGET_MARK_DISPLAY_DIRECTIVE = re.compile(
+    r"\b(?:logos?|brand\s+names?|wordmarks?|product\s+labels?|readable\s+lettering|"
+    r"printed\s+(?:words?|text)|engraved\s+(?:words?|text))\b",
+    re.I,
+)
+_NEGATED_TEXT_DISPLAY_DIRECTIVE = re.compile(
+    r"\b(?:no|without|not|never|avoid(?:s|ed|ing)?|omit(?:s|ted|ting)?|remove(?:s|d)?|"
+    r"exclude(?:s|d)?|prohibit(?:s|ed)?|forbid(?:s|den)?|do\s+not|must\s+not|should\s+not)\s+"
+    r"(?:(?:any|added|visible|readable|on[- ]screen|promotional)\s+)*"
+    r"(?:text\s+overlays?|overlay\s+text|on[- ]screen\s+text|captions?|subtitles?|"
+    r"title\s+cards?|speech\s+bubbles?|watermarks?|promotional\s+(?:text|wording|copy)|"
+    r"written\s+(?:words?|text)|screen\s+text|ui\s+text|logos?|brand\s+names?|"
+    r"wordmarks?|product\s+labels?|lettering)\b",
+    re.I,
+)
+_NEGATED_TEXT_DISPLAY_AFTER = re.compile(
+    r"^\s*(?:(?:must|should|will|is|are|be|being)\s+)?not\s+"
+    r"(?:be\s+)?(?:shown|used|added|included|present|visible|rendered|displayed)\b",
+    re.I,
+)
+
+
+def _positive_text_display_directive(value: str, *, forbid_product_marks: bool = False) -> bool:
+    """True only for an affirmative target request to render text or prohibited product marks."""
+    text = str(value or "")
+    patterns = [_TARGET_TEXT_DISPLAY_DIRECTIVE]
+    if forbid_product_marks:
+        patterns.append(_TARGET_MARK_DISPLAY_DIRECTIVE)
+    for pattern in patterns:
+        for match in pattern.finditer(text):
+            clause_start = max(text.rfind(".", 0, match.start()),
+                               text.rfind("!", 0, match.start()),
+                               text.rfind("?", 0, match.start()),
+                               text.rfind(";", 0, match.start()))
+            prefix_through_match = text[clause_start + 1:match.end()]
+            if _NEGATED_TEXT_DISPLAY_DIRECTIVE.search(prefix_through_match):
+                continue
+            suffix = text[match.end():match.end() + 55]
+            if _NEGATED_TEXT_DISPLAY_AFTER.search(suffix):
+                continue
+            return True
+    return False
+
+
+def validate_gate_elements(decision, source_transfer=None, branding_policy=TARGET_BRAND_ALLOWED) -> list:
     """Structure of the preserved/dropped account. Shape and bookkeeping only; meaning stays with the model."""
     errors = []
     for key in ("demo_form_source", "demo_form_target"):
@@ -616,8 +685,26 @@ def validate_gate_elements(decision, source_transfer=None) -> list:
                     errors.append(f"transfer_decision.{list_key}[{index}].{text_key} must contain 8-160 characters")
                 elif _CYRILLIC.search(value):
                     errors.append(f"transfer_decision.{list_key}[{index}].{text_key} must be in English")
-                elif list_key == "source_elements_preserved" and text_key == "target_form" and len(_keep_content_words(value)) < 2:
-                    errors.append(f"transfer_decision.{list_key}[{index}].target_form must specify at least two meaningful visual or causal details")
+                elif list_key == "source_elements_preserved" and text_key == "target_form":
+                    if len(_keep_content_words(value)) < 2:
+                        errors.append(f"transfer_decision.{list_key}[{index}].target_form must specify at least two meaningful visual or causal details")
+                    source_form = item.get("source_form")
+                    if isinstance(source_form, str):
+                        source_words = _keep_content_words(source_form)
+                        target_words = _keep_content_words(value)
+                        if source_words and not (target_words - source_words):
+                            errors.append(
+                                f"transfer_decision.{list_key}[{index}].target_form must record a target-specific "
+                                "adaptation instead of repeating the source form; name the changed target context or action"
+                            )
+                    if _positive_text_display_directive(
+                        value, forbid_product_marks=(branding_policy == NO_BRANDING)
+                    ):
+                        errors.append(
+                            f"NO_ADDED_TEXT_POLICY: transfer_decision.{list_key}[{index}].target_form requests "
+                            "visible text, captions, overlays, UI, watermarks or prohibited product lettering; "
+                            "adapt the source hook to a visual-only target form or account for it as dropped"
+                        )
             if list_key == "source_elements_preserved":
                 if "evidence_t_sec" not in item:
                     errors.append(f"transfer_decision.{list_key}[{index}].evidence_t_sec is required (use [] only when source frame observations are unavailable)")
@@ -630,9 +717,14 @@ def validate_gate_elements(decision, source_transfer=None) -> list:
                     for t in refs:
                         if not any(abs(float(t) - known) <= 0.05 for known in available_evidence):
                             errors.append(f"transfer_decision.{list_key}[{index}].evidence_t_sec contains {t}, which is not a timestamp with a supplied source observation")
-    for element in required_gate_elements(source_transfer):
-        if element not in seen:
-            errors.append(f"transfer_decision must account for source element '{element}' as preserved or dropped")
+    required = set(required_gate_elements(source_transfer))
+    for element in sorted(required - set(seen)):
+        errors.append(f"transfer_decision must account for source element '{element}' as preserved or dropped")
+    if isinstance(source_transfer, dict):
+        for element in sorted(set(seen) - required):
+            errors.append(
+                f"transfer_decision accounts for source element '{element}' that is not present in the supplied source contract"
+            )
     return errors
 
 
@@ -756,6 +848,14 @@ def validate_transfer_fit_decision(offer, decision, source_transfer=None) -> lis
             errors.append(reason_error)
         if _CYRILLIC.search(reason):
             errors.append("transfer_decision.reason must be in English")
+    if _positive_text_display_directive(
+        str(decision.get("target_native_mapping") or ""),
+        forbid_product_marks=(getattr(offer, "branding_policy", TARGET_BRAND_ALLOWED) == NO_BRANDING),
+    ):
+        errors.append(
+            "NO_ADDED_TEXT_POLICY: transfer_decision.target_native_mapping requests visible text, captions, "
+            "overlays, UI, watermarks or prohibited product lettering; describe a visual-only target hook"
+        )
     evidence = decision.get("target_evidence")
     if not isinstance(evidence, list) or len(evidence) > 3 or any(
         not isinstance(item, str) or not 1 <= len(item.strip()) <= 120 for item in (evidence or [])
@@ -790,7 +890,11 @@ def validate_transfer_fit_decision(offer, decision, source_transfer=None) -> lis
                 f"transfer_decision.target_evidence[{index}] is shorter than 8 characters and must exactly match "
                 "a complete authoritative OfferCard field"
             )
-    errors.extend(validate_gate_elements(decision, source_transfer))
+    errors.extend(validate_gate_elements(
+        decision,
+        source_transfer,
+        branding_policy=getattr(offer, "branding_policy", TARGET_BRAND_ALLOWED),
+    ))
     return errors
 
 
@@ -1064,7 +1168,8 @@ def request_transfer_fit(offer, brief: str, source_transfer: dict, call, trace_o
             "A target_evidence excerpt shorter than 8 characters is allowed only when it exactly matches a complete OfferCard field; do not use a short fragment from a longer field.",
             "A shared generic desire (easy, fast, fewer cables, convenient) is not sufficient. Map the core causal action and observable result the target can plausibly demonstrate; do not reject it merely because optional specs or supporting shots are unverified. Choose transferable=false only when an essential target capability is unsupported, the core intervention cannot be demonstrated, or material uncertainty remains about that essential capability.",
             "ESSENTIAL VERSUS OPTIONAL FEATURES: a source feature is essential only if removing it changes the causal action or its observable result (a device without suction cannot demonstrate suction). A display readout, a power rating, a spec number or an accessory that does not change what visibly happens is optional: omit it from the creative, keep every element it does not define as preserved, and do not cite its missing target evidence as the reason for rejection.",
-            "ELEMENT ACCOUNT (required): account for EVERY name in required_source_elements exactly once, either in source_elements_preserved (element, source_form = what it is in the source, target_form = how it appears with the target product, evidence_t_sec = timestamps selected from source_evidence_refs) or in source_elements_dropped (element, why). Do not list an element as preserved when its target_form is only a generic demo of the target product. If source_evidence_refs are supplied, every preserved element must cite 1-3 exact supplied timestamps that support the source observation; do not invent timestamps.",
+            "ELEMENT ACCOUNT (required): account for EVERY name in required_source_elements exactly once, either in source_elements_preserved (element, source_form = what it is in the source, target_form = how it appears with the target product, evidence_t_sec = timestamps selected from source_evidence_refs) or in source_elements_dropped (element, why). Do not invent unlisted elements. For every preserved element, target_form must describe the target-native adaptation, not repeat source_form. An empty source_elements_dropped is valid when every source element is preserved. If source_evidence_refs are supplied, every preserved element must cite 1-3 exact supplied timestamps that support the source observation; do not invent timestamps.",
+            "NO-ADDED-TEXT POLICY (non-negotiable): Never request text overlays, on-screen text, captions, subtitles, title cards, speech bubbles, UI, watermarks or promotional copy in target_form or target_native_mapping. If the source hook is a text overlay, describe it factually only in source_form; convert its attention idea into a visual-only target_form and target_native_mapping, or list hook as dropped. The source may contain text; the target creative must not add it.",
             "MECHANISM IS NON-NEGOTIABLE: transferable=true is impossible unless the source element 'mechanism' is in source_elements_preserved. Preserving only the hook, visual style, result, or product action is not a mechanism transfer. If the causal mechanism cannot be carried to the target honestly, set transferable=false.",
             "demo_form_source and demo_form_target name the demonstration shape of the source and of your target plan (comparison, before_after, demonstration, testimonial, tutorial, other). A comparison or before_after source must keep a comparison or before_after target. Code rejects a missing source mechanism and rejects a comparison downgraded to an ordinary demonstration, whatever transferable says.",
             "Keep transfer_decision.reason below 220 characters and end it with a complete sentence. The response schema permits 320 characters only so code can detect over-limit output; never use that extra schema allowance.",
@@ -1276,6 +1381,7 @@ def build_request(offer, brief: str, shots: int, failed=None, source_transfer=No
                      "Every kind='qa_check' atom must use channel='qa'; it is a verification criterion and must not be included in the image-generation prompt.",
                      "Do not emit an atom whose id is 'qa_no_text' or starts with 'qa_no_text_'. The canonical no-added-text requirement is injected and checked by code, so Brain must not author a duplicate QA criterion.",
                       branding_rule,
+                     "NO-ADDED-TEXT POLICY: do not add text overlays, captions, subtitles, title cards, speech bubbles, UI, watermarks or promotional wording to any image atom. If the source hook is text, translate its attention mechanism into a visual-only action; never reproduce the source wording.",
                      "Never use a forbidden claim.",
                      "When target-product reference photos are supplied, preserve the actual target product's form factor, silhouette, proportions, and distinctive visible parts. Keep the target product body recognizable in the frame; do not substitute a generic lookalike or change a compact handheld product into an upright/stick device.",
                      "Write every atom text in English, even when the input context is in another language. Translate the source statements; never copy non-English words into atoms.",
@@ -1444,6 +1550,10 @@ def request_atoms(offer, brief: str, shots: int, call, max_retries: int = 3, ver
         for aid, errs in check_language(parsed.atoms).items():
             round_errs.setdefault(aid, []).extend(errs)
         for aid, errs in atom_text_quality_errors(parsed.atoms).items():
+            round_errs.setdefault(aid, []).extend(errs)
+        for aid, errs in atom_target_text_policy_errors(
+            parsed.atoms, getattr(offer, "branding_policy", TARGET_BRAND_ALLOWED)
+        ).items():
             round_errs.setdefault(aid, []).extend(errs)
         # Branding/no-added-text QA is injected by campaign policy. Ignore duplicate Brain-authored
         # checks instead of spending correction rounds asking the model to remove them repeatedly.

@@ -42,6 +42,7 @@ def source_context():
     return {
         "format": "radar_analysis_hypothesis",
         "source_evidence_scope": "sampled frames only; not full-video verification",
+        "hook": "A phone is shown with a storage device attached directly to it",
         "buyer_problem": "Phone storage is inconvenient when cables are required",
         "product_intervention": "A magnetic attachment connects an external SSD directly to a phone",
         "result_demo": "The drive attaches without a loose cable",
