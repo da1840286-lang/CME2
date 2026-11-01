@@ -130,9 +130,28 @@ class SourceTransferBridgeTests(unittest.TestCase):
                 user_payload = json.loads(payload["messages"][1]["content"])
                 answer = ({"atoms": [], "transfer_decision": fit_decision}
                           if user_payload.get("task") == "target_fit_gate"
-                          else {"atoms": [GOOD], "transfer_decision": DECISION})
+                          else {"atoms": brain_atoms, "transfer_decision": brain_decision})
                 response = {"model": payload["model"], "choices": [{"message": {"content": json.dumps(answer)}}]}
                 return 200, json.dumps(response).encode()
+            brain_atoms = [
+                {**GOOD, "id": "keep_mechanism_s1_scene",
+                 "text": "Show the problem, target intervention, and resulting improvement as one visible sequence"},
+                {**GOOD, "id": "mech_problem_s1_scene", "text": "Show the concrete user problem before intervention"},
+                {**GOOD, "id": "mech_intervention_s1_action", "kind": "action",
+                 "text": "Show the target intervention applied directly to the problem"},
+                {**GOOD, "id": "mech_result_s1_scene", "text": "Show an observable result after the intervention"},
+            ]
+            brain_decision = {
+                "transferable": True,
+                "abstract_mechanism": DECISION["abstract_mechanism"],
+                "preserved": [
+                    {"property": "mechanism", "atom_id": "keep_mechanism_s1_scene"},
+                    {"property": "problem", "atom_id": "mech_problem_s1_scene"},
+                    {"property": "intervention", "atom_id": "mech_intervention_s1_action"},
+                    {"property": "result", "atom_id": "mech_result_s1_scene"},
+                ],
+                "reason": "The target product visibly demonstrates the same causal mechanism and result.",
+            }
             out = root / "out"
             code = smoke_main(["brain", "--settings", str(settings_path), "--out", str(out),
                                "--source-contract", str(source_path), "--shots", "1"],

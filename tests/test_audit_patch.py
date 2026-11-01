@@ -26,9 +26,17 @@ def atom(i, text="A clean kitchen counter", shot=1, kind="scene", prio="MUST", c
     return {"id": i, "kind": kind, "text": text, "priority": prio, "channel": ch, "shot": shot}
 
 
-def transfer_decision(atom_id="mech_problem_seat"):
+def transfer_decision(atom_id="mech_problem_seat", gate_accounted=False):
+    preserved = ([
+        {"property": "mechanism", "atom_id": "keep_mechanism_visible_change"},
+        {"property": "problem", "atom_id": "mech_problem_seat"},
+        {"property": "intervention", "atom_id": "mech_intervention_nozzle"},
+        {"property": "result", "atom_id": "mech_result_clean"},
+    ] if gate_accounted else [
+        {"property": "the source problem becomes a visibly improved result", "atom_id": atom_id}
+    ])
     return {"transferable": True, "abstract_mechanism": "Show a clear problem and visible improvement",
-            "preserved": [{"property": "the source problem becomes a visibly improved result", "atom_id": atom_id}],
+            "preserved": preserved,
             "reason": "The target product can honestly demonstrate the same causal mechanism."}
 
 
@@ -42,9 +50,8 @@ RADAR = {"result": {
 FULL = [atom("mech_problem_seat", "Crumbs packed into a seat gap"),
         atom("mech_intervention_nozzle", "Compact vacuum nozzle pulling crumbs from the gap"),
         atom("mech_result_clean", "The same seat gap now visibly clean"),
-        atom("comp_split_1", "One-frame comparison layout with separate problem and result regions", kind="scene"),
-        atom("keep_mechanism_visible_change", "Show the problem, target intervention, and resulting improvement as one visible sequence"),
-        atom("keep_hook_visible_mess", "Open on the distinctive attention hook before the product action appears")]
+        atom("comp_split_1", "One uninterrupted demonstration shows the tool acting on the visible problem with an observable result cue", kind="scene"),
+        atom("keep_mechanism_visible_change", "Show the problem, target intervention, and resulting improvement as one visible sequence")]
 
 
 class LanguageTests(unittest.TestCase):
@@ -173,7 +180,7 @@ class MechanismCoverageTests(unittest.TestCase):
                 user_payload = json.loads(payload["messages"][1]["content"])
                 answer = ({"atoms": [], "transfer_decision": fit_decision}
                           if user_payload.get("task") == "target_fit_gate"
-                          else {"atoms": FULL, "transfer_decision": transfer_decision()})
+                          else {"atoms": FULL, "transfer_decision": transfer_decision(gate_accounted=True)})
                 body = {"model": payload["model"], "choices": [{"message": {"content": json.dumps(answer)}}]}
                 return 200, json.dumps(body).encode()
             out = root / "out"

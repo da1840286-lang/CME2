@@ -4,9 +4,9 @@ import json
 import unittest
 from pathlib import Path
 
-from cme.brain import (atom_id_matches_role, atom_role, build_request,
-                       build_source_transfer_context, request_atoms,
-                       validate_transfer_decision)
+from cme.brain import (atom_id_matches_role, atom_role, atom_text_quality_errors,
+                       atom_budget_errors, build_request, build_source_transfer_context, composition_form_errors,
+                       request_atoms, validate_transfer_decision)
 from cme.offer import OfferCard
 from tests.test_target_fit_gate import target_offer
 
@@ -26,13 +26,36 @@ def atom(atom_id, text, kind="scene", channel="image", priority="MUST"):
     return {"id": atom_id, "kind": kind, "text": text, "priority": priority, "channel": channel, "shot": 1}
 
 
+def prepare_demo_form_fixture(value):
+    """Adapt the historical provider response to its approved demonstration form/account."""
+    prepared = copy.deepcopy(value)
+    for item in prepared.get("atoms", []):
+        if str(item.get("id") or "").startswith("comp_"):
+            item["text"] = (
+                "One continuous outdoor demo shows the nozzle spraying foam onto patio furniture "
+                "and visibly coating the contacted area."
+            )
+    decision = prepared.get("transfer_decision") or {}
+    preserved = decision.get("preserved") if isinstance(decision.get("preserved"), list) else []
+    if not any(isinstance(item, dict) and item.get("property") == "problem" for item in preserved):
+        problem = next(
+            (item for item in prepared.get("atoms", [])
+             if str(item.get("id") or "").startswith("mech_problem")),
+            None,
+        )
+        if problem:
+            preserved.append({"property": "problem", "atom_id": problem["id"]})
+            decision["preserved"] = preserved
+    return prepared
+
+
 def response(suffix, include_result=True, include_reserved_qa=True):
     atoms = [
         atom(f"keep_hook_{suffix}", "Show the target cordless vacuum in a car interior without a power cord."),
         atom(f"keep_mechanism_{suffix}", "Cordless suction reaches crumbs in tight car seat crevices."),
         atom(f"mech_problem_{suffix}", "Visible crumbs and dust sit in a car seat crevice before cleaning."),
         atom(f"mech_intervention_{suffix}", "The target cordless vacuum nozzle removes crumbs from the seat crevice.", "action"),
-        atom(f"comp_{suffix}", "One continuous car surface has a dirty crevice on the left and a clean strip on the right."),
+        atom(f"comp_{suffix}", "One continuous car-seat demonstration shows the nozzle contacting the crevice as crumbs are lifted."),
     ]
     if include_result:
         atoms.append(atom(f"mech_result_{suffix}", "The same seat crevice is visibly free of crumbs after vacuuming."))
@@ -107,7 +130,7 @@ class BrainRetryContractTests(unittest.TestCase):
         self.assertTrue(atom_id_matches_role("mech_result", "mech_result_"))
         self.assertFalse(atom_id_matches_role("mech_intervention_1", "mech_result"))
 
-    def test_real_failed_brain_run_response_passes_without_repair_round(self):
+    def test_real_failed_brain_run_response_is_repaired_by_quality_contract(self):
         fixture_path = Path(__file__).parent / "fixtures" / "brain_failed_run_41252251386.json"
         fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
         source_transfer = build_source_transfer_context({"result": fixture["source_analysis_result"]})
@@ -126,20 +149,24 @@ class BrainRetryContractTests(unittest.TestCase):
         calls = []
         decision_out = {}
         rounds_out = []
-        real_response = fixture["brain_response_round_1"]
+        original_response = fixture["brain_response_round_1"]
+        corrected_response = prepare_demo_form_fixture(original_response)
 
         def call(_request):
             calls.append(_request)
-            return real_response
+            return original_response if len(calls) == 1 else corrected_response
 
         atoms = request_atoms(
             offer, "Show the cordless pressure washer spraying foam onto outdoor hard surfaces.", 1, call,
             source_transfer=source_transfer, decision_out=decision_out, rounds_out=rounds_out,
         )
 
-        self.assertEqual(len(calls), 1, "the actual first-round response already carries every required atom")
-        self.assertEqual(len(rounds_out), 1)
-        self.assertEqual(rounds_out[0]["pending"], {})
+        self.assertEqual(len(calls), 2, "unfinished composition and incomplete Gate preservation must be retried")
+        self.assertEqual(len(rounds_out), 2)
+        self.assertTrue(rounds_out[0]["pending"])
+        self.assertIn("DEMO_FORM_CONFLICT", json.dumps(rounds_out[0]["pending"]))
+        self.assertIn("Gate-preserved source element 'problem'", json.dumps(rounds_out[0]["pending"]))
+        self.assertEqual(rounds_out[1]["pending"], {})
         self.assertEqual(decision_out["abstract_mechanism"], fixture["target_fit_gate"]["abstract_mechanism"])
         self.assertEqual(rounds_out[0]["abstract_mechanism_source"], "target_fit_gate")
         self.assertTrue(rounds_out[0].get("abstract_mechanism_canonicalized"))
@@ -167,9 +194,9 @@ class BrainRetryContractTests(unittest.TestCase):
             photos=("target_product_reference.jpg",), platform="TikTok Shop", geo="US",
             product_category="Home Improvement", branding_policy="no_branding",
         )
-        first = copy.deepcopy(fixture["brain_response_round_1"])
+        first = prepare_demo_form_fixture(fixture["brain_response_round_1"])
         first["atoms"] = [a for a in first["atoms"] if a["id"] != "mech_result"]
-        second = copy.deepcopy(fixture["brain_response_round_1"])
+        second = prepare_demo_form_fixture(fixture["brain_response_round_1"])
         id_map = {
             atom["id"]: f"{atom_role(atom['id'])}_1"
             for atom in second["atoms"] if atom_role(atom["id"])
@@ -239,3 +266,144 @@ class BrainRetryContractTests(unittest.TestCase):
         invalid = {**valid, "preserved": [{"property": "mechanism", "atom_id": "keep_hook_1"}]}
         self.assertTrue(any("keep_mechanism_ prefix" in error
                             for error in validate_transfer_decision(invalid, atoms)))
+
+    def test_incomplete_atom_tail_is_rejected(self):
+        errors = atom_text_quality_errors([atom("comp_1", "One continuous patio surface, with a")])
+        self.assertIn("ATOM_TEXT_INCOMPLETE", errors["comp_1"][0])
+        self.assertEqual(
+            atom_text_quality_errors([atom("comp_1", "One continuous patio demo shows foam coating the sprayed area.")]),
+            {},
+        )
+
+    def test_demonstration_gate_rejects_unapproved_left_right_contrast(self):
+        fit_gate = {"demo_form_target": "demonstration"}
+        conflicting = atom(
+            "comp_1",
+            "One continuous outdoor surface: untreated dirty area on left, foam-coated treated area on right, nozzle at boundary",
+        )
+        errors = composition_form_errors([conflicting], fit_gate)
+        self.assertIn("DEMO_FORM_CONFLICT", errors["comp_1"][0])
+
+    def test_collage_retry_feedback_obeys_the_gate_demo_form(self):
+        split = atom("comp_1", "split-screen collage with two separate regions")
+        demo_errors = atom_budget_errors([split], 1, fit_gate={"demo_form_target": "demonstration"})
+        self.assertIn("FRAME_COLLAGE_WORDING", demo_errors["comp_1"][0])
+        self.assertIn("do not introduce left/right zones", demo_errors["comp_1"][0])
+
+        contrast_errors = atom_budget_errors([split], 1, fit_gate={"demo_form_target": "comparison"})
+        self.assertIn("active intervention at the visible boundary", contrast_errors["comp_1"][0])
+
+    def test_comparison_gate_allows_an_approved_in_scene_contrast(self):
+        fit_gate = {"demo_form_target": "comparison"}
+        contrast = atom(
+            "comp_1",
+            "One continuous outdoor surface: untreated dirty area on left, foam-coated treated area on right, nozzle at boundary",
+        )
+        self.assertEqual(composition_form_errors([contrast], fit_gate), {})
+
+    def test_brain_retries_an_incomplete_atom_before_accepting_the_contract(self):
+        first = response("1", include_reserved_qa=False)
+        first["atoms"] = [
+            {**item, "text": "One continuous patio demo sprays foam with a"}
+            if item["id"] == "comp_1" else item
+            for item in first["atoms"]
+        ]
+        second = response("1", include_reserved_qa=False)
+        calls, rounds = [], []
+
+        def call(request):
+            calls.append(request)
+            return first if len(calls) == 1 else second
+
+        result = request_atoms(
+            target_offer(), "Show the cordless vacuum cleaning visible crumbs.", 1, call,
+            source_transfer=build_source_transfer_context(RADAR), rounds_out=rounds,
+        )
+        comp = next(item for item in result if item.id == "comp_1")
+        self.assertEqual(len(calls), 2)
+        self.assertIn("ATOM_TEXT_INCOMPLETE", json.dumps(rounds[0]["pending"]))
+        self.assertEqual(rounds[1]["pending"], {})
+        self.assertTrue(comp.text.endswith("lifted."))
+
+    def test_brain_retries_composition_that_conflicts_with_gate_demo_form(self):
+        source = build_source_transfer_context(RADAR)
+        source["target_fit_gate"] = {
+            "transferable": True,
+            "demo_form_target": "demonstration",
+            "source_elements_preserved": [],
+            "source_elements_dropped": [],
+        }
+        first = response("1", include_reserved_qa=False)
+        first["atoms"] = [
+            {**item, "text": "One continuous surface: untreated dirty area on left, treated clean area on right"}
+            if item["id"] == "comp_1" else item
+            for item in first["atoms"]
+        ]
+        second = response("1", include_reserved_qa=False)
+        calls, rounds = [], []
+
+        def call(request):
+            calls.append(request)
+            return first if len(calls) == 1 else second
+
+        result = request_atoms(
+            target_offer(), "Show the cordless vacuum cleaning visible crumbs.", 1, call,
+            source_transfer=source, rounds_out=rounds,
+        )
+        comp = next(item for item in result if item.id == "comp_1")
+        self.assertEqual(len(calls), 2)
+        self.assertIn("DEMO_FORM_CONFLICT", json.dumps(rounds[0]["pending"]))
+        self.assertEqual(rounds[1]["pending"], {})
+        self.assertNotIn("left", comp.text.lower())
+        self.assertNotIn("right", comp.text.lower())
+
+    def test_brain_prompt_uses_gate_demo_form_instead_of_hard_coding_before_after(self):
+        from tests.test_target_fit_gate import target_offer
+
+        source = build_source_transfer_context(RADAR)
+        source["target_fit_gate"] = {"demo_form_target": "demonstration"}
+        rules = " ".join(build_request(target_offer(), "brief", 1, source_transfer=source)["rules"])
+        self.assertIn("ONE-SHOT DEMONSTRATION CONTRACT", rules)
+        self.assertIn("Do NOT create separate untreated/treated", rules)
+        self.assertNotIn("left part untreated", rules)
+
+        source["target_fit_gate"]["demo_form_target"] = "comparison"
+        rules = " ".join(build_request(target_offer(), "brief", 1, source_transfer=source)["rules"])
+        self.assertIn("ONE-SHOT COMPOSITION CONTRACT", rules)
+        self.assertIn("explicitly approved the contrast form", rules)
+
+    def test_brain_preserved_list_must_cover_all_gate_preserved_elements(self):
+        fit_gate = {
+            "source_elements_preserved": [{"element": name} for name in
+                ("hook", "problem", "mechanism", "intervention", "result")],
+            "source_elements_dropped": [],
+        }
+        atoms = [
+            atom("keep_hook_1", "A visible hook appears before the target product."),
+            atom("keep_mechanism_1", "Cordless suction removes crumbs from tight spaces.", "action"),
+            atom("mech_problem_1", "Crumbs remain in a narrow seat crevice."),
+            atom("mech_intervention_1", "The nozzle removes crumbs from the crevice.", "action"),
+            atom("mech_result_1", "The crevice is visibly clear after vacuuming."),
+        ]
+        decision = {
+            "transferable": True,
+            "abstract_mechanism": "Cordless suction removes debris from tight spaces",
+            "preserved": [
+                {"property": "hook", "atom_id": "keep_hook_1"},
+                {"property": "mechanism", "atom_id": "keep_mechanism_1"},
+                {"property": "intervention", "atom_id": "mech_intervention_1"},
+                {"property": "result", "atom_id": "mech_result_1"},
+            ],
+            "reason": "The target product visibly demonstrates the same causal mechanism.",
+        }
+        errors = validate_transfer_decision(decision, atoms, fit_gate=fit_gate)
+        self.assertTrue(any("Gate-preserved source element 'problem'" in error for error in errors))
+
+        decision["preserved"].append({"property": "problem", "atom_id": "mech_problem_1"})
+        self.assertEqual(validate_transfer_decision(decision, atoms, fit_gate=fit_gate), [])
+
+    def test_transfer_schema_accepts_all_five_gate_elements(self):
+        from cme.atoms import TRANSFER_ATOM_SCHEMA
+        props = TRANSFER_ATOM_SCHEMA["properties"]["transfer_decision"]["properties"]["preserved"]
+        self.assertEqual(props["maxItems"], 5)
+

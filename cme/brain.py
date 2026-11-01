@@ -255,6 +255,28 @@ def atom_id_matches_role(atom_id, role):
     return atom_role(atom_id) == str(role or "").rstrip("_")
 
 
+_INCOMPLETE_ATOM_END = re.compile(
+    r"\b(?:a|an|the|with|and|or|to|of|for|in|on|at|by|from|into|onto|over|under|"
+    r"between|against|while|because|that|which|who|where|when|without|including|"
+    r"as|than|but|if|then|such|via|through|across)\s*$",
+    re.I,
+)
+
+
+def atom_text_quality_errors(atoms) -> dict:
+    """Reject obviously unfinished text before it is passed to Frame."""
+    errors = {}
+    for atom in atoms:
+        aid, _priority, _channel, _kind = _atom_view(atom)
+        text = atom.get("text", "") if isinstance(atom, dict) else getattr(atom, "text", "")
+        if _INCOMPLETE_ATOM_END.search(str(text or "").strip()):
+            errors[str(aid)] = [
+                "ATOM_TEXT_INCOMPLETE: text ends with a dangling article, conjunction, or preposition; "
+                "complete the phrase before accepting this atom"
+            ]
+    return errors
+
+
 def missing_mechanism_links(atoms, links) -> list:
     """Link names that no MUST image atom (not a claim) visibly carries."""
     missing = []
@@ -293,7 +315,7 @@ def reserved_system_atom_errors(atoms) -> dict:
     return errors
 
 
-def visual_structure_errors(atoms, shots: int, links) -> dict:
+def visual_structure_errors(atoms, shots: int, links, fit_gate=None) -> dict:
     """Deterministic visual-contract checks; this is structural validation, not semantic vision."""
     rows = []
     for atom in atoms:
@@ -310,7 +332,15 @@ def visual_structure_errors(atoms, shots: int, links) -> dict:
     if shots == 1 and {"problem", "result"}.issubset(names):
         comp = [r for r in rows if r["id"].startswith("comp_") and r["kind"] == "scene" and r["channel"] == "image" and r["priority"] == "MUST" and r["shot"] == 1]
         if not comp:
-            errors["#composition"] = ["COMPOSITION_REQUIRED: shots=1 with problem+result mechanism links requires a MUST image scene atom for shot 1 whose id starts with comp_; describe an achievable layout and visible before/result regions"]
+            target_form = str((fit_gate or {}).get("demo_form_target") or "demonstration").strip().lower()
+            if target_form in CONTRAST_FORMS:
+                direction = "describe the approved in-scene contrast and place the active intervention at its visible boundary"
+            else:
+                direction = "describe one uninterrupted target-native demonstration and its approved visible result cue; do not invent before/after or untreated-versus-treated framing"
+            errors["#composition"] = [
+                "COMPOSITION_REQUIRED: shots=1 with problem+result mechanism links requires a MUST image scene atom "
+                "for shot 1 whose id starts with comp_; " + direction
+            ]
     if shots >= 2:
         expected_shot = {"problem": 1, "intervention": 1, "result": 2}
         for name in sorted(names.intersection(expected_shot)):
@@ -357,16 +387,30 @@ _COLLAGE_WORDS = re.compile(r"\b(split[- ]?(frame|screen)|collage|grids?|panels?
                             r"before[/ -]and[/ -]after (layout|collage))\b", re.I)
 
 
-def atom_budget_errors(atoms, shots: int) -> dict:
+def atom_budget_errors(atoms, shots: int, fit_gate=None) -> dict:
     """Return per-atom fixes and frame-level conflicts for redundant or over-budget MUST atoms."""
     rows = [_budget_row(a) for a in atoms]
     errors = {}
+    contrast_allowed = (
+        isinstance(fit_gate, dict)
+        and str(fit_gate.get("demo_form_target") or "").strip().lower() in CONTRAST_FORMS
+    )
     for row in rows:
         if row["channel"] == "image" and _COLLAGE_WORDS.search(row["text"]):
+            if contrast_allowed:
+                direction = (
+                    "Keep it one continuous in-scene contrast, with the active intervention at the visible boundary; "
+                    "do not use panels, grids or a multi-panel collage."
+                )
+            else:
+                direction = (
+                    "Use one uninterrupted target-native demonstration and its approved visible result cue; do not "
+                    "introduce left/right zones, before/after states or an untreated-versus-treated comparison."
+                )
             errors[row["id"]] = [
                 "FRAME_COLLAGE_WORDING: do not write split frame / split-screen / panel / collage / grid / side-by-side; "
-                "image models turn them into a multi-panel collage. Describe ONE continuous surface or scene whose "
-                "left part is untreated and right part treated, with the tool at the boundary."]
+                "describe one continuous scene instead. " + direction
+            ]
     for shot in range(1, int(shots) + 1):
         must = [r for r in rows if r["shot"] == shot and r["channel"] == "image" and r["priority"] == "MUST"
                 and r["id"] not in errors]
@@ -432,6 +476,48 @@ GATE_CORE_ELEMENTS = ("mechanism",)
 DEMO_FORMS = ("comparison", "before_after", "demonstration", "testimonial", "tutorial", "other")
 # Forms that carry their persuasion through contrast. They must stay contrast-shaped in the target.
 CONTRAST_FORMS = ("comparison", "before_after")
+
+_CONTRAST_LAYOUT_CUE = re.compile(
+    r"\b(?:before\s*(?:and|/|-)\s*after|side[- ]by[- ]side|comparison|compare|"
+    r"versus|vs\.?|split[- ]?(?:screen|frame)|diptych|triptych)\b",
+    re.I,
+)
+_UNTREATED_STATE = re.compile(r"\b(?:untreated|dirty|grimy|soiled|unclean)\b", re.I)
+_TREATED_STATE = re.compile(r"\b(?:treated|clean|cleaned|foam[- ]coated)\b", re.I)
+
+
+def composition_form_errors(atoms, fit_gate) -> dict:
+    """Reject contrast layouts unless the independent Target-Fit Gate approved them."""
+    if not isinstance(fit_gate, dict):
+        return {}
+    target_form = str(fit_gate.get("demo_form_target") or "").strip().lower()
+    if target_form in CONTRAST_FORMS:
+        return {}
+
+    errors = {}
+    for atom in atoms:
+        aid, priority, channel, _kind = _atom_view(atom)
+        if priority != "MUST" or channel != "image":
+            continue
+        text = atom.get("text", "") if isinstance(atom, dict) else getattr(atom, "text", "")
+        value = str(text or "")
+        sides = {side for side in ("left", "right") if re.search(rf"\b{side}\b", value, re.I)}
+        is_composition_atom = str(aid).startswith("comp_")
+        state_contrast = (
+            sides == {"left", "right"}
+            and (
+                is_composition_atom
+                or (bool(_UNTREATED_STATE.search(value)) and bool(_TREATED_STATE.search(value)))
+            )
+        )
+        if _CONTRAST_LAYOUT_CUE.search(value) or state_contrast:
+            errors[str(aid)] = [
+                f"DEMO_FORM_CONFLICT: Target-Fit Gate approved demo_form_target='{target_form or 'unspecified'}', "
+                "not a contrast. Remove before/after, side-by-side, or untreated-left/treated-right framing; "
+                "show one uninterrupted target-native demonstration and only its approved visible result cue."
+            ]
+    return errors
+
 
 TRANSFER_FIT_SCHEMA = {
     "type": "object",
@@ -1059,7 +1145,7 @@ def request_transfer_fit(offer, brief: str, source_transfer: dict, call, trace_o
     raise BrainError({"#transfer_fit": last_errors or ["target-fit gate failed without a validated response"]})
 
 
-def validate_transfer_decision(decision, atoms) -> list:
+def validate_transfer_decision(decision, atoms, fit_gate=None) -> list:
     """Validate the decision and require every preserved property to have a MUST image carrier."""
     if not isinstance(decision, dict):
         return ["transfer_decision is required when source_transfer is supplied"]
@@ -1078,13 +1164,14 @@ def validate_transfer_decision(decision, atoms) -> list:
         if not isinstance(mechanism, str) or len(mechanism.strip()) < 10:
             errors.append("transfer_decision.abstract_mechanism must state the brand-free causal idea (at least 10 characters)")
         preserved = decision.get("preserved")
-        if not isinstance(preserved, list) or not 1 <= len(preserved) <= 4:
-            errors.append("transfer_decision.preserved must list 1-4 source properties that stay visible")
+        if not isinstance(preserved, list) or not 1 <= len(preserved) <= 5:
+            errors.append("transfer_decision.preserved must list 1-5 source properties that stay visible")
         else:
             by_id = {}
             for atom in atoms or []:
                 aid, priority, channel, kind = _atom_view(atom)
                 by_id[aid] = (priority, channel, kind)
+            seen_preserved = set()
             for index, item in enumerate(preserved):
                 if not isinstance(item, dict):
                     errors.append(f"transfer_decision.preserved[{index}] must be an object")
@@ -1096,6 +1183,21 @@ def validate_transfer_decision(decision, atoms) -> list:
                 if not isinstance(prop, str) or (len(prop_key) < 8 and prop_key not in GATE_ELEMENTS):
                     errors.append(f"transfer_decision.preserved[{index}].property must describe the preserved property")
                     continue
+                has_gate_element_account = (
+                    isinstance(fit_gate, dict)
+                    and isinstance(fit_gate.get("source_elements_preserved"), list)
+                    and isinstance(fit_gate.get("source_elements_dropped"), list)
+                )
+                if has_gate_element_account and prop_key not in GATE_ELEMENTS:
+                    errors.append(
+                        f"transfer_decision.preserved[{index}].property must use a canonical Target-Fit Gate element "
+                        f"({', '.join(GATE_ELEMENTS)})"
+                    )
+                    continue
+                if prop_key in seen_preserved:
+                    errors.append(f"transfer_decision.preserved contains duplicate Gate element '{prop_key}'")
+                    continue
+                seen_preserved.add(prop_key)
                 atom_id = str(item.get("atom_id") or "")
                 carrier = by_id.get(atom_id)
                 # The hook/mechanism Gate elements have dedicated keep_* atoms.
@@ -1118,6 +1220,34 @@ def validate_transfer_decision(decision, atoms) -> list:
                     errors.append(
                         f"transfer_decision.preserved[{index}].atom_id must name an existing MUST image atom "
                         f"that carries '{prop[:60]}'")
+        has_gate_element_account = (
+            isinstance(fit_gate, dict)
+            and isinstance(fit_gate.get("source_elements_preserved"), list)
+            and isinstance(fit_gate.get("source_elements_dropped"), list)
+        )
+        if has_gate_element_account:
+            gate_preserved = {
+                str(item.get("element"))
+                for item in (fit_gate.get("source_elements_preserved") or [])
+                if isinstance(item, dict)
+            }
+            gate_dropped = {
+                str(item.get("element"))
+                for item in (fit_gate.get("source_elements_dropped") or [])
+                if isinstance(item, dict)
+            }
+            decision_preserved = {
+                str(item.get("property") or "").strip().lower()
+                for item in (preserved or []) if isinstance(item, dict)
+            }
+            for element in sorted(gate_preserved - decision_preserved):
+                errors.append(
+                    f"transfer_decision.preserved must include Gate-preserved source element '{element}'"
+                )
+            for element in sorted(gate_dropped.intersection(decision_preserved)):
+                errors.append(
+                    f"transfer_decision.preserved must not reintroduce Gate-dropped source element '{element}'"
+                )
     return errors
 
 
@@ -1140,6 +1270,10 @@ def build_request(offer, brief: str, shots: int, failed=None, source_transfer=No
     if source_transfer:
         req["source_transfer"] = source_transfer
         fit_gate = source_transfer.get("target_fit_gate") if isinstance(source_transfer, dict) else None
+        gate_form = (fit_gate or {}).get("demo_form_target") if isinstance(fit_gate, dict) else None
+        has_gate_form = isinstance(gate_form, str) and gate_form.strip().lower() in DEMO_FORMS
+        demo_form_target = str(gate_form or "demonstration").strip().lower()
+        contrast_allowed = has_gate_form and demo_form_target in CONTRAST_FORMS
         if isinstance(fit_gate, dict):
             req["rules"].append(
                 "MANDATORY PRE-APPROVED TARGET-FIT GATE: the independent gate already approved this exact abstract mechanism: "
@@ -1177,8 +1311,33 @@ def build_request(offer, brief: str, shots: int, failed=None, source_transfer=No
                 "target product's own honest demonstration and never present the unproven source statement as an observed result.")
             link_names = {link["link"] for link in links}
             if shots == 1 and {"problem", "result"}.issubset(link_names):
-                req["rules"].append(
-                    "ONE-SHOT COMPOSITION CONTRACT: because both problem and result must be visible in one frame, create an explicit additional MUST image atom with kind='scene', shot=1, and id prefix 'comp_'. Describe a concrete legible layout and locate the problem/result regions; do not copy an existing mech atom into comp_. Describe ONE continuous surface or scene (for example the left part untreated, the right part treated, the tool at the boundary); never use the words split frame, split-screen, panel, collage, grid or side-by-side.")
+                if contrast_allowed:
+                    composition_rule = (
+                        "ONE-SHOT COMPOSITION CONTRACT: the Gate explicitly approved the contrast form "
+                        + demo_form_target + ". Create an additional MUST image scene atom (id prefix 'comp_') "
+                        "that describes one continuous, legible in-scene contrast and locates the relevant states. "
+                        "Place the active intervention at the visible boundary. Do not turn it into panels, a "
+                        "split-screen, collage or grid; do not copy a mech_* atom into comp_."
+                    )
+                else:
+                    if has_gate_form:
+                        form_authority = (
+                            "The Gate approved target form '" + demo_form_target
+                            + "', not a before/after comparison. "
+                        )
+                    else:
+                        form_authority = (
+                            "No contrast form was approved; default to one demonstration, not a before/after comparison. "
+                        )
+                    composition_rule = (
+                        "ONE-SHOT DEMONSTRATION CONTRACT: " + form_authority
+                        + "Create an additional MUST image scene atom (id prefix 'comp_') describing one uninterrupted "
+                        "target-native demonstration: show the product, active contact/action and the approved or "
+                        "observable in-progress result cue in one coherent scene. Do NOT create separate untreated/treated "
+                        "or dirty/clean left/right zones, a completed-cleaning comparison, before/after framing, panels or a "
+                        "collage. Do not copy a mech_* atom into comp_."
+                    )
+                req["rules"].append(composition_rule)
             elif shots >= 2:
                 req["rules"].append(
                     "MULTI-SHOT ROUTING CONTRACT: mech_problem_* and mech_intervention_* MUST image atoms go to shot 1; mech_result_* MUST image atoms go to shot 2.")
@@ -1189,7 +1348,17 @@ def build_request(offer, brief: str, shots: int, failed=None, source_transfer=No
             "For each requested shot, keep the target-native action, proof, state_before/state_after, and result/delta where present. Express required visual directions as stable MUST atoms; do not silently omit them.",
             "ACTIVE INTERVENTION EVIDENCE: every mech_intervention_* MUST image atom must describe the target product's active working end physically engaging the exact problem material at a visible contact point. Show a concrete visual cue that material is being acted on or removed in that same frame. Do not describe the product as merely resting beside, hovering over, or pointing toward the problem. For a still image, prove the action through contact and visible state change, not invisible motion.",
             "Do not pack several unverified accessories into one MUST atom. Keep the main target product body visible and show only the attachment performing the action; omit accessories not visible in the target reference or confirmed by OfferCard/brief.",
-            "When a MUST image atom depicts an intervention result or before/after delta, define a visibly checkable contrast in the same frame: specify where the untreated/dirty side and treated/clean side are located (for example, left/right); keep the intervention tool/action at their visible boundary, with the active working end physically contacting the material there; make the cleaned result a substantial, unobstructed debris-free strip that is not hidden under the tool, with a visible contact point linking the action to the change. Avoid relying only on phrases like 'completely clean' without describing the visible boundary and changed area.",
+            (
+                "APPROVED CONTRAST FORM: use a visibly checkable in-scene contrast, with the active working end "
+                "physically engaging the material at the transition and a visible contact point linking the action "
+                "to the change. Keep it one continuous scene, not a multi-panel collage."
+                if contrast_allowed else
+                "APPROVED DEMONSTRATION FORM: show only the target-native action and the "
+                + ("Gate-approved" if has_gate_form else "observable target-native")
+                + " visible result cue in one uninterrupted scene. Do not invent a before/after, side-by-side, or "
+                "untreated-versus-treated layout; do not imply a completed result that the Gate did not approve. "
+                "Keep a visible contact point linking the action to the change."
+            ),
             "The source's commercial metrics or reasoning-confidence values are not proof that the mechanism is profitable for the target offer.",
         ])
         req["rules"].append(
@@ -1198,10 +1367,12 @@ def build_request(offer, brief: str, shots: int, failed=None, source_transfer=No
             "beside atoms. The abstract_mechanism is owned by the independently approved Target-Fit Gate; do not broaden "
             "or substitute its causal idea (code carries the exact approved wording into the final decision). If the target "
             "cannot demonstrate it without inventing features, or the mechanism becomes an unrelated ordinary target-product "
-            "demo, set transferable=false, explain why, and return atoms=[]. If true, preserved lists only source properties "
-            "visibly carried by existing MUST image atoms: hook uses keep_hook[_suffix], mechanism uses keep_mechanism[_suffix], "
-            "and problem/intervention/result use their matching mech_* atoms. Do not create duplicate keep_intervention or "
-            "keep_result atoms; their mech_* atoms are the causal-link carriers. English only."
+            "demo, set transferable=false, explain why, and return atoms=[]. If true, preserved must list EVERY element in "
+            "source_elements_preserved exactly once (1-5 entries), and must not list any element in source_elements_dropped. "
+            "Each property must use its canonical Gate element name and point to an existing MUST image carrier: hook uses "
+            "keep_hook[_suffix], mechanism uses keep_mechanism[_suffix], and problem/intervention/result use their matching "
+            "mech_* atoms. Do not create duplicate keep_intervention or keep_result atoms; their mech_* atoms are the causal-link "
+            "carriers. English only."
         )
     if failed:
         req["only_fix"] = failed  # [{id, errors, previous_text}]
@@ -1246,6 +1417,8 @@ def request_atoms(offer, brief: str, shots: int, call, max_retries: int = 2, ver
         for aid, errs in check_claims(parsed.atoms, offer).items():
             round_errs.setdefault(aid, []).extend(errs)
         for aid, errs in check_language(parsed.atoms).items():
+            round_errs.setdefault(aid, []).extend(errs)
+        for aid, errs in atom_text_quality_errors(parsed.atoms).items():
             round_errs.setdefault(aid, []).extend(errs)
         # Branding/no-added-text QA is injected by campaign policy. Ignore duplicate Brain-authored
         # checks instead of spending correction rounds asking the model to remove them repeatedly.
@@ -1294,8 +1467,11 @@ def request_atoms(offer, brief: str, shots: int, call, max_retries: int = 2, ver
             pending[f"#mechanism_{name}"] = [f"mechanism link '{name}' has no MUST image atom with id prefix mech_{name}_"]
         for name in missing_keep_atoms(by_id.values(), fit_gate):
             pending[f"#keep_{name}"] = [f"the Gate kept source element '{name}': add a separate MUST image atom with id prefix keep_{name}_ that visibly carries the approved target_form"]
-        structure_errors = {**visual_structure_errors(by_id.values(), shots, required_links),
-                            **atom_budget_errors(by_id.values(), shots)}
+        structure_errors = {
+            **visual_structure_errors(by_id.values(), shots, required_links, fit_gate=fit_gate),
+            **composition_form_errors(by_id.values(), fit_gate),
+            **atom_budget_errors(by_id.values(), shots, fit_gate=fit_gate),
+        }
         pending.update(structure_errors)
         for aid in list(structure_errors):
             if not aid.startswith("#"):
@@ -1304,8 +1480,11 @@ def request_atoms(offer, brief: str, shots: int, call, max_retries: int = 2, ver
             pending[f"#mechanism_{name}"] = [f"mechanism link '{name}' has no MUST image atom with id prefix mech_{name}_"]
         for name in missing_keep_atoms(by_id.values(), fit_gate):
             pending[f"#keep_{name}"] = [f"the Gate kept source element '{name}': add a separate MUST image atom with id prefix keep_{name}_ that visibly carries the approved target_form"]
-        structure_errors = {**visual_structure_errors(by_id.values(), shots, required_links),
-                            **atom_budget_errors(by_id.values(), shots)}
+        structure_errors = {
+            **visual_structure_errors(by_id.values(), shots, required_links, fit_gate=fit_gate),
+            **composition_form_errors(by_id.values(), fit_gate),
+            **atom_budget_errors(by_id.values(), shots, fit_gate=fit_gate),
+        }
         pending.update(structure_errors)
         if source_transfer:
             candidate_decision = offered if isinstance(offered, dict) else held_decision
@@ -1321,7 +1500,7 @@ def request_atoms(offer, brief: str, shots: int, call, max_retries: int = 2, ver
                         record["abstract_mechanism_canonicalized"] = True
                     candidate_decision["abstract_mechanism"] = approved_mechanism
                     record["abstract_mechanism_source"] = "target_fit_gate"
-            decision_errors = validate_transfer_decision(candidate_decision, by_id.values())
+            decision_errors = validate_transfer_decision(candidate_decision, by_id.values(), fit_gate=fit_gate)
             if decision_errors:
                 pending["#transfer_decision"] = decision_errors
                 held_decision = None

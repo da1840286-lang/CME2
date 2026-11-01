@@ -185,11 +185,17 @@ class BrainToFrameChainTests(unittest.TestCase):
             atom("mech_problem_1", "Loose food pieces are scattered on the counter"),
             atom("mech_intervention_1", "The bag is held open beside the loose pieces", kind="action"),
             atom("mech_result_1", "The pieces are inside the sealed bag", kind="action"),
-            atom("comp_1", "Left shows loose pieces, right shows the bag with pieces inside"),
+            atom("comp_1", "One uninterrupted demonstration shows food pieces being placed into the reusable bag during closure"),
             atom("prod_1", "Silicone bag in the foreground", kind="product"),
         ]
         decision = {"transferable": True, "abstract_mechanism": fit["abstract_mechanism"],
-                    "preserved": [{"property": "visible sequence", "atom_id": "keep_mechanism_1"}], "reason": "same visible sequence"}
+                    "preserved": [
+                        {"property": "hook", "atom_id": "keep_hook_1"},
+                        {"property": "mechanism", "atom_id": "keep_mechanism_1"},
+                        {"property": "problem", "atom_id": "mech_problem_1"},
+                        {"property": "intervention", "atom_id": "mech_intervention_1"},
+                        {"property": "result", "atom_id": "mech_result_1"},
+                    ], "reason": "same visible sequence"}
         self.sent = []
 
         def transport(method, url, headers, payload):

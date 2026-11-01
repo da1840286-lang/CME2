@@ -110,10 +110,9 @@ class AtomTests(unittest.TestCase):
         request = build_request(load_offer(EX), "brief", 1,
                                 source_transfer={"mechanism_hypothesis": "show removal of the problem"})
         rules = " ".join(request["rules"])
-        self.assertIn("untreated/dirty side", rules)
-        self.assertIn("treated/clean side", rules)
-        self.assertIn("at their visible boundary", rules)
-        self.assertIn("substantial, unobstructed debris-free strip", rules)
+        self.assertIn("APPROVED DEMONSTRATION FORM", rules)
+        self.assertIn("Do not invent a before/after", rules)
+        self.assertNotIn("untreated/dirty side", rules)
 
 
 class CompilerTests(unittest.TestCase):

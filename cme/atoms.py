@@ -36,7 +36,7 @@ _TRANSFER_DECISION_SCHEMA = {
     "properties": {
         "transferable": {"type": "boolean"},
         "abstract_mechanism": {"type": "string", "maxLength": 200},
-        "preserved": {"type": "array", "maxItems": 4, "items": {
+        "preserved": {"type": "array", "maxItems": 5, "items": {
             "type": "object", "required": ["property", "atom_id"], "additionalProperties": False,
             "properties": {
                 "property": {"type": "string", "maxLength": 160},
