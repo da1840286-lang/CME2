@@ -5,7 +5,7 @@
 from __future__ import annotations
 import json
 import re
-from .atoms import ATOM_SCHEMA, MAX_TEXT, TRANSFER_ATOM_SCHEMA, check_claims, check_language, parse_atoms
+from .atoms import ATOM_SCHEMA, TRANSFER_ATOM_SCHEMA, atom_text_incomplete_error, check_claims, check_language, parse_atoms
 from .branding import TARGET_BRAND_ALLOWED, brain_branding_rule, resolved_brand_marks
 from .vertical import check_vertical
 
@@ -255,34 +255,15 @@ def atom_id_matches_role(atom_id, role):
     return atom_role(atom_id) == str(role or "").rstrip("_")
 
 
-_INCOMPLETE_ATOM_END = re.compile(
-    r"\b(?:a|an|the|with|and|or|to|of|for|in|on|at|by|from|into|onto|over|under|"
-    r"between|against|while|because|that|which|who|where|when|without|including|"
-    r"as|than|but|if|then|such|via|through|across)\s*$",
-    re.I,
-)
-
-
 def atom_text_quality_errors(atoms) -> dict:
-    """Reject obviously unfinished text before it is passed to Frame."""
+    """Reject unfinished atom text using the same message as parse_atoms()."""
     errors = {}
     for atom in atoms:
         aid, _priority, _channel, _kind = _atom_view(atom)
         text = atom.get("text", "") if isinstance(atom, dict) else getattr(atom, "text", "")
-        stripped = str(text or "").strip()
-        if _INCOMPLETE_ATOM_END.search(stripped):
-            if len(stripped) >= MAX_TEXT - 6:
-                errors[str(aid)] = [
-                    f"ATOM_TEXT_INCOMPLETE: text is near the {MAX_TEXT}-character limit and may have been cut "
-                    f"mid-sentence ({len(stripped)} chars; dangling ending). Do NOT extend the fragment. "
-                    "Rewrite it as ONE grammatically complete sentence of at most 90 characters, ending with "
-                    "a concrete noun or verb; drop secondary details."
-                ]
-            else:
-                errors[str(aid)] = [
-                    "ATOM_TEXT_INCOMPLETE: text ends with a dangling article, conjunction, or preposition; "
-                    "rewrite the atom as one grammatically complete sentence before accepting it"
-                ]
+        message = atom_text_incomplete_error(text)
+        if message:
+            errors[str(aid)] = [message]
     return errors
 
 
@@ -1418,6 +1399,12 @@ def request_atoms(offer, brief: str, shots: int, call, max_retries: int = 2, ver
         raw = resp.get("atoms", []) if isinstance(resp, dict) else []
         parsed = parse_atoms(raw)
         round_errs = {k: list(v) for k, v in parsed.errors.items()}
+        # Parser-rejected atoms are absent from parsed.atoms. Remove any earlier
+        # accepted value with the same ID so stale text cannot satisfy structure
+        # checks while a correction for that ID is still pending.
+        for rejected_id in parsed.errors:
+            if not rejected_id.startswith("#"):
+                by_id.pop(rejected_id, None)
         for atom in parsed.atoms:
             if atom.shot > shots:
                 round_errs.setdefault(atom.id, []).append(f"shot {atom.shot} is outside requested range 1..{shots}")

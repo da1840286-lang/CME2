@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import unittest
 
-from cme.atoms import MAX_TEXT
+from cme.atoms import MAX_TEXT, parse_atoms
 from cme.brain import (
     BrainError,
     atom_text_quality_errors,
@@ -124,6 +124,79 @@ class CompositionRecoveryTests(unittest.TestCase):
         }.issubset({item.id for item in result}))
         self.assertNotIn("comp_1", {item.id for item in result})
         self.assertEqual(len([item for item in result if item.id.startswith("comp_")]), 1)
+
+    def test_parser_does_not_change_its_existing_dangling_word_behavior(self):
+        text = "One continuous patio demo sprays foam with a"
+        parsed = parse_atoms([atom("comp_word", text)])
+        self.assertEqual(parsed.errors, {})
+        self.assertEqual([item.id for item in parsed.atoms], ["comp_word"])
+
+        # The second Brain validator still catches the same tail and owns its repair message.
+        message = atom_text_quality_errors(parsed.atoms)["comp_word"][0]
+        self.assertIn("ATOM_TEXT_INCOMPLETE", message)
+        self.assertIn("dangling article, conjunction, or preposition", message)
+
+    def test_parser_and_brain_use_the_same_short_rewrite_for_near_limit_dangling_endings(self):
+        comma_text = (
+            "One uninterrupted outdoor scene shows the cordless pressure washer "
+            "spraying foam onto patio furniture, siding, or a car,"
+        )
+        self.assertEqual(len(comma_text), MAX_TEXT)
+        raw_atom = atom("comp_1", comma_text)
+
+        parsed = parse_atoms([raw_atom])
+        self.assertEqual(parsed.atoms, [])
+        parser_message = parsed.errors["comp_1"][0]
+        brain_message = atom_text_quality_errors([raw_atom])["comp_1"][0]
+        self.assertEqual(parser_message, brain_message)
+        self.assertIn("at most 90 characters", parser_message)
+        self.assertIn("Do NOT extend the fragment", parser_message)
+
+        conjunction_text = "One uninterrupted outdoor demonstration shows the cordless pressure washer spraying foam across patio furniture and"
+        self.assertGreaterEqual(len(conjunction_text), MAX_TEXT - 8)
+        conjunction_message = atom_text_quality_errors([atom("comp_2", conjunction_text)])["comp_2"][0]
+        self.assertIn("at most 90 characters", conjunction_message)
+        self.assertIn("Do NOT extend the fragment", conjunction_message)
+
+    def test_parser_rejection_evicts_previously_accepted_atom_with_the_same_id(self):
+        first = brain_response(
+            "comp_1",
+            "One uninterrupted scene shows the pressure washer spraying foam onto a patio surface.",
+        )
+        first["atoms"] = [
+            {**item, "text": "Keep the target product clearly visible and"}
+            if item["id"] == "keep_hook_1" else item
+            for item in first["atoms"]
+        ]
+
+        malformed = brain_response(
+            "comp_1",
+            "One uninterrupted outdoor scene shows the cordless pressure washer "
+            "spraying foam onto patio furniture, siding, or a car,",
+        )
+        calls: list[dict] = []
+        rounds: list[dict] = []
+
+        def call(request: dict) -> dict:
+            calls.append(request)
+            return first if len(calls) == 1 else malformed
+
+        with self.assertRaises(BrainError):
+            request_atoms(
+                target_offer(),
+                "Show one uninterrupted target-native pressure-washing demonstration.",
+                1,
+                call,
+                max_retries=1,
+                source_transfer=source_context(),
+                rounds_out=rounds,
+            )
+
+        self.assertEqual(len(calls), 2)
+        self.assertIn("comp_1", rounds[1]["pending"])
+        self.assertIn("at most 90 characters", rounds[1]["pending"]["comp_1"][0])
+        self.assertNotIn("comp_1", rounds[1]["accepted_ids"])
+        self.assertNotIn("#composition", rounds[1]["pending"])
 
     def test_missing_composition_still_raises_composition_required(self):
         response = brain_response(None)

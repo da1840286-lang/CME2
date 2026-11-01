@@ -9,6 +9,8 @@ from collections import Counter
 from dataclasses import dataclass, asdict
 
 MAX_TEXT = 120
+# A malformed ending close to the schema limit is usually a truncated thought, not a punctuation typo.
+ATOM_TEXT_REWRITE_THRESHOLD = MAX_TEXT - 8  # 112 characters for the current 120-character contract
 PRIORITIES = ("MUST", "SHOULD", "MAY")
 CHANNELS = ("image", "motion", "qa")
 KINDS = ("scene", "product", "action", "composition", "light", "claim", "anchor", "text_rule", "motion", "qa_check")
@@ -81,6 +83,45 @@ def norm(text: str) -> str:
     return re.sub(r"\s+", " ", str(text)).strip().strip(".,;:!").lower()
 
 
+_DANGLING_SEPARATOR = re.compile(r"[,;:]\s*$")
+_DANGLING_WORD = re.compile(
+    r"\b(?:a|an|the|with|and|or|to|of|for|in|on|at|by|from|into|onto|over|under|"
+    r"between|against|while|because|that|which|who|where|when|without|including|"
+    r"as|than|but|if|then|such|via|through|across)\s*$",
+    re.I,
+)
+
+
+def atom_text_incomplete_error(value: str, *, include_dangling_words: bool = True) -> str | None:
+    """Return the canonical repair instruction for a dangling atom ending.
+
+    This is shared by the parser and Brain's post-parse quality checks so a defect
+    cannot receive different guidance depending on which validator detects it.
+    Near-limit fragments get a deliberately short rewrite target instead of being
+    extended past the model's text budget.
+    """
+    text = str(value or "").strip()
+    separator = bool(_DANGLING_SEPARATOR.search(text))
+    dangling_word = include_dangling_words and bool(_DANGLING_WORD.search(text))
+    if not (separator or dangling_word):
+        return None
+
+    ending = "a dangling separator (comma, semicolon, or colon)" if separator else "a dangling article, conjunction, or preposition"
+    if len(text) >= ATOM_TEXT_REWRITE_THRESHOLD:
+        return (
+            f"ATOM_TEXT_INCOMPLETE: text is close to the {MAX_TEXT}-character limit "
+            f"({len(text)} chars) and ends with {ending}; it may be truncated. "
+            "Do NOT extend the fragment. Rewrite it as ONE grammatically complete sentence "
+            "of at most 90 characters, ending with a concrete noun or verb; drop secondary details."
+        )
+    if separator:
+        return "ATOM_TEXT_INCOMPLETE: text ends with a dangling separator; complete or rewrite the atom"
+    return (
+        "ATOM_TEXT_INCOMPLETE: text ends with a dangling article, conjunction, or preposition; "
+        "rewrite the atom as one grammatically complete sentence before accepting it"
+    )
+
+
 def parse_atoms(raw) -> ParseResult:
     atoms, errors = [], {}
     if not isinstance(raw, list):
@@ -123,8 +164,10 @@ def parse_atoms(raw) -> ParseResult:
             text = item["text"].strip()
             if len(text) > MAX_TEXT:
                 errs.append(f"text {len(text)} chars > {MAX_TEXT}: split or shorten")
-            if re.search(r"[,;:]\s*$", text):
-                errs.append("ATOM_TEXT_INCOMPLETE: text ends with a dangling separator; complete or rewrite the atom")
+            # Preserve parser semantics: dangling words are handled by Brain's quality validator.
+            incomplete_ending = atom_text_incomplete_error(text, include_dangling_words=False)
+            if incomplete_ending:
+                errs.append(incomplete_ending)
             if len(text) < 3:
                 errs.append("text too short")
             if counts[item["id"]] > 1:
