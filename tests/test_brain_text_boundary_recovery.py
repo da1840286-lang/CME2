@@ -51,6 +51,13 @@ class BrainTextBoundaryRecoveryTests(unittest.TestCase):
         source["target_fit_gate"] = copy.deepcopy(
             self.responses["run_41305261765_gate_1"]["transfer_decision"]
         )
+        hook = next(
+            item for item in source["target_fit_gate"]["source_elements_preserved"]
+            if item["element"] == "hook"
+        )
+        hook["target_form"] = (
+            "Person presents the cordless pressure washer outdoors before spraying foam onto patio furniture"
+        )
         return source
 
     def test_provider_schema_has_headroom_but_finished_118_character_atom_is_valid(self):
@@ -162,6 +169,13 @@ class BrainTextBoundaryRecoveryTests(unittest.TestCase):
         third["transfer_decision"]["reason"] = (
             "The target product can demonstrate the same foam-spraying action on outdoor hard surfaces."
         )
+        third_hook = next(
+            item for item in third["transfer_decision"]["source_elements_preserved"]
+            if item["element"] == "hook"
+        )
+        third_hook["target_form"] = (
+            "Person presents the cordless pressure washer outdoors before spraying foam onto patio furniture"
+        )
         answers = [first, second, third]
         calls, trace = [], []
 
@@ -234,8 +248,15 @@ class BrainTextBoundaryRecoveryTests(unittest.TestCase):
         self.assertEqual(len(trace), 4)  # Three attempts plus the final rejection audit row.
 
     def test_brain_uses_three_retries_then_accepts_real_fourth_response(self):
-        failed = self.responses["run_41295468437_brain_1"]
-        repaired = self.responses["run_41305261765_brain_1"]
+        failed = copy.deepcopy(self.responses["run_41295468437_brain_1"])
+        repaired = copy.deepcopy(self.responses["run_41305261765_brain_1"])
+        for response in (failed, repaired):
+            hook_atom = next(
+                atom for atom in response["atoms"] if atom["id"].startswith("keep_hook")
+            )
+            hook_atom["text"] = (
+                "Person presents the cordless pressure washer outdoors before spraying foam onto patio furniture"
+            )
         answers = [failed, failed, failed, repaired]
         calls, trace = [], []
 

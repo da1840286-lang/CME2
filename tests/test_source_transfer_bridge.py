@@ -124,7 +124,7 @@ class SourceTransferBridgeTests(unittest.TestCase):
                             "target_native_mapping": "Show the target product solving a recognizable task with visible proof",
                             "target_evidence": ["kitchen storage"],
                             "reason": "The target offer can demonstrate a problem and inspectable improvement.",
-                            **gate_account(preserved=("mechanism", "problem", "intervention", "result"), dropped=("hook",))}
+                            **gate_account(preserved=("mechanism",))}
             def transport(method, url, headers, payload):
                 sent.append(payload)
                 user_payload = json.loads(payload["messages"][1]["content"])

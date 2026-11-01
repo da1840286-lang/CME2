@@ -93,7 +93,7 @@ class TargetFitGateTests(unittest.TestCase):
             "target_native_mapping": "Show crumbs on a car seat and one achievable cleaning pass",
             "target_evidence": ["cordless handheld car vacuum"],
             "reason": "A visible dry-debris demo is normal use and needs no unverified numeric claim.",
-            **gate_account(),
+            **gate_account(preserved=("problem", "mechanism", "intervention", "result")),
         }
         calls = []
 

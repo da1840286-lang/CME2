@@ -26,14 +26,29 @@ def atom(atom_id, text, kind="scene", channel="image", priority="MUST"):
     return {"id": atom_id, "kind": kind, "text": text, "priority": priority, "channel": channel, "shot": 1}
 
 
+def prepare_gate_text_policy_fixture(value):
+    """Keep the historical source description, but adapt its target hook to a visual-only form."""
+    prepared = copy.deepcopy(value)
+    for item in prepared.get("source_elements_preserved", []):
+        if isinstance(item, dict) and item.get("element") == "hook":
+            item["target_form"] = (
+                "Creator presents the target pressure washer outdoors before demonstrating foam application"
+            )
+    return prepared
+
+
 def prepare_demo_form_fixture(value):
-    """Adapt the historical provider response to its approved demonstration form/account."""
+    """Adapt a historical provider response to its approved demo form and visual-only text policy."""
     prepared = copy.deepcopy(value)
     for item in prepared.get("atoms", []):
         if str(item.get("id") or "").startswith("comp_"):
             item["text"] = (
                 "One continuous outdoor demo shows the nozzle spraying foam onto patio furniture "
                 "and visibly coating the contacted area."
+            )
+        elif str(item.get("id") or "").startswith("keep_hook"):
+            item["text"] = (
+                "Creator presents the target cordless pressure washer outdoors before spraying foam onto a surface"
             )
     decision = prepared.get("transfer_decision") or {}
     preserved = decision.get("preserved") if isinstance(decision.get("preserved"), list) else []
@@ -134,7 +149,7 @@ class BrainRetryContractTests(unittest.TestCase):
         fixture_path = Path(__file__).parent / "fixtures" / "brain_failed_run_41252251386.json"
         fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
         source_transfer = build_source_transfer_context({"result": fixture["source_analysis_result"]})
-        source_transfer["target_fit_gate"] = fixture["target_fit_gate"]
+        source_transfer["target_fit_gate"] = prepare_gate_text_policy_fixture(fixture["target_fit_gate"])
         offer = OfferCard(
             offer_id="cordless-pressure-washer-us-001",
             name="Cordless Pressure Washer",
@@ -185,7 +200,7 @@ class BrainRetryContractTests(unittest.TestCase):
         fixture_path = Path(__file__).parent / "fixtures" / "brain_failed_run_41252251386.json"
         fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
         source_transfer = build_source_transfer_context({"result": fixture["source_analysis_result"]})
-        source_transfer["target_fit_gate"] = fixture["target_fit_gate"]
+        source_transfer["target_fit_gate"] = prepare_gate_text_policy_fixture(fixture["target_fit_gate"])
         offer = OfferCard(
             offer_id="cordless-pressure-washer-us-001", name="Cordless Pressure Washer",
             product_type="cordless pressure washer", verified_claims=("Cordless pressure washer",),

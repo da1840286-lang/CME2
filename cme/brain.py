@@ -690,8 +690,8 @@ def validate_gate_elements(decision, source_transfer=None, branding_policy=TARGE
                         errors.append(f"transfer_decision.{list_key}[{index}].target_form must specify at least two meaningful visual or causal details")
                     source_form = item.get("source_form")
                     if isinstance(source_form, str):
-                        source_words = _keep_content_words(source_form)
-                        target_words = _keep_content_words(value)
+                        source_words = _target_form_content_words(source_form)
+                        target_words = _target_form_content_words(value)
                         if source_words and not (target_words - source_words):
                             errors.append(
                                 f"transfer_decision.{list_key}[{index}].target_form must record a target-specific "
@@ -774,6 +774,14 @@ def _keep_content_words(value: str) -> set[str]:
     """Extract specific visual/causal terms, excluding generic instruction words."""
     words = re.findall(r"[a-z][a-z0-9'-]{2,}", str(value or "").casefold())
     return {word.strip("'-") for word in words if len(word.strip("'-")) >= 3 and word not in _KEEP_STOPWORDS}
+
+
+def _target_form_content_words(value: str) -> set[str]:
+    """Keep specific words for source-vs-target adaptation checks; less aggressive than atom matching."""
+    stop = {"the", "and", "for", "with", "from", "into", "onto", "that", "this", "then", "when",
+            "while", "before", "after", "as", "at", "by", "in", "on", "of", "to", "a", "an",
+            "is", "are", "be", "was", "were", "or", "but"}
+    return {word for word in re.findall(r"[a-z][a-z0-9'-]{2,}", str(value or "").casefold()) if word not in stop}
 
 
 def _keep_atom_matches_target_form(atom_text: str, target_form: str) -> bool:
