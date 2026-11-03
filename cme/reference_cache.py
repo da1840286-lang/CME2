@@ -45,8 +45,8 @@ class ReferenceVerificationCache:
         except ValueError:
             days = 30.0
         # Cache entries must never outlive a change to the reference-masking algorithm.
-        from .branding import REFERENCE_PREPARATION_VERSION
-        return cls(directory, rule_text, sweep, days, algorithm_version=REFERENCE_PREPARATION_VERSION)
+        from .branding import reference_preparation_version
+        return cls(directory, rule_text, sweep, days, algorithm_version=reference_preparation_version())
 
     def _key(self, source) -> str:
         return hashlib.sha256(

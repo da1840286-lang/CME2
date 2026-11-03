@@ -1,5 +1,6 @@
 """Campaign-scoped branding rules shared by Brain, generation and QA."""
 from __future__ import annotations
+import os
 import re
 from pathlib import Path
 from PIL import Image
@@ -231,7 +232,19 @@ def locate_text(image, angles=SWEEP_ANGLES, *, return_rejected=False):
 
 LETTER_MIN_PIXELS, LETTER_EXPLAINED_SHARE, LETTER_LINE_TOLERANCE, LETTER_DIFF = 30, 0.6, 40, 40
 LETTER_STRONG_DIFF = 90
-REFERENCE_PREPARATION_VERSION = 4
+REFERENCE_PREPARATION_VERSION = 4          # legacy Tesseract engine
+INPAINT_PREPARATION_VERSION = 5            # PP-OCR detector + LaMa inpainting (cme.text_clean)
+
+
+def unbranded_engine() -> str:
+    """'inpaint' (default, primary) or 'legacy' (old Tesseract sweep, kept only as an explicit opt-in)."""
+    value = os.environ.get("CME_UNBRANDED_ENGINE", "inpaint").strip().lower()
+    return "legacy" if value == "legacy" else "inpaint"
+
+
+def reference_preparation_version():
+    """Cache version of the active engine: entries made by one engine are never reused by the other."""
+    return INPAINT_PREPARATION_VERSION if unbranded_engine() == "inpaint" else REFERENCE_PREPARATION_VERSION
 
 
 def _dominant_colour(pixels):
@@ -587,12 +600,71 @@ def _sha(path):
         return None
 
 
+def _prepare_inpaint(source, destination):
+    """Primary no_branding cleaner: detector -> mask -> LaMa inside the mask only -> independent residual checks.
+
+    Statuses: TEXT_REGIONS_MASKED / NO_CONFIDENT_TEXT_FOUND (a candidate file is written; the caller still needs
+    the independent Judge PASS), NEEDS_REVIEW (doubtful lettering or a visible repair edge: no file, no PASS),
+    REFERENCE_CLEANING_FAILED (mask over the 8% ceiling, residual text, or any change outside the mask) and
+    OCR_UNAVAILABLE (engine not installed).
+    """
+    import json
+    import numpy as np
+    source, destination = Path(source), Path(destination)
+    sidecar = destination.with_suffix(".prep.json")
+    source_sha = _sha(source)
+    try:
+        if sidecar.is_file() and destination.is_file():
+            cached = json.loads(sidecar.read_text(encoding="utf-8"))
+            if (cached.get("source_sha256") == source_sha
+                    and cached.get("prepared_sha256") == _sha(destination)
+                    and cached.get("engine") == "ppocr+lama"
+                    and cached.get("algorithm_version") == INPAINT_PREPARATION_VERSION
+                    and cached.get("status") in {"TEXT_REGIONS_MASKED", "NO_CONFIDENT_TEXT_FOUND"}):
+                return {**cached, "path": str(destination), "cached": True}
+    except (OSError, ValueError):
+        pass
+    destination.unlink(missing_ok=True)
+    sidecar.unlink(missing_ok=True)
+    from . import text_clean
+    ok, why = text_clean.engine_status()
+    if not ok:
+        return {"path": None, "status": "OCR_UNAVAILABLE", "masked_regions": 0, "error_type": why, "engine": "ppocr+lama"}
+    try:
+        with Image.open(source) as opened:
+            rgb = np.asarray(opened.convert("RGB"))
+        status, cleaned, report = text_clean.clean(rgb)
+        report = {**report, "status": status}
+        if status in {"TEXT_REGIONS_MASKED", "NO_CONFIDENT_TEXT_FOUND"}:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(cleaned).save(destination, format="PNG")
+            prepared_path, prepared_sha = str(destination), _sha(destination)
+        else:
+            # NEEDS_REVIEW and failures never leave a candidate under an "unbranded" filename.
+            prepared_path = prepared_sha = None
+            report["masked_regions"] = 0
+        report.update({"path": prepared_path, "source_sha256": source_sha, "prepared_sha256": prepared_sha,
+                       "sweep": len(SWEEP_ANGLES), "algorithm_version": INPAINT_PREPARATION_VERSION, "cached": False})
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+        sidecar.write_text(json.dumps(report, ensure_ascii=False, indent=1), encoding="utf-8")
+        if prepared_path is None:
+            sidecar.unlink(missing_ok=True)
+        return report
+    except Exception as exc:  # noqa: BLE001
+        destination.unlink(missing_ok=True)
+        sidecar.unlink(missing_ok=True)
+        return {"path": None, "status": "OCR_FAILED", "masked_regions": 0, "error_type": type(exc).__name__,
+                "engine": "ppocr+lama"}
+
+
 def prepare_unbranded_reference(source: str | Path, destination: str | Path):
     """Mask lettering in the image-provider input; the original stays the identity reference for QA.
 
     Returns a report. Weak OCR detections never enter a repair mask; an ambiguous or oversized region fails closed.
     'NO_CONFIDENT_TEXT_FOUND' is NOT proof that the image is clean: the caller must confirm it independently.
     """
+    if unbranded_engine() == "inpaint":
+        return _prepare_inpaint(source, destination)
     import json
     source, destination = Path(source), Path(destination)
     sidecar = destination.with_suffix(".prep.json")

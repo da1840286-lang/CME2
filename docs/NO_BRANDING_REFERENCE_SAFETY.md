@@ -26,6 +26,28 @@ The current ceilings are intentionally conservative and are not claimed to be ca
 
 These values are a fail-closed starting point for this regression, not a production-wide statistical threshold. Broaden calibration with representative real photographs (dark labels, embossed marks, curved surfaces, textured plastics, reflective metal, small labels and multiple logos) before relaxing any ceiling. A rejected reference requires a clean photo or explicit human review; the code does not infer that an uncertain OCR region is a logo.
 
+## PP-OCR + LaMa reference cleaner (algorithm version 5)
+
+The current default for `CME_UNBRANDED_ENGINE` is `inpaint`: RapidOCR/PP-OCR detects text in 0°, 90° and 270° views; the mask may grow over a validated label plate; LaMa repairs a local crop; and the result is copied back only under the mask. The original OfferCard image is never modified. A byte-level check rejects any pixel change outside the mask. The mask ceiling remains 8%.
+
+The cleaner distinguishes `TEXT_REGIONS_MASKED`, `NO_CONFIDENT_TEXT_FOUND`, `NEEDS_REVIEW`, `REFERENCE_CLEANING_FAILED` and `OCR_UNAVAILABLE`. `NO_CONFIDENT_TEXT_FOUND` is not proof of a clean reference: the independent Judge is still required. A doubtful detection, residual text or a visible seam cannot produce an automatic PASS. `target_brand_allowed` bypasses reference cleaning and remains unchanged. The previous Tesseract sweep is available only by explicitly setting `CME_UNBRANDED_ENGINE=legacy`; its reference-cache version remains separate from version 5.
+
+### Runtime dependencies
+
+`requirements.txt` installs `rapidocr-onnxruntime`. The inpaint path also needs CPU-capable PyTorch and the verified `big-lama.pt` weights. The `live-smoke` workflow installs these only for `stage=frame` or `stage=all` when `branding_policy=no_branding`; Brain-only, FIND/ANALYZE and `target_brand_allowed` runs do not download the model. The CI workflow installs the same runtime and Tesseract so the real-engine tests are not silently skipped. For local Linux runs, install the Tesseract executable (`sudo apt-get install tesseract-ocr`), then run:
+
+```bash
+pip install -r requirements.txt
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+python scripts/fetch_lama.py
+```
+
+The model download is pinned by SHA-256 in `scripts/fetch_lama.py`. A missing detector, PyTorch runtime or weights blocks `no_branding` generation; it never falls back silently to the legacy cleaner.
+
+### Current calibration limits
+
+The supplied contact sheet contains 11 examples, not a broad production calibration set. The patch reports one visible repair seam on the SEESE battery (`NEEDS_REVIEW`), rejects the text-heavy banner above the 8% ceiling, and notes an undetected cropped text fragment on one collage. The 1.5 seam threshold and text-confidence thresholds are provisional; do not lower them based on this small sample. The independent Judge remains the final visual gate.
+
 ## Judge reserve
 
 `openrouter_free_judge_reserve` uses `dots-studio/dots-3-note-preview:free`. This was chosen over Nemotron because it is a separate model family/provider and avoids correlating the reserve with the Nemotron Brain and Analyst. OpenRouter currently lists text+image input and JSON response formatting. It is a free preview endpoint and has **not** been live-verified for CME Judge prompts, image transport, accuracy or quota. OpenRouter lists the model as scheduled to go away on 2026-12-31 and says it is not available through EU in-region routing. It is therefore a temporary reserve candidate, not a production guarantee. The primary remains `google/gemma-4-31b-it:free`; the reserve is used only after primary transient retries fail. If both fail, the result remains `UNVERIFIED` and generation/delivery cannot be reported as PASS.

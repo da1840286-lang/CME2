@@ -3,7 +3,7 @@ on: [push, pull_request]
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     permissions:
       contents: read
     steps:
@@ -12,6 +12,19 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r requirements.txt
+      - name: Install Tesseract OCR for residual text checks
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends tesseract-ocr
+      - name: Install CPU torch for the no_branding reference cleaner
+        run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - name: Cache LaMa weights
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/cme
+          key: lama-big-lama-7ba7aa7a
+      - name: Fetch LaMa weights (SHA-256 verified)
+        run: python scripts/fetch_lama.py
       - name: Compile all CME modules
         run: python -m compileall -q cme
       - run: python -m unittest discover -s tests -t . -v

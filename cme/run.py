@@ -219,7 +219,8 @@ def produce_shot(*, offer, atoms, shot, contract_id, state, out_dir, image_provi
                 detail = (
                     f"no_branding cannot safely prepare target reference {Path(source).name}: "
                     f"{report.get('status')} ({report.get('error_type', 'unknown error')}); "
-                    "install a working Tesseract OCR engine before generation"
+                    "install the reference-cleaning engine (rapidocr-onnxruntime, torch, LaMa weights via "
+                    "scripts/fetch_lama.py) or a working Tesseract for CME_UNBRANDED_ENGINE=legacy before generation"
                 )
                 prepared_path = Path(report.get("path") or destination)
                 prepared_path.unlink(missing_ok=True)
@@ -228,9 +229,14 @@ def produce_shot(*, offer, atoms, shot, contract_id, state, out_dir, image_provi
                 report["prepared_sha256"] = None
                 _blocked(state, out, shot, attempt, "REFERENCE_CLEANING_FAILED", detail)
                 raise ReferenceCleaningError([detail])
-            if report.get("status") in {"MASK_INCOMPLETE", "REFERENCE_CLEANING_FAILED"}:
+            if report.get("status") in {"MASK_INCOMPLETE", "REFERENCE_CLEANING_FAILED", "NEEDS_REVIEW"}:
                 if report.get("status") == "MASK_INCOMPLETE":
                     reason = (f"{report.get('residual_regions', 0)} region(s) still read as text after masking")
+                elif report.get("status") == "NEEDS_REVIEW":
+                    doubtful = [f"{u.get('word')}@{u.get('box')}" for u in (report.get("uncertain_detections") or [])
+                                if isinstance(u, dict)][:6]
+                    reason = (f"NEEDS_REVIEW ({report.get('failure_reason')}); doubtful={doubtful}; "
+                              f"seam_ratio={report.get('seam_ratio')}; no automatic PASS")
                 else:
                     reason = (
                         f"reason={report.get('failure_reason') or report.get('status')}; "
