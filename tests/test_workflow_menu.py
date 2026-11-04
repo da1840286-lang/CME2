@@ -68,7 +68,7 @@ def params_snippet(block: str):
 
 def menu_env(**menu):
     base = {"country": "US", "period": "30", "find_requests": "4", "find_max_ads": "3",
-            "find_video_duration_range": "all", "keywords": "car vacuum", "find_selection_mode": "product",
+            "find_video_duration_range": "all", "keywords": "", "find_selection_mode": "product",
             "find_performance_order": "default", "find_include_retention": "false"}
     base.update({k: str(v) for k, v in menu.items()})
     return {ENV_FOR_INPUT[k]: v for k, v in base.items() if k in ENV_FOR_INPUT}, base
@@ -146,6 +146,7 @@ class MenuWiringTests(unittest.TestCase):
 
     def test_offer_menu_has_no_hardcoded_target_and_keeps_both_find_modes(self):
         self.assertEqual(INPUTS["offer_json"]["default"], "")
+        self.assertEqual(INPUTS["keywords"]["default"], "")
         self.assertNotIn("Fanttik", INPUTS["offer_json"]["description"])
         self.assertIn("both FIND modes", INPUTS["offer_json"]["description"])
         self.assertEqual(set(INPUTS["find_selection_mode"]["options"]), {"product", "mechanism"})

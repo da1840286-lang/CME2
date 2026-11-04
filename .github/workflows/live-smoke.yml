@@ -51,10 +51,10 @@ on:
         required: true
         default: all
       keywords:
-        description: "Comma-separated search terms. In contract-aware product search the exact offer name is queried first, then these terms in the order typed, then the product type; at most three queries run, and any typed keyword that does not fit is listed in candidates.json request.dropped_operator_keywords."
+        description: "Optional comma-separated search terms. Product mode uses the OfferCard name and product type/category even when this is blank; typed terms supplement those target queries. Mechanism mode requires explicit keywords. No product-specific keyword is prefilled."
         type: string
         required: false
-        default: "car vacuum"
+        default: ""
       find_performance_order:
         description: "Optional playback-metric diagnostic. Product mode always uses target-focused Sponsored Search; requested play-rate values are reported as NOT_OBTAINABLE_FOR_PRODUCT_QUERY and never gate or rank candidates. default is the same target-focused product search without requesting unavailable rates."
         type: choice
