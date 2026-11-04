@@ -298,11 +298,11 @@ def make_qa_checks(atoms, shot, judge_fn=None, ocr=None, expected_size=None, ocr
             text_rule = (qa_branding_rule(NO_BRANDING, approved_brand_marks)
                          if branding_policy == NO_BRANDING else qa_no_added_text_rule())
             system_no_text = Atom(SYSTEM_NO_TEXT_ID, "qa_check", text_rule, "MUST", "qa", shot)
+            judge_atoms = [*pool, system_no_text]
             if branding_policy == TARGET_BRAND_ALLOWED and product_refs:
                 judge_atoms.append(Atom(
                     TARGET_BRANDING_CHECK_ID, "qa_check",
                     qa_target_branding_reference_rule(approved_brand_marks), "MUST", "qa", shot))
-            judge_atoms = [*pool, system_no_text]
             transfer_check_ids = set()
             rows_by_id = {a.id: a for a in atoms}
             preserved = (transfer_decision or {}).get("preserved", []) if isinstance(transfer_decision, dict) else []
@@ -325,9 +325,9 @@ def make_qa_checks(atoms, shot, judge_fn=None, ocr=None, expected_size=None, ocr
                         "property is not visually evidenced.",
                         "MUST", "qa", shot))
             judge_rows = judge_batch_checks(path, judge_atoms, judge_fn, reference_images=product_refs)
+            required_judge_ids = {SYSTEM_NO_TEXT_ID, *transfer_check_ids}
             if branding_policy == TARGET_BRAND_ALLOWED and product_refs:
                 required_judge_ids.add(TARGET_BRANDING_CHECK_ID)
-            required_judge_ids = {SYSTEM_NO_TEXT_ID, *transfer_check_ids}
             res.extend(replace(row, required=True) if row.check_id in required_judge_ids else row for row in judge_rows)
             run.judge_info = dict(getattr(judge_fn, "info", {}) or {})
         else:
@@ -341,6 +341,6 @@ def make_qa_checks(atoms, shot, judge_fn=None, ocr=None, expected_size=None, ocr
                                            "no Judge adapter configured; target branding was not compared with its reference"))
             run.judge_info = {}
         return res
-    run.judge_info = {}
 
+    run.judge_info = {}
     return run

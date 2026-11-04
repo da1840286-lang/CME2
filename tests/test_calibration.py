@@ -64,6 +64,7 @@ class CalibrationTests(unittest.TestCase):
     def test_missing_positive_labels_cannot_report_ok(self):
         report = run_calibration({"observe_verify": judge_from(lambda f, a: False)}, {"synthetic:blank": "blank.png"}, ATOMS, repeats=2)
         self.assertTrue(verdict_hint(report).startswith("INCOMPLETE"))
+
     def test_synthetic_controls_do_not_count_as_real_negative_labels(self):
         report = run_calibration(
             {"observe_verify": judge_from(lambda _f, _a: False)},

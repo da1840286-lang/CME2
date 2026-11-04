@@ -27,4 +27,18 @@ jobs:
         run: python scripts/fetch_lama.py
       - name: Compile all CME modules
         run: python -m compileall -q cme
-      - run: python -m unittest discover -s tests -t . -v
+      - name: Run unit and contract tests
+        run: python -m unittest discover -s tests -t . -v
+      - name: Run real Tesseract checks in isolated processes
+        env:
+          CME_RUN_REAL_OCR_TESTS: "1"
+        run: |
+          python -m unittest tests.test_branding_policy.CampaignBrandingPolicyTests.test_real_lettering_is_removed_and_the_original_is_preserved -v
+          python -m unittest tests.test_branding_policy.CampaignBrandingPolicyTests.test_neutral_text_is_removed_without_flattening_a_surface_gradient -v
+          python -m unittest tests.test_branding_policy.CampaignBrandingPolicyTests.test_seese_real_reference_fails_closed_without_publishing_original_as_unbranded -v
+          python -m unittest tests.test_branding_policy.CampaignBrandingPolicyTests.test_seese_real_reference_blocks_frame_before_generator_and_records_distinct_status -v
+          python -m unittest tests.test_frame_retry_and_ocr.OcrWordRulesTests.test_real_tesseract_ignores_noise_keeps_promo -v
+      - name: Run real PP-OCR and LaMa checks in an isolated process
+        env:
+          CME_RUN_REAL_CLEANER_TESTS: "1"
+        run: python -m unittest tests.test_text_clean.RealEngine -v

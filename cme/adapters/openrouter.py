@@ -179,8 +179,8 @@ Reply ONLY with JSON: {"results": [{"id": "...", "pass": true|false, "evidence":
         reqs = []
         for a in atoms:
             requirement = a.text
-                contrast = "problem_state" in required_aspects(a)
             if str(a.id).startswith("mech_result_"):
+                contrast = "problem_state" in required_aspects(a)
                 requirement = (
                     ("RESULT-CONTRAST GATE: prove both the starting/problem state and the visibly changed result. "
                      if contrast else

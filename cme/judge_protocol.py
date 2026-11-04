@@ -31,6 +31,7 @@ ROLE_ASPECTS = {
     "mech_intervention_": {"object_presence", "contact_action"},
     # A result proves its visible result state; contrast is conditional on the atom text.
     "mech_result_": {"changed_state"},
+}
 RESULT_CONTRAST_CUES = re.compile(
     r"\b(?:before\s*(?:and|[-/])\s*after|compared\s+(?:with|to)|versus|vs\.?|"
     r"side[- ]by[- ]side|untreated|untouched|dirty\s+(?:vs\.?|versus)\s+clean|"
@@ -46,14 +47,13 @@ def required_aspects(atom) -> set[str]:
     if atom_id.startswith("mech_result_") and RESULT_CONTRAST_CUES.search(str(getattr(atom, "text", "") or "")):
         base.add("problem_state")
     return base
-}
 
 OBSERVE_SYSTEM = """You are a careful visual inspector. You will see ONE image. You are NOT told what the image is supposed to show. Do not guess purposes, brands, or intentions.
 List only concrete, visible facts as short observations. Cover, when visible:
 - every distinct object: what it is, where it is in the frame (left/center/right, top/middle/bottom), and its state;
 - every region whose surface condition differs from its neighbours, including its location, relative size, and borders;
-- for spray/cleaning scenes, distinguish visible foam/suds/bubbles or thick residue from a fine mist, water droplets, and wet streaks; record coverage and drips when visible, but do not guess the liquid's composition;
 - adjacent objects or regions: clearly touching/overlapping, clearly separate, or unclear;
+- for spray/cleaning scenes, distinguish visible foam/suds/bubbles or thick residue from a fine mist, water droplets, and wet streaks; record coverage and drips when visible, but do not guess the liquid's composition;
 - any visible text or logo, copied as seen.
 Rules: one fact per observation, at most 25 words each, no reasoning, no requirements, no 'probably'. If something is unclear, say 'unclear'. Never state a fact you cannot see.
 Reply ONLY with JSON: {"observations": [{"id": "o1", "kind": "object|region|relation|text|other", "text": "..."}]} with 1 to 24 items. If the image is blank or shows nothing meaningful, report that explicitly as an observation instead of inventing facts."""

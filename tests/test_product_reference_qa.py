@@ -11,8 +11,8 @@ from cme.offer import load_offer
 from cme.branding import NO_BRANDING
 from cme.qa import (
     PRODUCT_IDENTITY_CHECK_ID,
-    TARGET_BRANDING_CHECK_ID,
     SYSTEM_NO_TEXT_ID,
+    TARGET_BRANDING_CHECK_ID,
     CheckResult,
     make_qa_checks,
     validate_product_references,
@@ -140,6 +140,7 @@ class ProductIdentityJudgeTests(unittest.TestCase):
             self.assertEqual(checks[SYSTEM_NO_TEXT_ID].status, "NOT_RUN")
             self.assertTrue(checks[SYSTEM_NO_TEXT_ID].required)
             self.assertIn("429", checks[SYSTEM_NO_TEXT_ID].detail)
+
 
     def test_target_brand_policy_uses_separate_required_text_and_reference_checks(self):
         with tempfile.TemporaryDirectory() as d:

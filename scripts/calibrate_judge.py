@@ -12,6 +12,7 @@ labels.json example:
                         "target_branding_reference": true, "cme_product_identity_ref": true},
    "shot_01_a02.png": {"mech_result_1": true, "system_no_text_policy": false,
                         "target_branding_reference": false, "cme_product_identity_ref": false}}
+
 Every included system check needs at least one real positive and one real negative label.
 Synthetic controls are diagnostic only; they do not count as labeled ground truth.
 For a reserve model, pass a separate settings file with judge_adapter set to that model and
@@ -42,10 +43,10 @@ def main(argv=None):
     ap.add_argument("--atoms", required=True)
     ap.add_argument("--frames", nargs="+", required=True)
     ap.add_argument("--labels")
+    ap.add_argument("--reference-image")
     ap.add_argument("--branding-policy", choices=(NO_BRANDING, TARGET_BRAND_ALLOWED),
                     default=TARGET_BRAND_ALLOWED)
     ap.add_argument("--approved-brand-marks", nargs="*", default=[])
-    ap.add_argument("--reference-image")
     ap.add_argument("--repeats", type=int, default=5)
     ap.add_argument("--modes", default="single_pass,observe_verify")
     ap.add_argument("--priorities", default="MUST")
@@ -64,11 +65,12 @@ def main(argv=None):
     if not atoms:
         ap.error("no image atoms with the requested priority/shot in atoms file")
 
+    frames = {Path(p).name: Path(p) for p in args.frames}
     for path in frames.values():
         if not path.is_file():
             ap.error(f"frame does not exist: {path}")
-    frames = {Path(p).name: Path(p) for p in args.frames}
     frames.update(make_synthetic_negatives(out / "synthetic", args.reference_image))
+    labels = json.loads(Path(args.labels).read_text(encoding="utf-8")) if args.labels else {}
     if not isinstance(labels, dict):
         ap.error("--labels must contain a JSON object mapping frame filenames to check-id booleans")
     real_frame_names = {Path(p).name for p in args.frames}
@@ -98,7 +100,6 @@ def main(argv=None):
                           for check_id in frame_labels if check_id not in valid_check_ids})
     if unknown_ids:
         ap.error("labels contain unknown check ids: " + ", ".join(unknown_ids))
-    labels = json.loads(Path(args.labels).read_text(encoding="utf-8")) if args.labels else {}
     refs = [args.reference_image] if args.reference_image else []
     settings, catalog = load_settings(args.settings), load_catalog(args.catalog)
     log = CallLog(out / "calls.jsonl")

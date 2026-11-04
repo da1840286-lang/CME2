@@ -1,5 +1,6 @@
 """Frame retry inside all, word-level OCR, and strict auto-transfer eligibility."""
 import json
+import os
 import shutil
 import tempfile
 import unittest
@@ -68,7 +69,8 @@ class OcrWordRulesTests(unittest.TestCase):
                 ["--psm 3", "--psm 11", "--psm 12"],
             )
 
-    @unittest.skipUnless(shutil.which("tesseract"), "tesseract not installed")
+    @unittest.skipUnless(os.environ.get("CME_RUN_REAL_OCR_TESTS") == "1" and shutil.which("tesseract"),
+                     "real Tesseract checks run in an isolated CI process")
     def test_real_tesseract_ignores_noise_keeps_promo(self):
         import random
         from PIL import Image, ImageDraw, ImageFilter, ImageFont

@@ -243,6 +243,7 @@ class AdapterProtocolTests(unittest.TestCase):
         judge(self.image, [RESULT])
         self.assertEqual([c["temperature"] for c in calls], [0, 0])
 
+
     def test_system_text_and_target_brand_rules_bypass_the_observation_inventory(self):
         from cme.qa import SYSTEM_NO_TEXT_ID, TARGET_BRANDING_CHECK_ID, PRODUCT_IDENTITY_CHECK_ID
         from cme.adapters.openrouter import make_openrouter_judge

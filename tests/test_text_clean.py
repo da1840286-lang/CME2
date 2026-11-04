@@ -207,7 +207,8 @@ class PrepareContract(unittest.TestCase):
             self.assertEqual(json.loads(dest.with_suffix(".prep.json").read_text())["engine"], "ppocr+lama")
 
 
-@unittest.skipUnless(T.engine_status()[0], "PP-OCR / torch / LaMa weights not installed")
+@unittest.skipUnless(os.environ.get("CME_RUN_REAL_CLEANER_TESTS") == "1" and T.engine_status()[0],
+                     "real PP-OCR / LaMa checks run in an isolated CI process")
 class RealEngine(unittest.TestCase):
     @staticmethod
     def _photo(text=True, grille=False):

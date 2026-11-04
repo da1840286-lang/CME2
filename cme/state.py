@@ -5,13 +5,14 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
+
 ATTEMPT_CONSUMING_STATUSES = frozenset({"PASS", "FAILED_QA", "UNVERIFIED", "NOT_DELIVERED"})
 
 
 def attempt_consumed(record: dict) -> bool:
     """Whether a recorded frame operation produced an image candidate.
 
-    New records carry an explicit generated flag. Legacy records are classified from
+    New records carry an explicit `generated` flag. Legacy records are classified from
     their final QA status; provider/infrastructure errors do not consume an image attempt.
     """
     if not isinstance(record, dict):
@@ -28,7 +29,6 @@ def count_attempts(records, shot: int | None = None) -> int:
                if isinstance(record, dict)
                and (shot is None or record.get("shot") == shot)
                and attempt_consumed(record))
-
 
 
 class StateMismatch(Exception):

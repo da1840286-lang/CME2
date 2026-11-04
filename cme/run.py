@@ -298,19 +298,19 @@ def produce_shot(*, offer, atoms, shot, contract_id, state, out_dir, image_provi
             "reference_preparation": [_preparation_record(item) for item in preparation_reports],
             "image_inputs": _image_input_manifest(
                 refs, offer.photos, provider_product_refs, preparation_reports, offer.branding_policy
-    image_generated = False
             )}
+    image_generated = False
     try:
-        image_generated = image_path.is_file() and image_path.stat().st_size > 0
         image_path.write_bytes(image_provider(receipt.sent_prompt, provider_refs))
+        image_generated = image_path.is_file() and image_path.stat().st_size > 0
         base["provider"] = dict(getattr(image_provider, "info", {}) or {})
         base["commercial_status"] = _commercial_status(base["provider"])
         qa_results = qa_checks(image_path)
         base["judge"] = dict(getattr(qa_checks, "judge_info", {}) or {})
         receipt = attach_qa(receipt, atoms, qa_results)
     except Exception as e:                          # keep the diagnostics, then let the caller see the error
-        base["judge"] = dict(getattr(qa_checks, "judge_info", {}) or {})
         base["provider"] = dict(getattr(image_provider, "info", {}) or base.get("provider", {}))
+        base["judge"] = dict(getattr(qa_checks, "judge_info", {}) or {})
         status = f"ERROR_{type(e).__name__}"
         record_attempt(state, shot, receipt.receipt_id, status, str(e), generated=image_generated)
         _write(out, receipt.receipt_id, {**receipt.to_dict(), **base, "overall": status, "error": str(e)})

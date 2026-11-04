@@ -10,6 +10,7 @@ from pathlib import Path
 
 NEGATIVE_PREFIX = "synthetic:"
 
+
 def build_calibration_atoms(atoms, *, shot=1, branding_policy="target_brand_allowed",
                             approved_brand_marks=(), include_brand_reference=False):
     """Mirror the system pixel checks used by qa.make_qa_checks without changing production QA."""
@@ -34,7 +35,6 @@ def build_calibration_atoms(atoms, *, shot=1, branding_policy="target_brand_allo
                             qa_target_branding_reference_rule(approved_brand_marks),
                             "MUST", "qa", shot))
     return out
-
 
 
 def make_synthetic_negatives(out_dir, reference_image=None, size=(576, 1024)):
@@ -117,6 +117,7 @@ def run_calibration(judge_factories: dict, frames: dict, atoms, *, labels=None, 
                 missed += len(statuses) - passes
             rows.append({"frame": name, "atom": atom_id, "pass_rate": round(rate, 2),
                          "statuses": {s: statuses.count(s) for s in sorted(set(statuses))},
+                         "expected_shown": expected, "sample_evidence": evidence.get((name, atom_id), "")})
         real_label_coverage = {}
         for check_id in report["balanced_real_ids"]:
             positive_frames = sorted(name for name in frames if not name.startswith(NEGATIVE_PREFIX)
@@ -130,7 +131,6 @@ def run_calibration(judge_factories: dict, frames: dict, atoms, *, labels=None, 
                                         and any(value is True for value in (labels.get(name) or {}).values())})
         real_negative_frames = sorted({name for name in frames if not name.startswith(NEGATIVE_PREFIX)
                                         and any(value is False for value in (labels.get(name) or {}).values())})
-                         "expected_shown": expected, "sample_evidence": evidence.get((name, atom_id), "")})
         report["modes"][mode] = {
             "false_pass_rate": round(fp / neg_total, 3) if neg_total else None,
             "negative_calls": neg_total,
@@ -140,11 +140,11 @@ def run_calibration(judge_factories: dict, frames: dict, atoms, *, labels=None, 
             "total_calls": total_calls,
             "not_run_rate": round(not_run_calls / total_calls, 3) if total_calls else None,
             "positive_cells": positive_cells,
+            "negative_cells": negative_cells,
             "real_positive_frames": real_positive_frames,
             "real_negative_frames": real_negative_frames,
             "real_label_coverage": real_label_coverage,
             "judge_info": dict(getattr(judge, "info", {}) or {}),
-            "negative_cells": negative_cells,
             "unstable_cells": unstable, "total_cells": len(cells),
             "cells": sorted(rows, key=lambda r: (r["frame"], r["atom"])),
         }
@@ -155,11 +155,11 @@ def render_markdown(report) -> str:
     lines = ["# Judge calibration", "", f"repeats per frame: {report['repeats']}; atoms: {', '.join(report['atoms'])}", ""]
     lines += ["| mode | false-pass rate (target 0) | missed-pass rate | NOT_RUN rate | unstable cells | real label coverage |",
               "|---|---|---|---|---|---|"]
+    for mode, m in report["modes"].items():
         covered = ", ".join(
             f"{check_id}: +{len(item['positive_frames'])}/-{len(item['negative_frames'])}"
             for check_id, item in m.get("real_label_coverage", {}).items()
         ) or "n/a"
-    for mode, m in report["modes"].items():
         lines.append(f"| {mode} | {m['false_pass_rate']} ({m['negative_calls']} calls) | "
                      f"{m['missed_pass_rate']} ({m['positive_calls']} calls) | "
                      f"{m['not_run_rate']} ({m['not_run_calls']}/{m['total_calls']}) | "

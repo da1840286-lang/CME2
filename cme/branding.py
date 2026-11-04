@@ -68,6 +68,7 @@ def brain_branding_rule(policy, approved_brand_marks=()):
                 "Never copy source-ad/competitor branding. Do not add text overlays, captions, subtitles, UI, "
                 "watermarks or promotional wording.")
     raise ValueError(f"unsupported branding_policy {policy!r}")
+
 def qa_no_added_text_rule() -> str:
     """Pixel-only policy check for added text; product-native marks are checked separately."""
     return (

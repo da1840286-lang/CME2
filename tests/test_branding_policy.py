@@ -1,5 +1,6 @@
 """Regression tests for campaign-scoped branding across Brain, image prompt and QA."""
 import json
+import os
 import shutil
 import tempfile
 import unittest
@@ -96,7 +97,8 @@ class CampaignBrandingPolicyTests(unittest.TestCase):
             self.assertTrue(rows[SYSTEM_NO_TEXT_ID].required)
             self.assertEqual(rows[SYSTEM_NO_TEXT_ID].status, "FAIL")
 
-    @unittest.skipUnless(shutil.which("tesseract"), "tesseract not installed")
+    @unittest.skipUnless(os.environ.get("CME_RUN_REAL_OCR_TESTS") == "1" and shutil.which("tesseract"),
+                     "real Tesseract checks run in an isolated CI process")
     def test_real_lettering_is_removed_and_the_original_is_preserved(self):
         font = _font()
         if font is None:
@@ -125,7 +127,8 @@ class CampaignBrandingPolicyTests(unittest.TestCase):
             self.assertTrue(again["cached"])
 
 
-    @unittest.skipUnless(shutil.which("tesseract"), "tesseract not installed")
+    @unittest.skipUnless(os.environ.get("CME_RUN_REAL_OCR_TESTS") == "1" and shutil.which("tesseract"),
+                     "real Tesseract checks run in an isolated CI process")
     def test_neutral_text_is_removed_without_flattening_a_surface_gradient(self):
         from numpy import abs as np_abs, asarray, uint8
         font = _font()
@@ -158,7 +161,8 @@ class CampaignBrandingPolicyTests(unittest.TestCase):
             self.assertLess(float(error[130:225, 90:535].mean()), 3.0,
                             "restoration must preserve gradual surface shading rather than create a patch")
 
-    @unittest.skipUnless(shutil.which("tesseract"), "tesseract not installed")
+    @unittest.skipUnless(os.environ.get("CME_RUN_REAL_OCR_TESTS") == "1" and shutil.which("tesseract"),
+                     "real Tesseract checks run in an isolated CI process")
     def test_seese_real_reference_fails_closed_without_publishing_original_as_unbranded(self):
         source = ROOT / "tests" / "fixtures" / "seese_product_reference.jpg"
         with tempfile.TemporaryDirectory() as d:
@@ -184,7 +188,8 @@ class CampaignBrandingPolicyTests(unittest.TestCase):
             self.assertIsNone(sidecar_data["prepared_sha256"])
             self.assertEqual(source.read_bytes(), source_before, "the original branded source must remain untouched")
 
-    @unittest.skipUnless(shutil.which("tesseract"), "tesseract not installed")
+    @unittest.skipUnless(os.environ.get("CME_RUN_REAL_OCR_TESTS") == "1" and shutil.which("tesseract"),
+                     "real Tesseract checks run in an isolated CI process")
     def test_seese_real_reference_blocks_frame_before_generator_and_records_distinct_status(self):
         source = ROOT / "tests" / "fixtures" / "seese_product_reference.jpg"
         with tempfile.TemporaryDirectory() as d:

@@ -315,10 +315,10 @@ def reserved_system_atom_errors(atoms, approved_brand_marks=()) -> dict:
     Brand presence is checked separately against the target reference; embedding a brand in an
     atom makes the Judge treat identity as an unprovable text requirement.
     """
+    errors = {}
     marks = [str(x).strip() for x in approved_brand_marks if isinstance(x, str) and str(x).strip()]
     patterns = [re.compile(r"(?<![\w])" + r"\s+".join(re.escape(part) for part in mark.split()) + r"(?![\w])", re.I)
                 for mark in marks]
-    errors = {}
     for atom in atoms:
         aid, _priority, channel, kind = _atom_view(atom)
         text = atom.get("text") if isinstance(atom, dict) else getattr(atom, "text", "")
@@ -326,10 +326,10 @@ def reserved_system_atom_errors(atoms, approved_brand_marks=()) -> dict:
             errors[str(aid)] = ["SYSTEM_OWNED_QA: do not author qa_no_text atoms; the canonical no-text check is injected by code"]
         elif kind == "qa_check" and _BRAND_TEXT_CHECK.search(str(text or "")):
             errors[str(aid)] = ["SYSTEM_OWNED_QA: branding/text rules are owned by the campaign branding policy; "
+                                "remove this atom (or re-send it as a check about something else)"]
         elif channel == "image" and any(pattern.search(str(text or "")) for pattern in patterns):
             errors[str(aid)] = ["BRAND_IN_VISUAL_ATOM: remove target/competitor brand names from visual atoms; "
                                 "brand consistency is checked separately against the target-product reference"]
-                                "remove this atom (or re-send it as a check about something else)"]
     return errors
 
 
@@ -834,6 +834,7 @@ def _normalized_evidence(value: str) -> str:
     """Normalize punctuation/case for exact, ordered evidence matching against the OfferCard."""
     return re.sub(r"[^\w]+", " ", str(value or "").casefold(), flags=re.UNICODE).strip()
 
+
 # Only capability markers that add a feature beyond ordinary product-class use.
 # This intentionally stays conservative: scene nouns (crumbs, tiles, pass, result) and generic
 # adjectives must never turn an ordinary demo into an unsupported special-capability claim.
@@ -935,7 +936,6 @@ _GATE_UNCERTAINTY = re.compile(
 )
 
 
-
 def validate_transfer_fit_decision(offer, decision, source_transfer=None) -> list:
     """Fail closed unless the transfer verdict is well-formed and its target evidence is real."""
     if not isinstance(decision, dict):
@@ -965,6 +965,7 @@ def validate_transfer_fit_decision(offer, decision, source_transfer=None) -> lis
         if reason_error:
             errors.append(reason_error)
         if _CYRILLIC.search(reason):
+            errors.append("transfer_decision.reason must be in English")
         if decision.get("transferable") is True:
             preserved_rows = decision.get("source_elements_preserved")
             preserved_rows = preserved_rows if isinstance(preserved_rows, list) else []
@@ -979,7 +980,6 @@ def validate_transfer_fit_decision(offer, decision, source_transfer=None) -> lis
                     "TARGET_CAPABILITY_UNCERTAIN: a transferable decision cannot rely on plausibility or "
                     "probability language; cite a verified target capability or reject/narrow the transfer"
                 )
-            errors.append("transfer_decision.reason must be in English")
     if _positive_text_display_directive(
         str(decision.get("target_native_mapping") or ""),
         forbid_product_marks=(getattr(offer, "branding_policy", TARGET_BRAND_ALLOWED) == NO_BRANDING),
@@ -1021,9 +1021,9 @@ def validate_transfer_fit_decision(offer, decision, source_transfer=None) -> lis
             errors.append(
                 f"transfer_decision.target_evidence[{index}] is shorter than 8 characters and must exactly match "
                 "a complete authoritative OfferCard field"
+            )
     if decision.get("transferable") is True:
         errors.extend(_target_capability_evidence_errors(offer, decision, evidence))
-            )
     errors.extend(validate_gate_elements(
         decision,
         source_transfer,
@@ -1548,8 +1548,8 @@ def build_request(offer, brief: str, shots: int, failed=None, source_transfer=No
                      "Do not treat abstract care or durability claims as visually verifiable from a generic still. Ask for a visible label only when the brief explicitly requires on-image text.",
                      "Every kind='qa_check' atom must use channel='qa'; it is a verification criterion and must not be included in the image-generation prompt.",
                      "Do not emit an atom whose id is 'qa_no_text' or starts with 'qa_no_text_'. The canonical no-added-text requirement is injected and checked by code, so Brain must not author a duplicate QA criterion.",
-                     "BRAND-FREE VISUAL ATOMS: never put the target brand name, model name, approved brand mark or competitor name in any image atom. Describe the product by its generic product type and visible physical form; target branding is governed separately by the campaign policy and product-reference QA, not by a scene/action atom.",
                       branding_rule,
+                     "BRAND-FREE VISUAL ATOMS: never put the target brand name, model name, approved brand mark or competitor name in any image atom. Describe the product by its generic product type and visible physical form; target branding is governed separately by the campaign policy and product-reference QA, not by a scene/action atom.",
                      "NO-ADDED-TEXT POLICY: do not add text overlays, captions, subtitles, title cards, speech bubbles, UI, watermarks or promotional wording to any image atom. If the source hook is text, translate its attention mechanism into a visual-only action; never reproduce the source wording.",
                      "Never use a forbidden claim.",
                      "When target-product reference photos are supplied, preserve the actual target product's form factor, silhouette, proportions, and distinctive visible parts. Keep the target product body recognizable in the frame; do not substitute a generic lookalike or change a compact handheld product into an upright/stick device.",
@@ -2024,7 +2024,7 @@ def request_atoms(offer, brief: str, shots: int, call, max_retries: int = 3, ver
                 pending.pop(old_id, None)
 
         for atom in parsed.atoms:
-            if atom.id in reserved_system_atom_ids
+            if atom.id in reserved_system_atom_ids:
                 by_id.pop(atom.id, None)
                 accepted_atom_provenance.pop(atom.id, None)
                 pending.pop(atom.id, None)
