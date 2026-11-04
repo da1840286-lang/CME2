@@ -12,6 +12,8 @@ from cme.brain import (
     build_request,
     request_atoms,
     request_transfer_fit,
+    _source_evidence_contradiction,
+    _negative_gate_mechanism_contradiction,
     validate_transfer_fit_decision,
 )
 from cme.offer import load_offer
@@ -253,6 +255,84 @@ class TargetFitGateTests(unittest.TestCase):
         rules = " ".join(calls[0]["rules"])
         self.assertIn("source fields and observations may be Russian", rules)
         self.assertIn("do not claim that action was never observed", rules)
+
+    def test_target_capability_gap_is_not_misread_as_missing_source_evidence(self):
+        source = {
+            "evidence": [
+                {"t_sec": 16.6, "observation": "Nozzle sprays foam onto shower caddies and bathtub.",
+                 "supports": ["product_intervention"]},
+                {"t_sec": 20.63, "observation": "Foam visibly covers tiles, faucet, caddies, and bathtub.",
+                 "supports": ["result_demo"]},
+            ]
+        }
+        rejected = {
+            "transferable": False,
+            "reason": (
+                "The source mechanism depends on foam spraying, which is forbidden and unsupported for the target; "
+                "no verified target evidence confirms foam capability."
+            ),
+            "source_elements_preserved": [
+                {"element": "mechanism", "source_form": "Pressure washer sprays foam onto bathroom surfaces",
+                 "target_form": "Pressure washer sprays water onto bathroom surfaces"}
+            ],
+            "source_elements_dropped": [],
+        }
+
+        # The source footage clearly contains the action. The rejection is about target evidence,
+        # so only the separate mechanism/verdict consistency rule should remain active.
+        self.assertEqual(_source_evidence_contradiction(rejected, source), "")
+        self.assertIn("NEGATIVE_TRANSFER_MECHANISM_CONTRADICTION",
+                      _negative_gate_mechanism_contradiction(rejected))
+
+    def test_explicit_source_scoped_denial_still_conflicts_with_observed_action(self):
+        source = {
+            "evidence": [{
+                "t_sec": 16.6,
+                "observation": "Nozzle sprays foam onto shower caddies and bathtub.",
+                "supports": ["product_intervention"],
+            }]
+        }
+        decisions = [
+            {"transferable": False, "reason": "No source evidence shows spraying foam onto the surface."},
+            {"transferable": False, "reason": "Spraying foam is not shown in the source video."},
+            {"transferable": False, "reason": "The source footage does not demonstrate spraying foam onto the surface."},
+            {"transferable": False, "reason": "The source does not show the nozzle spraying foam."},
+        ]
+        for item in decisions:
+            with self.subTest(reason=item["reason"]):
+                self.assertIn("SOURCE_EVIDENCE_CONTRADICTION",
+                              _source_evidence_contradiction(item, source))
+
+    def test_target_mechanism_incompatibility_is_not_a_source_observation_denial(self):
+        source = {
+            "evidence": [{
+                "t_sec": 16.6,
+                "observation": "Nozzle sprays foam onto shower caddies and bathtub.",
+                "supports": ["product_intervention"],
+            }]
+        }
+        rejected = {
+            "transferable": False,
+            "reason": "The source mechanism cannot be demonstrated by the target because the target lacks that capability.",
+        }
+        self.assertEqual(_source_evidence_contradiction(rejected, source), "")
+
+    def test_source_scope_does_not_leak_across_sentences_into_target_gap(self):
+        source = {
+            "evidence": [{
+                "t_sec": 16.6,
+                "observation": "Nozzle sprays foam onto shower caddies and bathtub.",
+                "supports": ["product_intervention"],
+            }]
+        }
+        rejected = {
+            "transferable": False,
+            "reason": (
+                "The source video shows the nozzle in use. The target has no verified evidence confirming "
+                "foam capability."
+            ),
+        }
+        self.assertEqual(_source_evidence_contradiction(rejected, source), "")
 
     def test_invalid_target_fit_response_gets_one_correction_attempt(self):
         calls = []

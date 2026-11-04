@@ -1194,23 +1194,57 @@ def _source_action_tokens(text) -> set[str]:
     return tokens
 
 
+_SOURCE_EVIDENCE_SCOPE = re.compile(
+    r"\b(?:(?:source|original)\s+(?:evidence|observations?|frames?|video|clip|footage)|"
+    r"sampled\s+frames?)\b",
+    re.I,
+)
+_SOURCE_SUBJECT_OBSERVATION_DENIAL = re.compile(
+    r"\b(?:the\s+)?source\s+(?:does\s+not|doesn't|did\s+not|didn't|cannot|can't|"
+    r"is\s+not|isn't|was\s+not|wasn't|never|fails?\s+to)\s+"
+    r"(?:show\w*|demonstrat\w*|depict\w*|record\w*|captur\w*|contain\w*|include\w*)\b",
+    re.I,
+)
+_SOURCE_EVIDENCE_ABSENCE = re.compile(
+    r"\b(?:no|lack(?:s|ing)?|without)\b.{0,40}\bsource\s+evidence\b",
+    re.I,
+)
+_SOURCE_EVIDENCE_NEGATION = re.compile(
+    r"\b(?:no|lack(?:s|ing)?|without|never|not|does\s+not|doesn't|did\s+not|didn't|"
+    r"cannot|can't|is\s+not|isn't|was\s+not|wasn't|fails?\s+to)\b",
+    re.I,
+)
+_SOURCE_OBSERVATION_CLAIM = re.compile(
+    r"\b(?:show\w*|demonstrat\w*|depict\w*|record\w*|captur\w*|observ\w*|"
+    r"visible|present|appear\w*|contain\w*|include\w*)\b",
+    re.I,
+)
+
+
+def _source_scoped_observation_denial(claim: str) -> bool:
+    """True only when a denial is explicitly about what the source footage/evidence shows.
+
+    Target-side gaps (for example, a capability not verified in OfferCard) must not be
+    interpreted as claims that the corresponding action was absent from the source video.
+    Keep provenance local to one sentence so a source reference cannot scope a later target claim.
+    """
+    for sentence in re.split(r"(?<=[.!?;])\s+|\n+", str(claim or "")):
+        if _SOURCE_SUBJECT_OBSERVATION_DENIAL.search(sentence) or _SOURCE_EVIDENCE_ABSENCE.search(sentence):
+            return True
+        if (
+            _SOURCE_EVIDENCE_SCOPE.search(sentence)
+            and _SOURCE_EVIDENCE_NEGATION.search(sentence)
+            and _SOURCE_OBSERVATION_CLAIM.search(sentence)
+        ):
+            return True
+    return False
+
+
 def _source_evidence_contradiction(decision, source_transfer) -> str:
     """Catch a negative gate verdict that contradicts specific source-frame evidence."""
     timestamps = _explicit_product_action_evidence(source_transfer)
     if not timestamps or not isinstance(decision, dict) or decision.get("transferable") is not False:
         return ""
-    denial_patterns = (
-        re.compile(
-            r"\b(?:no|lack(?:s|ing)?|without|never|not)\b.{0,100}\b"
-            r"(?:source\s+)?(?:evidence|observation|frame|show|demonstrat|depict|record)\w*\b",
-            re.I,
-        ),
-        re.compile(
-            r"\b(?:does\s+not|doesn't|did\s+not|didn't|cannot|can't|was\s+not|wasn't)\b.{0,100}\b"
-            r"(?:shown|visible|observed|demonstrated|recorded|captured|depicted|present)\b",
-            re.I,
-        ),
-    )
     claims = [str(decision.get("reason") or "")]
     dropped = decision.get("source_elements_dropped")
     if isinstance(dropped, list):
@@ -1220,33 +1254,32 @@ def _source_evidence_contradiction(decision, source_transfer) -> str:
             if isinstance(item, dict) and item.get("element") in {"mechanism", "intervention", "result"}
         )
     for claim in claims:
-        if not any(pattern.search(claim) for pattern in denial_patterns):
-            continue
-        claim_tokens = _source_evidence_content_tokens(claim)
-        for row in (source_transfer.get("evidence") or [])[:12]:
-            if not isinstance(row, dict):
+        for sentence in re.split(r"(?<=[.!?;])\s+|\n+", claim):
+            if not _source_scoped_observation_denial(sentence):
                 continue
-            try:
-                timestamp = float(row.get("t_sec"))
-            except (TypeError, ValueError, OverflowError):
-                continue
-            if timestamp not in timestamps:
-                continue
-            observation = str(row.get("observation") or "")
-            # Require a shared action, not merely two shared nouns such as "bag" and "dish".
-            action_overlap = _source_action_tokens(claim) & _source_action_tokens(observation)
-            overlap = claim_tokens & _source_evidence_content_tokens(observation)
-            if action_overlap and len(overlap) >= 2:
-                marks = ", ".join(f"{t:g}s" for t in timestamps)
-                return (
-                    "SOURCE_EVIDENCE_CONTRADICTION: the negative transfer rationale overlaps with concrete "
-                    "source-frame observation terms at " + marks + ". Reconcile the specific observation "
-                    "before rejecting the transfer; a distinct, evidenced target incompatibility may still "
-                    "justify transferable=false."
-                )
+            claim_tokens = _source_evidence_content_tokens(sentence)
+            for row in (source_transfer.get("evidence") or [])[:12]:
+                if not isinstance(row, dict):
+                    continue
+                try:
+                    timestamp = float(row.get("t_sec"))
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if timestamp not in timestamps:
+                    continue
+                observation = str(row.get("observation") or "")
+                # Require a shared action, not merely two shared nouns such as "bag" and "dish".
+                action_overlap = _source_action_tokens(sentence) & _source_action_tokens(observation)
+                overlap = claim_tokens & _source_evidence_content_tokens(observation)
+                if action_overlap and len(overlap) >= 2:
+                    marks = ", ".join(f"{t:g}s" for t in timestamps)
+                    return (
+                        "SOURCE_EVIDENCE_CONTRADICTION: the negative transfer rationale overlaps with concrete "
+                        "source-frame observation terms at " + marks + ". Reconcile the specific observation "
+                        "before rejecting the transfer; a distinct, evidenced target incompatibility may still "
+                        "justify transferable=false."
+                    )
     return ""
-
-
 def _negative_gate_mechanism_contradiction(decision) -> str:
     """A rejected transfer cannot simultaneously claim its core mechanism is preserved."""
     if not isinstance(decision, dict) or decision.get("transferable") is not False:
