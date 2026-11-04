@@ -149,6 +149,20 @@ class MechanismFindTests(unittest.TestCase):
                       "performance_order_bys": ["play_6s_rate"]}, client=client)
         self.assertEqual(client.calls, [])
 
+    def test_both_modes_require_an_operator_target_offer_before_provider_calls(self):
+        client = FakeClient([self.item()])
+        cases = (
+            ({"selection_mode": "product", "keywords": ["air duster"]}, "contract-aware Product FIND"),
+            ({"selection_mode": "product", "keywords": ["air duster"],
+              "offer": {"name": "Acme Vacuum"}}, "contract-aware Product FIND"),
+            ({"selection_mode": "mechanism", "keywords": ["air duster"]}, "Mechanism FIND"),
+        )
+        for params, message in cases:
+            with self.subTest(params=params):
+                with self.assertRaisesRegex(ValueError, message):
+                    run_find(params, client=client)
+        self.assertEqual(client.calls, [])
+
     def test_mechanism_mode_uses_only_sponsored_search_and_separates_gates(self):
         client = FakeClient([self.item()])
         params = {"selection_mode": "mechanism", "country": "US", "period": 30, "max_requests": 2,

@@ -144,6 +144,12 @@ class MenuWiringTests(unittest.TestCase):
         self.assertIn("resolve_branding_contract", preflight)
         self.assertNotIn('"branding_policy":"no_branding"', INPUTS["offer_json"]["default"])
 
+    def test_offer_menu_has_no_hardcoded_target_and_keeps_both_find_modes(self):
+        self.assertEqual(INPUTS["offer_json"]["default"], "")
+        self.assertNotIn("Fanttik", INPUTS["offer_json"]["description"])
+        self.assertIn("both FIND modes", INPUTS["offer_json"]["description"])
+        self.assertEqual(set(INPUTS["find_selection_mode"]["options"]), {"product", "mechanism"})
+
     def test_offer_json_from_the_menu_reaches_find_unchanged(self):
         params = workflow_params(PARAM_BLOCKS[0])
         self.assertEqual(params["offer"], OFFER)

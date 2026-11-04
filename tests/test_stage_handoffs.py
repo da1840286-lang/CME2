@@ -86,6 +86,10 @@ class FindToSelectionTests(unittest.TestCase):
         self.assert_handoff_contract(result)
         self.assertTrue(all(c["query_product_match"]["matches"] is True for c in result["candidates"]))
         self.assertNotIn("junk", " ".join(c["id"] for c in result["candidates"]))
+        self.assertGreater(result["stats"]["product_relevant_ads"], 0)
+        self.assertEqual(result["stats"]["adjacent_mechanism_ads"], 0)
+        self.assertEqual(result["diagnostics"]["adjacent_mechanism_ads"], 0)
+        self.assertIn("Target-product sources", result["diagnostics"]["explanation"])
 
     def test_contract_aware_product_path_hands_eligible_candidates_to_all(self):
         result = self.find(performance_order_bys=["play_6s_rate", "play_2s_rate"])
@@ -100,6 +104,9 @@ class FindToSelectionTests(unittest.TestCase):
                            offer={"name": "Reusable silicone food storage bag", "product_type": "kitchen storage"})
         self.assert_handoff_contract(result)
         self.assertTrue(all(c["source_selection"]["role"] == "ADJACENT_MECHANISM" for c in result["candidates"]))
+        self.assertEqual(result["stats"]["adjacent_mechanism_ads"], len(result["candidates"]))
+        self.assertEqual(result["diagnostics"]["adjacent_mechanism_ads"], len(result["candidates"]))
+        self.assertIn("Adjacent-product sources", result["diagnostics"]["explanation"])
 
     def test_mechanism_candidate_without_positive_query_match_is_not_admissible(self):
         result = self.find(selection_mode="mechanism", keywords=["cordless handheld vacuum"],

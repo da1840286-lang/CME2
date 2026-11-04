@@ -97,7 +97,7 @@ on:
         required: true
         default: no_branding
       offer_json:
-        description: "Target OfferCard. Required for brain/all and Product FIND; leave blank for Mechanism FIND."
+        description: "Operator-supplied target OfferCard JSON. Required for both FIND modes: Product searches for this product; Mechanism uses it only as the target anchor and searches the explicit keywords. For target_brand_allowed, add confirmed target marks to approved_brand_marks."
         type: string
         required: false
         default: ""

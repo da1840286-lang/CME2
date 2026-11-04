@@ -914,7 +914,7 @@ def _clean_terms(value) -> list[str]:
 
 
 def _offer_context(params: dict) -> dict[str, str]:
-    """Read only the product-identifying fields used by FIND from an optional OfferCard."""
+    """Read product-identifying fields from the operator-supplied target OfferCard."""
     raw_offer = params.get("offer")
     offer = raw_offer if isinstance(raw_offer, dict) else {}
     fields = {
@@ -1495,14 +1495,18 @@ def _run_mechanism_find(*, request: dict, offer: dict, keywords: list[str], clie
         key = str(row.get("reason") or "UNKNOWN")
         reason_counts[key] = reason_counts.get(key, 0) + 1
     unique_rows = len(rows_by_identity)
+    adjacent_qualified = sum(
+        1 for record, _decision in scored_qualified
+        if (record.get("source_role_info") or {}).get("role") == ADJACENT_MECHANISM
+    )
     stats = {
         "calls": calls, "planned_requests": len(calls), "executed_requests": len(calls),
         "request_budget": max_requests, "unique_ads": unique_rows, "raw_ads_returned": raw_count,
         "fresh_unique_ads": unique_rows,
         "seen_before_ads": reason_counts.get("SEEN_WITHIN_TTL", 0),
         "product_relevant_ads": sum(1 for row in rows_by_identity.values()
-                                    if (row.get("source_role_info") or {}).get("role") == "TARGET_PRODUCT"),
-        "adjacent_mechanism_ads": len(qualified), "auto_shortlist_ads": len(selected),
+                                    if (row.get("source_role_info") or {}).get("role") == TARGET_PRODUCT),
+        "adjacent_mechanism_ads": adjacent_qualified, "auto_shortlist_ads": len(selected),
         "video_duration_filter": duration_gate,
         "date_window_filter": {
             "policy": "EXACT_ELAPSED_DAYS",
@@ -1541,23 +1545,34 @@ def _run_mechanism_find(*, request: dict, offer: dict, keywords: list[str], clie
             "examples": rejected[:50],
         },
     }
+    if candidates:
+        explanation = (
+            "Target-product sources passed source-body, media, and fixed-weight attention-proxy checks. "
+            "The legacy pre-video score is diagnostic; neither attention nor score is proof of sales or profit. "
+            "Independent commercial evidence and downstream checks remain separate."
+            if target_lane else
+            "Adjacent-product sources passed source-body, media, and fixed-weight attention-proxy checks. "
+            "This is not commercial proof; the causal mechanism and independent Target-Fit remain downstream."
+        )
+    else:
+        explanation = (
+            "No target-product source passed the Product FIND role, promotion, media, and attention gates. "
+            "Search queries alone are not source-body evidence."
+            if target_lane else
+            "No adjacent-product source passed source-body, query-product, promotion, media, and attention gates. "
+            "Search queries were not used as source-body evidence."
+        )
     diagnostics = {
         "outcome": "CANDIDATES_FOUND" if candidates else (
             "NO_API_ROWS" if raw_count == 0
             else "NO_ADS_WITHIN_EXACT_PERIOD" if date_window_rejected and len(date_window_rejected) == unique_rows
             else "SCORING_FAILED" if target_lane and qualified and not scored_qualified
             else "NO_TARGET_RELEVANCE" if target_lane else "NO_QUALIFIED_ADJACENT_MECHANISM"),
-        "explanation": (
-            "Adjacent-product sources passed text, media, and fixed-weight attention-proxy checks. This is not commercial proof; "
-            "the causal mechanism and independent Target-Fit remain downstream."
-            if candidates else
-            "No adjacent-product source passed source-body, media, attention-coverage, and attention-floor rules. "
-            "Search queries were not used as source-body evidence."
-        ),
+        "explanation": explanation,
         "search_lane": "tiktok_sponsored_search_only", "requests_executed": len(calls),
         "raw_ads_returned": raw_count, "unique_ads": unique_rows, "direct_relevant_ads": 0,
         "expanded_relevant_ads": 0, "target_relevant_ads": stats["product_relevant_ads"],
-        "adjacent_mechanism_ads": len(qualified), "unverified_ads": 0,
+        "adjacent_mechanism_ads": adjacent_qualified, "unverified_ads": 0,
         "hard_excluded_ads": reason_counts.get("HARD_EXCLUDED_BY_SOURCE_CHECK", 0),
         "source_selection_diagnostics": stats["source_selection_diagnostics"],
         "date_window_filter": stats["date_window_filter"],
@@ -1646,6 +1661,22 @@ def run_find(params: dict, client=None, now: str | None = None) -> dict:
         include_retention = False  # no product-targeted retention surface exists
     user_keywords = _clean_terms(params.get("keywords"))
     offer = _offer_context(params)
+    if selection_mode == "mechanism":
+        has_target_anchor = any(offer.get(key) for key in ("target_offer", "product_type", "product_category"))
+        lane_name = "Mechanism FIND"
+    elif contract_aware:
+        # This Product route builds an exact target query plus typed/category alternatives.
+        has_target_anchor = bool(offer.get("target_offer") and (offer.get("product_type") or offer.get("product_category")))
+        lane_name = "contract-aware Product FIND"
+    else:
+        # Explicit legacy Product probes remain compatible with their historical keyword-only path.
+        has_target_anchor = True
+        lane_name = "Product FIND"
+    if not has_target_anchor:
+        raise ValueError(
+            f"{lane_name} requires an explicit target OfferCard "
+            "with name, product_type, or product_category; no default target is used"
+        )
     performance_names = {"ctr", "cvr", "play_2s_rate", "play_6s_rate"}
     if selection_mode == "mechanism":
         if not user_keywords:

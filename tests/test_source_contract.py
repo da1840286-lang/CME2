@@ -51,6 +51,25 @@ class SourceContractHandoffTests(unittest.TestCase):
         self.assertNotIn('"raw"', serialized)
         self.assertNotIn('"video_url_540p"', serialized)
 
+    def test_product_and_mechanism_selection_identity_survives_source_contract(self):
+        for mode, role in (("product", "TARGET_PRODUCT"), ("mechanism", "ADJACENT_MECHANISM")):
+            candidate = json.loads(json.dumps(CANDIDATE))
+            candidate["request"] = {**(candidate.get("request") or {}), "selection_mode": mode}
+            candidate["source_selection"] = {
+                "mode": mode, "role": role, "target_anchor": "vacuum",
+                "promotion_evidence": True, "target_promotion_evidence": mode == "product",
+                "attention_is_commercial_proof": False,
+            }
+            contract = build_source_contract(ANALYSIS, candidate)
+            provenance = contract["source_provenance"]
+            self.assertEqual(contract["contract_schema"], "cme.radar.source_contract.v1")
+            self.assertEqual(provenance["source_role"], role)
+            self.assertEqual(provenance["source_selection"]["mode"], mode)
+            self.assertEqual(provenance["source_selection"]["role"], role)
+            self.assertEqual(contract["result"], ANALYSIS["result"])
+            self.assertEqual(build_source_transfer_context(contract)["mechanism_hypothesis"],
+                             ANALYSIS["result"]["mechanism_hypothesis"]["text"])
+
 
 if __name__ == "__main__":
     unittest.main()
