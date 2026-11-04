@@ -71,13 +71,13 @@ on:
         required: false
         default: false
       find_selection_mode:
-        description: "Product always targets the configured offer using Sponsored Search; mechanism searches explicit keywords using Sponsored Search. Both use attention only as a diagnostic proxy, never as commercial proof. Mechanism candidates also require an explicit positive query-product match. Target-Fit remains the transferability gate."
+        description: "Mechanism searches explicit keywords without a default target product. Product searches require an explicit OfferCard. Attention is diagnostic only, not commercial proof; Target-Fit decides transferability."
         type: choice
         options:
           - product
           - mechanism
         required: true
-        default: product
+        default: mechanism
       find_run_id:
         description: "For analyze/all: numeric run ID of a completed FIND run"
         type: string
@@ -97,10 +97,10 @@ on:
         required: true
         default: no_branding
       offer_json:
-        description: "Target OfferCard. For target_brand_allowed, add confirmed target marks to approved_brand_marks."
+        description: "Target OfferCard. Required for brain/all and Product FIND; leave blank for Mechanism FIND."
         type: string
         required: false
-        default: '{"offer_id":"fanttik-v8-mate-us-001","name":"Fanttik V8 Mate Cordless Car Vacuum","product_type":"cordless handheld car vacuum","verified_claims":["Cordless car vacuum"],"forbidden_claims":["guaranteed","medical","cures"],"photos":[],"platform":"","geo":"US","product_category":"","confirmations":[],"approved_brand_marks":[]}'
+        default: ""
       target_photo_url:
         description: "Direct HTTPS image URL; downloaded during the workflow, not committed to the repository"
         type: string
@@ -694,6 +694,15 @@ jobs:
           offer_data = json.loads(raw_offer) if raw_offer else {}
           if not isinstance(offer_data, dict):
               raise SystemExit("offer_json must be a JSON object")
+          selection_mode = os.environ.get("FIND_SELECTION_MODE", "mechanism").strip().lower()
+          if selection_mode == "product" and not any(
+              str(offer_data.get(field) or "").strip()
+              for field in ("name", "product_type", "product_category")
+          ):
+              raise SystemExit(
+                  "Product FIND requires an explicit offer_json with name, product_type, or product_category. "
+                  "Use find_selection_mode=mechanism for keyword discovery without a target product."
+              )
           order_mode = os.environ.get("FIND_PERFORMANCE_ORDER", "default")
           performance_order_options = {
               "default": [],
@@ -709,7 +718,7 @@ jobs:
                     "max_requests": int(os.environ["FIND_REQUESTS"]),
                     "max_ads": int(os.environ["FIND_MAX_ADS"]),
                     "keywords": keywords, "offer": offer_data, "discovery_mode": "auto",
-                    "selection_mode": os.environ.get("FIND_SELECTION_MODE", "product"),
+                    "selection_mode": os.environ.get("FIND_SELECTION_MODE", "mechanism"),
                     "video_duration_range": os.environ.get("FIND_VIDEO_DURATION_RANGE", "all"),
                     "performance_order_bys": performance_order_bys,
                     "include_retention": os.environ.get("FIND_INCLUDE_RETENTION", "false").lower() == "true"}
@@ -1010,7 +1019,7 @@ jobs:
                             "max_requests": int(os.environ["FIND_REQUESTS"]),
                             "max_ads": int(os.environ["FIND_MAX_ADS"]),
                             "keywords": keywords, "offer": offer_data, "discovery_mode": "auto",
-                            "selection_mode": os.environ.get("FIND_SELECTION_MODE", "product"),
+                            "selection_mode": os.environ.get("FIND_SELECTION_MODE", "mechanism"),
                             "video_duration_range": os.environ.get("FIND_VIDEO_DURATION_RANGE", "all"),
                             "performance_order_bys": performance_order_options[order_mode],
                             "include_retention": os.environ.get("FIND_INCLUDE_RETENTION", "false").lower() == "true"}
