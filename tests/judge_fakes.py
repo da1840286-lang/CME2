@@ -19,7 +19,8 @@ def judge_reply_body(payload, ok=True):
             if rid.startswith("mech_result_"):
                 aspects = [("problem_state", "crumbs cover the left portion"), ("changed_state", "clear strip lies where the tool passed beside untouched crumbs")]
             elif rid.startswith("mech_intervention_"):
-                aspects = [("problem_state", "crumbs cover the left portion"), ("contact_action", "tool tip touches the cloth at the border")]
+                aspects = [("object_presence", "a small product stands in the centre of the frame"),
+                           ("contact_action", "tool tip touches the cloth at the border")]
             else:
                 aspects = [("other", "small product stands in")]
             results.append({"id": rid, "conditions": [

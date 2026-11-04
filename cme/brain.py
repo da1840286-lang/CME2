@@ -309,11 +309,15 @@ _BRAND_TEXT_CHECK = re.compile(r"\b(logos?|brand(ing|s)?|wordmarks?|lettering|wa
                                r"(no|any|without|free of)\s+(visible\s+)?(text|labels?|writing))\b", re.I)
 
 
-def reserved_system_atom_errors(atoms) -> dict:
-    """Brain must not author branding or no-text criteria; the campaign policy injects the canonical rule.
+def reserved_system_atom_errors(atoms, approved_brand_marks=()) -> dict:
+    """Reject model-authored policy checks and brand names in visual atoms.
 
-    A Brain-written 'no logos' check contradicts target_brand_allowed and duplicates the system check otherwise.
+    Brand presence is checked separately against the target reference; embedding a brand in an
+    atom makes the Judge treat identity as an unprovable text requirement.
     """
+    marks = [str(x).strip() for x in approved_brand_marks if isinstance(x, str) and str(x).strip()]
+    patterns = [re.compile(r"(?<![\w])" + r"\s+".join(re.escape(part) for part in mark.split()) + r"(?![\w])", re.I)
+                for mark in marks]
     errors = {}
     for atom in atoms:
         aid, _priority, channel, kind = _atom_view(atom)
@@ -322,6 +326,9 @@ def reserved_system_atom_errors(atoms) -> dict:
             errors[str(aid)] = ["SYSTEM_OWNED_QA: do not author qa_no_text atoms; the canonical no-text check is injected by code"]
         elif kind == "qa_check" and _BRAND_TEXT_CHECK.search(str(text or "")):
             errors[str(aid)] = ["SYSTEM_OWNED_QA: branding/text rules are owned by the campaign branding policy; "
+        elif channel == "image" and any(pattern.search(str(text or "")) for pattern in patterns):
+            errors[str(aid)] = ["BRAND_IN_VISUAL_ATOM: remove target/competitor brand names from visual atoms; "
+                                "brand consistency is checked separately against the target-product reference"]
                                 "remove this atom (or re-send it as a check about something else)"]
     return errors
 
@@ -827,6 +834,107 @@ def _normalized_evidence(value: str) -> str:
     """Normalize punctuation/case for exact, ordered evidence matching against the OfferCard."""
     return re.sub(r"[^\w]+", " ", str(value or "").casefold(), flags=re.UNICODE).strip()
 
+# Only capability markers that add a feature beyond ordinary product-class use.
+# This intentionally stays conservative: scene nouns (crumbs, tiles, pass, result) and generic
+# adjectives must never turn an ordinary demo into an unsupported special-capability claim.
+_GATE_SPECIAL_CAPABILITY_TERMS = frozenset((
+    "foam", "detergent", "soap", "steam", "heated", "heating", "cooling", "chilled",
+    "ultraviolet", "ozone", "sterilize", "sterilization", "disinfect", "disinfection",
+    "sanitize", "sanitization", "aroma", "scent", "inflate", "inflation", "deflate",
+    "blower", "blow", "polish", "polishing", "magnetic", "wireless", "waterproof",
+    "self-clean", "self-cleaning", "automatic", "autonomous", "rotating", "oscillating",
+))
+
+_GATE_CAPABILITY_STOPWORDS = frozenset((
+    "a an the and or with without to onto into on in at of for from by as is are be was were "
+    "show shows showing visibly visible observable target product class type same ordinary normal "
+    "creator person user hand held holding use uses using used perform performs performing action "
+    "demonstrate demonstrates demonstration apply applies applying applied spray sprays spraying "
+    "clean cleans cleaning cleaned wash washes washing scrub scrubs scrubbing manual effort result proof "
+    "surface surfaces area areas bathroom outdoor indoor tile tiles wall walls floor floors "
+    "fixture fixtures shower caddie caddies tub sink countertop counter patio furniture scene frame "
+    "without manual work hard hard-surface exact specific actual"
+).split())
+
+
+def _gate_capability_terms(value: str, excluded: set[str] | None = None) -> set[str]:
+    """Extract concrete target-function terms; ignore scene wording and product identity."""
+    excluded = excluded or set()
+    out = set()
+    for raw in re.findall(r"[a-z][a-z0-9'-]{2,}", str(value or "").casefold()):
+        token = raw.strip("'-")
+        if not token or token in _GATE_CAPABILITY_STOPWORDS or token in excluded:
+            continue
+        # Small inflection normalizer for capability words (foam/foaming, sprays/spraying).
+        if token.endswith("ing") and len(token) > 5:
+            token = token[:-3]
+        elif token.endswith("ed") and len(token) > 4:
+            token = token[:-2]
+        elif token.endswith("s") and not token.endswith("ss") and len(token) > 4:
+            token = token[:-1]
+        if token and token not in _GATE_CAPABILITY_STOPWORDS and token not in excluded:
+            out.add(token)
+    return out
+
+
+def _target_capability_evidence_errors(offer, decision: dict, evidence: list[str]) -> list[str]:
+    """A product name/category cannot prove an added function such as foam spraying.
+
+    Capability evidence must be a verbatim excerpt from a verified claim or confirmation and
+    share a concrete function term with the Gate's approved target-native mechanism. The model
+    never receives the photo pixels at this gate; a visible accessory alone is not functional proof.
+    """
+    preserved = decision.get("source_elements_preserved")
+    preserved = preserved if isinstance(preserved, list) else []
+    if not any(isinstance(row, dict) and row.get("element") in {"mechanism", "intervention"}
+               for row in preserved):
+        return []
+
+    identifiers = set()
+    for field in (getattr(offer, "name", ""), getattr(offer, "product_type", ""),
+                  getattr(offer, "product_category", "")):
+        identifiers.update(_gate_capability_terms(field))
+
+    target_forms = [str(row.get("target_form") or "") for row in preserved
+                    if isinstance(row, dict) and row.get("element") in {"mechanism", "intervention"}]
+    target_function_terms = _gate_capability_terms(
+        str(decision.get("target_native_mapping") or "") + " " + " ".join(target_forms), identifiers
+    ) & _GATE_SPECIAL_CAPABILITY_TERMS
+    # If the target form adds a concrete feature beyond the product identity, that feature must
+    # be grounded in an explicit OfferCard claim/confirmation. Generic scene nouns are filtered above.
+    if not target_function_terms:
+        return []
+
+    functional_fields = [str(x) for x in (
+        *getattr(offer, "verified_claims", ()), *getattr(offer, "confirmations", ())
+    ) if str(x or "").strip()]
+    matching_quotes = [item for item in evidence if any(
+        " ".join(item.split()).casefold() in " ".join(field.split()).casefold()
+        for field in functional_fields
+    )]
+    evidence_terms = (set().union(*(_gate_capability_terms(item, identifiers) for item in matching_quotes))
+                      if matching_quotes else set()) & _GATE_SPECIAL_CAPABILITY_TERMS
+    covered = target_function_terms & evidence_terms
+    if covered:
+        return []
+
+    missing = ", ".join(sorted(target_function_terms)[:8])
+    return [
+        "TARGET_CAPABILITY_UNVERIFIED: transferable=true preserves a target function that is not "
+        "supported by a relevant verified_claim or confirmation. target_evidence must quote a "
+        "capability-specific OfferCard claim/confirmation sharing the function term(s) "
+        f"[{missing}]. Product name/type/category and a visible accessory alone do not establish "
+        "that function; otherwise narrow the target mapping to a separately confirmed function "
+        "or set transferable=false."
+    ]
+
+
+_GATE_UNCERTAINTY = re.compile(
+    r"\b(?:plausibl\w*|probably|presumably|likely|may\s+be\s+able\s+to|"
+    r"should\s+be\s+able\s+to|could\s+possibly)\b", re.IGNORECASE
+)
+
+
 
 def validate_transfer_fit_decision(offer, decision, source_transfer=None) -> list:
     """Fail closed unless the transfer verdict is well-formed and its target evidence is real."""
@@ -857,6 +965,20 @@ def validate_transfer_fit_decision(offer, decision, source_transfer=None) -> lis
         if reason_error:
             errors.append(reason_error)
         if _CYRILLIC.search(reason):
+        if decision.get("transferable") is True:
+            preserved_rows = decision.get("source_elements_preserved")
+            preserved_rows = preserved_rows if isinstance(preserved_rows, list) else []
+            gate_text = " ".join([
+                reason,
+                str(decision.get("abstract_mechanism") or ""),
+                str(decision.get("target_native_mapping") or ""),
+                " ".join(str(row.get("target_form") or "") for row in preserved_rows if isinstance(row, dict)),
+            ])
+            if _GATE_UNCERTAINTY.search(gate_text):
+                errors.append(
+                    "TARGET_CAPABILITY_UNCERTAIN: a transferable decision cannot rely on plausibility or "
+                    "probability language; cite a verified target capability or reject/narrow the transfer"
+                )
             errors.append("transfer_decision.reason must be in English")
     if _positive_text_display_directive(
         str(decision.get("target_native_mapping") or ""),
@@ -899,6 +1021,8 @@ def validate_transfer_fit_decision(offer, decision, source_transfer=None) -> lis
             errors.append(
                 f"transfer_decision.target_evidence[{index}] is shorter than 8 characters and must exactly match "
                 "a complete authoritative OfferCard field"
+    if decision.get("transferable") is True:
+        errors.extend(_target_capability_evidence_errors(offer, decision, evidence))
             )
     errors.extend(validate_gate_elements(
         decision,
@@ -1202,12 +1326,12 @@ def request_transfer_fit(offer, brief: str, source_transfer: dict, call, trace_o
             "Cross-category transfer is allowed only when you can explain how the same causal persuasion mechanism maps to a real target-native problem, intervention and observable proof.",
             "The current OfferCard is authoritative for target facts. The sampled source analysis is a hypothesis, not full-video or performance proof. Never transfer source-only hardware, special features, quantitative claims, or capabilities without target evidence.",
             "SOURCE LANGUAGE AND EVIDENCE CONSISTENCY: source fields and observations may be Russian or another language. Interpret them semantically and write this decision in English; language alone is never a reason to drop an element. Treat source_evidence_refs as the observation ledger. If an observation explicitly records an action (for example, a device vacuuming crumbs), do not claim that action was never observed. Acknowledge the exact evidence and reject only for a separate, specific target incompatibility if one remains.",
-            "Separate a visually demonstrable ordinary action from product claims: if the OfferCard confirms the target product class/function, a plausible normal-use demo does not require verified suction numbers, runtime, accessory lists, noise levels, or container-emptying details unless one is essential to the source's actual causal mechanism.",
+            "Separate ordinary product-class actions from added functions. The product name/type/category may support only the ordinary function inherent in that class; it does not prove a special mode, material, accessory function, or result such as foam/detergent spraying. For every preserved mechanism/intervention whose target form adds a concrete function beyond product identity, target_evidence MUST quote a relevant verified_claim or confirmation that names that function. A product photo filename or visible accessory is not functional proof here; this gate receives no photo pixels, so an owner must record any visually confirmed capability in OfferCard.confirmations. If evidence is absent, narrow the target form to a function explicitly confirmed in OfferCard or set transferable=false. Never write 'plausible', 'likely', 'probably' or equivalent as a substitute for evidence.",
             "ORDINARY DEMO IS NOT A DEFAULT ANSWER: a plain demonstration of the target product is a valid transfer only when the source mechanism itself is a plain demonstration. If the source hook or mechanism is a comparison (old vs new, A vs B, rival method, before vs after), replacing it with a single-product demo is a substitution, not a transfer. Map the comparison onto a target-native comparison (for example this product against the old way of doing the same task) or choose transferable=false.",
             "Do not invent or imply unverified specifications, runtime, accessories, container design, special features, or performance outcomes. An ordinary visible action may transfer without those claims; a mechanism that depends on an unverified unique feature must be rejected.",
-            "For transferable=true, EACH target_evidence array item must be one contiguous verbatim quote from ONE OfferCard field only (name, product_type, product_category, one verified_claim, or one confirmation). Never join multiple claims, paraphrase, normalize, or upgrade a generic specification into a use-specific claim. No source-ad text and no invented target facts.",
+            "For transferable=true, EACH target_evidence array item must be one contiguous verbatim quote from ONE OfferCard field only (name, product_type, product_category, one verified_claim, or one confirmation). For a preserved mechanism/intervention with a concrete added function, at least one quote must come from verified_claims or confirmations and directly support that function; quoting only the product name/type/category is insufficient. Never join multiple claims, paraphrase, normalize, or upgrade a generic specification into a use-specific claim. No source-ad text and no invented target facts.",
             "A target_evidence excerpt shorter than 8 characters is allowed only when it exactly matches a complete OfferCard field; do not use a short fragment from a longer field.",
-            "A shared generic desire (easy, fast, fewer cables, convenient) is not sufficient. Map the core causal action and observable result the target can plausibly demonstrate; do not reject it merely because optional specs or supporting shots are unverified. Choose transferable=false only when an essential target capability is unsupported, the core intervention cannot be demonstrated, or material uncertainty remains about that essential capability.",
+            "A shared generic desire (easy, fast, fewer cables, convenient) is not sufficient. Map the core causal action and observable result only to functions explicitly supported by OfferCard evidence. Ordinary dry-debris vacuuming does not require verified suction numbers; do not reject an ordinary product-class action merely because optional specs or supporting shots are unverified. Choose transferable=false when an essential special target capability is unsupported, the core intervention cannot be demonstrated from confirmed target facts, or material uncertainty remains about that essential capability.",
             "ESSENTIAL VERSUS OPTIONAL FEATURES: a source feature is essential only if removing it changes the causal action or its observable result (a device without suction cannot demonstrate suction). A display readout, a power rating, a spec number or an accessory that does not change what visibly happens is optional: omit it from the creative, keep every element it does not define as preserved, and do not cite its missing target evidence as the reason for rejection.",
             "ELEMENT ACCOUNT (required): account for EVERY name in required_source_elements exactly once, either in source_elements_preserved (element, source_form = what it is in the source, target_form = how it appears with the target product, evidence_t_sec = timestamps selected from source_evidence_refs) or in source_elements_dropped (element, why). Do not invent unlisted elements. For every preserved element, target_form must describe the target-native adaptation, not repeat source_form. An empty source_elements_dropped is valid when every source element is preserved. If source_evidence_refs are supplied, every preserved element must cite 1-3 exact supplied timestamps that support the source observation; do not invent timestamps.",
             "NO-ADDED-TEXT POLICY (non-negotiable): Never request text overlays, on-screen text, captions, subtitles, title cards, speech bubbles, UI, watermarks or promotional copy in target_form or target_native_mapping. If the source hook is a text overlay, describe it factually only in source_form; convert its attention idea into a visual-only target_form and target_native_mapping, or list hook as dropped. The source may contain text; the target creative must not add it.",
@@ -1424,6 +1548,7 @@ def build_request(offer, brief: str, shots: int, failed=None, source_transfer=No
                      "Do not treat abstract care or durability claims as visually verifiable from a generic still. Ask for a visible label only when the brief explicitly requires on-image text.",
                      "Every kind='qa_check' atom must use channel='qa'; it is a verification criterion and must not be included in the image-generation prompt.",
                      "Do not emit an atom whose id is 'qa_no_text' or starts with 'qa_no_text_'. The canonical no-added-text requirement is injected and checked by code, so Brain must not author a duplicate QA criterion.",
+                     "BRAND-FREE VISUAL ATOMS: never put the target brand name, model name, approved brand mark or competitor name in any image atom. Describe the product by its generic product type and visible physical form; target branding is governed separately by the campaign policy and product-reference QA, not by a scene/action atom.",
                       branding_rule,
                      "NO-ADDED-TEXT POLICY: do not add text overlays, captions, subtitles, title cards, speech bubbles, UI, watermarks or promotional wording to any image atom. If the source hook is text, translate its attention mechanism into a visual-only action; never reproduce the source wording.",
                      "Never use a forbidden claim.",
@@ -1856,8 +1981,22 @@ def request_atoms(offer, brief: str, shots: int, call, max_retries: int = 3, ver
             round_errs.setdefault(aid, []).extend(errs)
         # Branding/no-added-text QA is injected by campaign policy. Ignore duplicate Brain-authored
         # checks instead of spending correction rounds asking the model to remove them repeatedly.
-        reserved_no_text = reserved_system_atom_errors(parsed.atoms)
-        reserved_no_text_ids = set(reserved_no_text)
+        reserved_system_errors = reserved_system_atom_errors(
+            parsed.atoms,
+            resolved_brand_marks(getattr(offer, "branding_policy", TARGET_BRAND_ALLOWED),
+                                 getattr(offer, "approved_brand_marks", ()),
+                                 getattr(offer, "name", ""), getattr(offer, "product_type", "")),
+        )
+        # System-owned policy checks are discarded: code injects and verifies them.
+        # A branded visual atom is different: it is a repairable model-authored atom
+        # and its exact reason must enter the normal bounded Brain retry loop.
+        reserved_system_atom_ids = {
+            aid for aid, errors in reserved_system_errors.items()
+            if any(str(error).startswith("SYSTEM_OWNED_QA:") for error in errors)
+        }
+        for aid, errors in reserved_system_errors.items():
+            if any(str(error).startswith("BRAND_IN_VISUAL_ATOM:") for error in errors):
+                round_errs.setdefault(aid, []).extend(errors)
         if vertical is not None:
             for aid, errs in check_vertical(parsed.atoms, offer, vertical).items():
                 round_errs.setdefault(aid, []).extend(errs)
@@ -1867,7 +2006,7 @@ def request_atoms(offer, brief: str, shots: int, call, max_retries: int = 3, ver
 
         valid_incoming = [
             a for a in parsed.atoms
-            if a.id not in round_errs and a.id not in reserved_no_text_ids
+            if a.id not in round_errs and a.id not in reserved_system_atom_ids
         ]
         incoming_families = {family for family in (retry_family(a.id) for a in valid_incoming) if family}
         # A new suffix is permitted only when an active structural key explicitly
@@ -1885,7 +2024,7 @@ def request_atoms(offer, brief: str, shots: int, call, max_retries: int = 3, ver
                 pending.pop(old_id, None)
 
         for atom in parsed.atoms:
-            if atom.id in reserved_no_text_ids:
+            if atom.id in reserved_system_atom_ids
                 by_id.pop(atom.id, None)
                 accepted_atom_provenance.pop(atom.id, None)
                 pending.pop(atom.id, None)

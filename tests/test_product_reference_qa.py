@@ -11,6 +11,7 @@ from cme.offer import load_offer
 from cme.branding import NO_BRANDING
 from cme.qa import (
     PRODUCT_IDENTITY_CHECK_ID,
+    TARGET_BRANDING_CHECK_ID,
     SYSTEM_NO_TEXT_ID,
     CheckResult,
     make_qa_checks,
@@ -139,6 +140,63 @@ class ProductIdentityJudgeTests(unittest.TestCase):
             self.assertEqual(checks[SYSTEM_NO_TEXT_ID].status, "NOT_RUN")
             self.assertTrue(checks[SYSTEM_NO_TEXT_ID].required)
             self.assertIn("429", checks[SYSTEM_NO_TEXT_ID].detail)
+
+    def test_target_brand_policy_uses_separate_required_text_and_reference_checks(self):
+        with tempfile.TemporaryDirectory() as d:
+            generated = Path(d) / "generated.png"
+            reference = Path(d) / "target.png"
+            generated.write_bytes(png_bytes())
+            varied_png(reference)
+            atom = A("product_main", "Target product is clear", kind="product")
+
+            def judge(_path, atoms, _refs=()):
+                return {a.id: {"pass": True, "evidence": "No added text; no conflicting target mark"}
+                        for a in atoms} | {
+                    PRODUCT_IDENTITY_CHECK_ID: {"pass": True, "evidence": "Product shape matches reference"},
+                }
+
+            qa = make_qa_checks([atom], 1, judge_fn=judge, ocr=lambda _p: "",
+                                product_references=[reference], branding_policy="target_brand_allowed",
+                                approved_brand_marks=("SEESE",))
+            checks = {row.check_id: row for row in qa(generated)}
+            self.assertEqual(checks["no_text"].status, "NOT_RUN")
+            self.assertFalse(checks["no_text"].required)
+            self.assertEqual(checks[SYSTEM_NO_TEXT_ID].status, "PASS")
+            self.assertTrue(checks[SYSTEM_NO_TEXT_ID].required)
+            self.assertEqual(checks[TARGET_BRANDING_CHECK_ID].status, "PASS")
+            self.assertTrue(checks[TARGET_BRANDING_CHECK_ID].required)
+            self.assertEqual(checks[PRODUCT_IDENTITY_CHECK_ID].status, "PASS")
+
+
+    def test_frame_receipt_records_actual_judge_route(self):
+        offer = load_offer(EX)
+        atoms = [A("product_main", "Target product is visible", kind="product")]
+        with tempfile.TemporaryDirectory() as d:
+            def judge(_path, requested_atoms):
+                return {a.id: {"pass": True, "evidence": "Requirement is visibly confirmed"}
+                        for a in requested_atoms}
+            judge.info = {
+                "primary_adapter": "openrouter_free_judge",
+                "primary_model_id": "google/gemma-4-31b-it:free",
+                "adapter": "openrouter_free_judge_reserve",
+                "provider": "openrouter",
+                "model_id": "dots-studio/dots-3-note-preview:free",
+                "responded_model": "dots-studio/dots-3-note-preview:free",
+                "fallback_used": True,
+                "call_status": "OK",
+            }
+            qa = make_qa_checks(atoms, 1, judge_fn=judge, ocr=lambda _p: "")
+            result, _compiled, verdict = produce_shot(
+                offer=offer, atoms=atoms, shot=1, contract_id="judge-provenance-contract",
+                state=new_run("judge-provenance-run"), out_dir=Path(d),
+                image_provider=lambda _prompt, _refs: png_bytes(), qa_checks=qa,
+            )
+            report_path = Path(d) / "receipts" / f"{result.receipt_id}.json"
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            self.assertEqual(verdict, "PASS")
+            self.assertEqual(report["judge"]["model_id"], "dots-studio/dots-3-note-preview:free")
+            self.assertEqual(report["judge"]["primary_model_id"], "google/gemma-4-31b-it:free")
+            self.assertTrue(report["judge"]["fallback_used"])
 
     def test_generation_receipt_records_exact_reference_roles_order_and_hashes(self):
         offer = load_offer(EX)

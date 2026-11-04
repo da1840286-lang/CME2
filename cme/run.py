@@ -11,7 +11,7 @@ from .reference_cache import ReferenceVerificationCache
 from .qa import check_reference_unbranded, PRODUCT_IDENTITY_CHECK_ID, SYSTEM_NO_TEXT_ID
 from .atoms import check_claims, check_language
 from .receipt import assert_exact_payload, attach_qa, build_receipt, overall
-from .state import accept_shot, record_attempt
+from .state import accept_shot, count_attempts, record_attempt
 from .vertical import GateError, check_vertical, offer_gate
 
 
@@ -165,7 +165,7 @@ def produce_shot(*, offer, atoms, shot, contract_id, state, out_dir, image_provi
     """image_provider(prompt, refs) -> png bytes. qa_checks(path) -> list[CheckResult]."""
     out = Path(out_dir)
     state.bind(offer.offer_id, contract_id)
-    if max_attempts and sum(1 for x in state.attempts if x.get("shot") == shot and x.get("receipt_id")) >= max_attempts:
+    if max_attempts and count_attempts(state.attempts, shot=shot) >= max_attempts:
         _blocked(state, out, shot, attempt, "BLOCKED_ATTEMPTS", f"{max_attempts} attempts already used for shot {shot}")
         raise AttemptLimit(f"attempt limit {max_attempts} reached for shot {shot} in this offer/contract")
     # Defence in depth: all entry paths, including hand-supplied atoms, get the same contract checks.
@@ -298,20 +298,25 @@ def produce_shot(*, offer, atoms, shot, contract_id, state, out_dir, image_provi
             "reference_preparation": [_preparation_record(item) for item in preparation_reports],
             "image_inputs": _image_input_manifest(
                 refs, offer.photos, provider_product_refs, preparation_reports, offer.branding_policy
+    image_generated = False
             )}
     try:
+        image_generated = image_path.is_file() and image_path.stat().st_size > 0
         image_path.write_bytes(image_provider(receipt.sent_prompt, provider_refs))
         base["provider"] = dict(getattr(image_provider, "info", {}) or {})
         base["commercial_status"] = _commercial_status(base["provider"])
-        receipt = attach_qa(receipt, atoms, qa_checks(image_path))
+        qa_results = qa_checks(image_path)
+        base["judge"] = dict(getattr(qa_checks, "judge_info", {}) or {})
+        receipt = attach_qa(receipt, atoms, qa_results)
     except Exception as e:                          # keep the diagnostics, then let the caller see the error
+        base["judge"] = dict(getattr(qa_checks, "judge_info", {}) or {})
         base["provider"] = dict(getattr(image_provider, "info", {}) or base.get("provider", {}))
         status = f"ERROR_{type(e).__name__}"
-        record_attempt(state, shot, receipt.receipt_id, status, str(e))
+        record_attempt(state, shot, receipt.receipt_id, status, str(e), generated=image_generated)
         _write(out, receipt.receipt_id, {**receipt.to_dict(), **base, "overall": status, "error": str(e)})
         raise
     verdict = overall(receipt)
-    record_attempt(state, shot, receipt.receipt_id, verdict)
+    record_attempt(state, shot, receipt.receipt_id, verdict, generated=True)
     if verdict == "PASS":
         accept_shot(state, shot, image_path, receipt.receipt_id)
     _write(out, receipt.receipt_id, {**receipt.to_dict(), **base, "image_path": str(image_path)})

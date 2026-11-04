@@ -7,7 +7,7 @@ from collections import Counter
 from pathlib import Path
 from ..atoms import ATOM_SCHEMA, TRANSFER_ATOM_SCHEMA, KINDS
 from ..judge_protocol import (
-    OBSERVE_SYSTEM, VERIFY_SYSTEM, decide, parse_observations, verify_user_payload,
+    OBSERVE_SYSTEM, VERIFY_SYSTEM, decide, parse_observations, required_aspects, verify_user_payload,
 )
 from ..providers import InfraError, ProviderCallError
 from .http import check_status, data_uri, urllib_transport
@@ -172,22 +172,27 @@ def make_openrouter_judge(params: dict, api_key=None, transport=None):
             if not p.is_file() or p.stat().st_size == 0:
                 raise ProviderCallError(f"target-product reference is missing or empty: {p.name}")
         system = """You are an independent, conservative visual QA judge. Inspect the actual image pixels; never infer that a requested result happened merely because the prompt says so, the tool is present, or the product is near the problem. If visible evidence is ambiguous, answer false.
-For mech_result_* requirements, the after-state must be plainly visible and distinguishable from the baseline; require both a recognizable starting/problem state and a visibly changed result when the atom asks for a change. An adjacent tool or untouched problem material is not proof of success.
-For mech_intervention_* requirements, require visible physical contact or an action connecting the target product to the exact problem; mere placement beside the problem is not enough. Check each atom independently.
-Reply ONLY with JSON: {"results": [{"id": "...", "pass": true|false, "evidence": "brief visible evidence"}]}."""
+For mech_result_* requirements, prove the visible after-state/result state. Require a separate starting/problem state only when the requirement explicitly asks for a contrast (before/after, untreated/treated, side-by-side, etc.). Do not invent a changed state that is not visible.
+For mech_intervention_* requirements, require the target product to be visibly present and prove physical contact or an action connecting it to the exact problem material; a separate baseline state is not required, and mere placement beside the problem is not enough.
+The system_no_text_policy requirement is a separate pixel-only check, not a condition to infer from an observation inventory. The target_branding_reference requirement compares product-native marks against the supplied original target reference. Check every requirement independently.
+Reply ONLY with JSON: {"results": [{"id": "...", "pass": true|false, "evidence": "brief visible evidence"}]}"""
         reqs = []
         for a in atoms:
             requirement = a.text
+                contrast = "problem_state" in required_aspects(a)
             if str(a.id).startswith("mech_result_"):
                 requirement = (
-                    "RESULT-STATE GATE: prove the visible after-state and its difference from the baseline. "
-                    "FAIL if only the product/tool is visible, if the problem material appears untouched, or if "
-                    "the claimed change cannot be clearly seen. " + requirement
+                    ("RESULT-CONTRAST GATE: prove both the starting/problem state and the visibly changed result. "
+                     if contrast else
+                     "RESULT-STATE GATE: prove the visible result state; do not require a separate baseline unless "
+                     "the requirement explicitly claims a contrast. ")
+                    + "FAIL if the claimed visible result is absent or ambiguous. " + requirement
                 )
             elif str(a.id).startswith("mech_intervention_"):
                 requirement = (
-                    "ACTIVE-INTERVENTION GATE: prove visible contact/action connecting the target product to the "
-                    "specific problem. FAIL if the product is merely nearby or posed beside it. " + requirement
+                    "ACTIVE-INTERVENTION GATE: prove the target product is present and visibly contacting/acting "
+                    "on the specific problem material. A separate baseline state is not required; fail if the "
+                    "product is merely nearby or posed beside it. " + requirement
                 )
             reqs.append({
                 "id": a.id, "kind": getattr(a, "kind", ""),
@@ -206,7 +211,7 @@ Reply ONLY with JSON: {"results": [{"id": "...", "pass": true|false, "evidence":
         user_content.append({"type": "text", "text": "IMAGE A — GENERATED FRAME TO QA. Check every requested atom against this image."})
         user_content.append({"type": "image_url", "image_url": {"url": data_uri(image_path)}})
         for i, ref in enumerate(refs, start=1):
-            user_content.append({"type": "text", "text": f"REFERENCE IMAGE {i} — ORIGINAL TARGET-PRODUCT REFERENCE. Use this image only to check product identity; do not copy its background or composition."})
+            user_content.append({"type": "text", "text": f"REFERENCE IMAGE {i} — ORIGINAL TARGET-PRODUCT REFERENCE. Use this image to check physical product identity and consistency of product-native brand/model marks; do not copy its background or composition."})
             user_content.append({"type": "image_url", "image_url": {"url": data_uri(ref)}})
         content, meta = _chat(params, api_key, send, [
             {"role": "system", "content": system},
@@ -272,11 +277,15 @@ Reply ONLY with JSON: {"results": [{"id": "...", "pass": true|false, "evidence":
         if mode == "single_pass":
             return judge_single(image_path, atoms, reference_images)
         refs = list(reference_images or ())[:3]
-        # Identity-only checks do not need an inventory/verification pair.
-        if not atoms and refs:
-            answers, meta = judge_single(image_path, [], refs)
+        direct_ids = {"system_no_text_policy", "target_branding_reference"}
+        direct_atoms = [a for a in atoms if str(getattr(a, "id", "")) in direct_ids]
+        visual_atoms = [a for a in atoms if str(getattr(a, "id", "")) not in direct_ids]
+        # Text policy, target-brand comparison, and product identity inspect pixels directly;
+        # none is sent through the neutral observation inventory.
+        if not visual_atoms:
+            answers, meta = judge_single(image_path, direct_atoms, refs)
             return answers, {**meta, "judge_mode": "observe_verify",
-                             "judge_phases": [{"phase": "identity", "completion_tokens": meta.get("completion_tokens")}],
+                             "judge_phases": [{"phase": "direct_pixel_policy_and_reference", "completion_tokens": meta.get("completion_tokens")}],
                              "observation_count": 0}
 
         pinned = {**params, "temperature": params.get("judge_temperature", 0)}
@@ -293,39 +302,41 @@ Reply ONLY with JSON: {"results": [{"id": "...", "pass": true|false, "evidence":
         observations = parse_observations(extract_json(observe_content))
         meta = {**observe_meta}
         trace = {"observations": observations}
-        if observations is not None and not observations and atoms:
+        if observations is not None and not observations and visual_atoms:
             # A well-formed empty inventory is evidence that nothing was visibly confirmed, not a malformed answer.
-            out.update({a.id: {"pass": False, "evidence": "inventory reports no visible facts"} for a in atoms})
+            out.update({a.id: {"pass": False, "evidence": "inventory reports no visible facts"} for a in visual_atoms})
             trace["decided"] = out
         elif observations is None:
             diagnostic = {"component": "openrouter_judge", "reason": "observation_phase_invalid",
                           "response_excerpt": _safe_response_excerpt(observe_content),
                           "finish_reason": observe_meta.get("finish_reason")}
-        elif atoms:
+        elif visual_atoms:
             verify_content, verify_meta = _chat(pinned, api_key, send, [
                 {"role": "system", "content": VERIFY_SYSTEM},
-                {"role": "user", "content": verify_user_payload(observations, atoms)}], json_format)
+                {"role": "user", "content": verify_user_payload(observations, visual_atoms)}], json_format)
             phases.append({"phase": "verify", "completion_tokens": verify_meta.get("completion_tokens"),
                            "cost": verify_meta.get("cost")})
             meta = {**verify_meta}
             verify_data = extract_json(verify_content)
-            decided = decide(verify_data, atoms, observations)
+            decided = decide(verify_data, visual_atoms, observations)
             trace.update({"verify": verify_data, "decided": decided})
             out.update({k: {"pass": v["pass"], "evidence": v["evidence"]} for k, v in decided.items()})
-            missing = sorted({a.id for a in atoms} - set(decided))
+            missing = sorted({a.id for a in visual_atoms} - set(decided))
             if missing:
                 diagnostic = {"component": "openrouter_judge", "reason": "verify_phase_partial",
                               "missing_ids": missing[:10], "response_excerpt": _safe_response_excerpt(verify_content),
                               "finish_reason": verify_meta.get("finish_reason")}
 
-        # Identity compares generated pixels with the target reference, so it remains a vision call.
-        if refs:
-            identity_rows, identity_meta = judge_single(image_path, [], refs)
-            out.update(identity_rows)
-            phases.append({"phase": "identity", "completion_tokens": identity_meta.get("completion_tokens"),
-                           "cost": identity_meta.get("cost")})
-            if identity_meta.get("diagnostic") and not diagnostic:
-                diagnostic = identity_meta["diagnostic"]
+        # Run text/branding/identity checks as direct pixel questions, separately from the
+        # observation-inventory protocol used for scene/action atoms.
+        if direct_atoms or refs:
+            direct_rows, direct_meta = judge_single(image_path, direct_atoms, refs)
+            out.update(direct_rows)
+            phases.append({"phase": "direct_pixel_policy_and_reference",
+                           "completion_tokens": direct_meta.get("completion_tokens"),
+                           "cost": direct_meta.get("cost")})
+            if direct_meta.get("diagnostic") and not diagnostic:
+                diagnostic = direct_meta["diagnostic"]
         _write_judge_trace(image_path, [a.id for a in atoms], trace, diagnostic)
         meta = {**meta, "judge_mode": "observe_verify", "judge_phases": phases,
                 "observation_count": len(observations or [])}

@@ -10,12 +10,16 @@ from pathlib import Path
 from collections.abc import Sequence
 from PIL import Image, ImageChops, ImageStat
 from .atoms import Atom, norm
-from .branding import NO_BRANDING, TARGET_BRAND_ALLOWED, qa_branding_rule
+from .branding import (
+    NO_BRANDING, TARGET_BRAND_ALLOWED, qa_branding_rule,
+    qa_no_added_text_rule, qa_target_branding_reference_rule,
+)
 
 
 PRODUCT_IDENTITY_CHECK_ID = "cme_product_identity_ref"
 SYSTEM_NO_TEXT_ID = "system_no_text_policy"
-SYSTEM_NO_TEXT_RULE = qa_branding_rule(TARGET_BRAND_ALLOWED)
+TARGET_BRANDING_CHECK_ID = "target_branding_reference"
+SYSTEM_NO_TEXT_RULE = qa_no_added_text_rule()
 MAX_PRODUCT_REFERENCES_FOR_JUDGE = 3
 
 
@@ -272,13 +276,12 @@ def make_qa_checks(atoms, shot, judge_fn=None, ocr=None, expected_size=None, ocr
         ocr_result = ocr_text_check(
             "no_text", path, text_allowed, ocr=ocr, required=ocr_required, allowed_tokens=allowed_text
         )
-        # Empty OCR stays NOT_RUN. A required visual Judge is the independent fallback in strict mode.
-        if (branding_policy == NO_BRANDING and judge_fn is not None
-                and ocr_result.status == "NOT_RUN"
-                and ocr_result.detail.startswith("OCR returned no confident words")):
+        # OCR NOT_RUN is not a visual pass. A separate required pixel-only Judge check
+        # replaces the missing OCR evidence for both branding policies.
+        if judge_fn is not None and ocr_result.status == "NOT_RUN":
             ocr_result = replace(
                 ocr_result, required=False,
-                detail=ocr_result.detail + "; required system_no_text_policy visual Judge is the independent fallback"
+                detail=ocr_result.detail + "; separate required system_no_text_policy Judge check is the fallback"
             )
         res = [file_check("file", path, expected_size),
                frame_content_check("frame_content", path),
@@ -292,7 +295,13 @@ def make_qa_checks(atoms, shot, judge_fn=None, ocr=None, expected_size=None, ocr
                 "matches verified offer claim; not inferred from pixels" if valid
                 else "claim is absent from offer.verified_claims"))
         if judge_fn is not None:
-            system_no_text = Atom(SYSTEM_NO_TEXT_ID, "qa_check", qa_branding_rule(branding_policy, approved_brand_marks), "MUST", "qa", shot)
+            text_rule = (qa_branding_rule(NO_BRANDING, approved_brand_marks)
+                         if branding_policy == NO_BRANDING else qa_no_added_text_rule())
+            system_no_text = Atom(SYSTEM_NO_TEXT_ID, "qa_check", text_rule, "MUST", "qa", shot)
+            if branding_policy == TARGET_BRAND_ALLOWED and product_refs:
+                judge_atoms.append(Atom(
+                    TARGET_BRANDING_CHECK_ID, "qa_check",
+                    qa_target_branding_reference_rule(approved_brand_marks), "MUST", "qa", shot))
             judge_atoms = [*pool, system_no_text]
             transfer_check_ids = set()
             rows_by_id = {a.id: a for a in atoms}
@@ -316,11 +325,22 @@ def make_qa_checks(atoms, shot, judge_fn=None, ocr=None, expected_size=None, ocr
                         "property is not visually evidenced.",
                         "MUST", "qa", shot))
             judge_rows = judge_batch_checks(path, judge_atoms, judge_fn, reference_images=product_refs)
+            if branding_policy == TARGET_BRAND_ALLOWED and product_refs:
+                required_judge_ids.add(TARGET_BRANDING_CHECK_ID)
             required_judge_ids = {SYSTEM_NO_TEXT_ID, *transfer_check_ids}
             res.extend(replace(row, required=True) if row.check_id in required_judge_ids else row for row in judge_rows)
-        elif product_refs:
-            res.append(CheckResult(PRODUCT_IDENTITY_CHECK_ID, "NOT_RUN", True, "judge",
-                                   "no Judge adapter configured; target-product identity was not compared"))
+            run.judge_info = dict(getattr(judge_fn, "info", {}) or {})
+        else:
+            res.append(CheckResult(SYSTEM_NO_TEXT_ID, "NOT_RUN", True, "judge",
+                                   "no Judge adapter configured for the independent text-policy pixel check"))
+            if product_refs:
+                res.append(CheckResult(PRODUCT_IDENTITY_CHECK_ID, "NOT_RUN", True, "judge",
+                                       "no Judge adapter configured; target-product identity was not compared"))
+                if branding_policy == TARGET_BRAND_ALLOWED:
+                    res.append(CheckResult(TARGET_BRANDING_CHECK_ID, "NOT_RUN", True, "judge",
+                                           "no Judge adapter configured; target branding was not compared with its reference"))
+            run.judge_info = {}
         return res
+    run.judge_info = {}
 
     return run

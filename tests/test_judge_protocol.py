@@ -243,6 +243,61 @@ class AdapterProtocolTests(unittest.TestCase):
         judge(self.image, [RESULT])
         self.assertEqual([c["temperature"] for c in calls], [0, 0])
 
+    def test_system_text_and_target_brand_rules_bypass_the_observation_inventory(self):
+        from cme.qa import SYSTEM_NO_TEXT_ID, TARGET_BRANDING_CHECK_ID, PRODUCT_IDENTITY_CHECK_ID
+        from cme.adapters.openrouter import make_openrouter_judge
+        from cme.atoms import Atom
+        from pathlib import Path
+        import tempfile
+
+        visual = Atom("keep_hook_01", "scene", "A handheld tool is visible in the bathroom", "MUST", "image", 1)
+        no_text = Atom(SYSTEM_NO_TEXT_ID, "qa_check", "No added captions or pseudo-text", "MUST", "qa", 1)
+        branding = Atom(TARGET_BRANDING_CHECK_ID, "qa_check", "Compare product marks with target reference", "MUST", "qa", 1)
+        calls = []
+        with tempfile.TemporaryDirectory() as directory:
+            frame = Path(directory) / "frame.png"
+            reference = Path(directory) / "target.png"
+            frame.write_bytes(PNG)
+            reference.write_bytes(PNG)
+
+            def send(method, url, headers, payload):
+                calls.append(payload)
+                system = payload["messages"][0]["content"]
+                if "careful visual inspector" in system:
+                    body = {"observations": [{"id": "o1", "kind": "object", "text": "A handheld tool is visible in the bathroom"}]}
+                elif "verify requirements" in system:
+                    body = {"results": [{"id": visual.id, "conditions": [
+                        {"aspect": "object_presence", "claim": "tool visible", "observation_ids": ["o1"],
+                         "quote": "A handheld tool is visible in the bathroom", "holds": True}
+                    ]}]}
+                else:
+                    text_payload = next(part["text"] for part in payload["messages"][1]["content"]
+                                        if part.get("type") == "text" and part["text"].startswith("["))
+                    requested = json.loads(text_payload)
+                    body = {"results": [
+                        {"id": row["id"], "pass": True, "evidence": "No added text; target mark matches reference"}
+                        for row in requested
+                    ]}
+                return 200, completion(body, payload["model"])
+
+            judge = make_openrouter_judge({"model_id": "vendor/vision-test"}, "key", send)
+            answers, _meta = judge(frame, [visual, no_text, branding], [reference])
+
+        self.assertEqual(len(calls), 3)
+        observed_request = json.dumps(calls[0]["messages"][1]["content"])
+        verified_request = json.dumps(calls[1]["messages"][1]["content"])
+        direct_request = json.dumps(calls[2]["messages"][1]["content"])
+        self.assertNotIn(SYSTEM_NO_TEXT_ID, observed_request)
+        self.assertNotIn(TARGET_BRANDING_CHECK_ID, observed_request)
+        self.assertIn(visual.id, verified_request)
+        self.assertNotIn(SYSTEM_NO_TEXT_ID, verified_request)
+        self.assertNotIn(TARGET_BRANDING_CHECK_ID, verified_request)
+        self.assertIn(SYSTEM_NO_TEXT_ID, direct_request)
+        self.assertIn(TARGET_BRANDING_CHECK_ID, direct_request)
+        self.assertIn(PRODUCT_IDENTITY_CHECK_ID, direct_request)
+        self.assertTrue(all(answers[key]["pass"] for key in
+                            (visual.id, SYSTEM_NO_TEXT_ID, TARGET_BRANDING_CHECK_ID, PRODUCT_IDENTITY_CHECK_ID)))
+
     def test_single_pass_keeps_legacy_behaviour(self):
         judge, calls = self.judge({}, {"results": [{"id": RESULT.id, "pass": True, "evidence": "seen"}]}, judge_mode="single_pass")
         out, _ = judge(self.image, [RESULT])

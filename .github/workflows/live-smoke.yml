@@ -1458,11 +1458,11 @@ jobs:
             if [[ -s out/state.json ]]; then
               attempt="$(python - <<'PY'
           import json, os
+          from cme.state import count_attempts
           from pathlib import Path
           state = json.loads(Path("out/state.json").read_text(encoding="utf-8"))
           requested_shot = int(os.environ.get("CME_SHOT", "1"))
-          used = sum(1 for item in state.get("attempts", []) if item.get("shot") == requested_shot and item.get("receipt_id"))
-          print(used + 1)
+          print(count_attempts(state.get("attempts", []), shot=requested_shot) + 1)
           PY
               )"
             fi

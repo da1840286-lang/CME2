@@ -5,6 +5,31 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
+ATTEMPT_CONSUMING_STATUSES = frozenset({"PASS", "FAILED_QA", "UNVERIFIED", "NOT_DELIVERED"})
+
+
+def attempt_consumed(record: dict) -> bool:
+    """Whether a recorded frame operation produced an image candidate.
+
+    New records carry an explicit generated flag. Legacy records are classified from
+    their final QA status; provider/infrastructure errors do not consume an image attempt.
+    """
+    if not isinstance(record, dict):
+        return False
+    generated = record.get("generated")
+    if type(generated) is bool:
+        return generated
+    return str(record.get("status") or "").upper() in ATTEMPT_CONSUMING_STATUSES
+
+
+def count_attempts(records, shot: int | None = None) -> int:
+    """Count generated frame candidates, optionally for one shot."""
+    return sum(1 for record in (records or ())
+               if isinstance(record, dict)
+               and (shot is None or record.get("shot") == shot)
+               and attempt_consumed(record))
+
+
 
 class StateMismatch(Exception):
     pass
@@ -61,9 +86,12 @@ def new_run(run_id: str, previous: "RunState | None" = None, offer_id: str = "",
     return st
 
 
-def record_attempt(state: RunState, shot: int, receipt_id: str, status: str, error: str = "") -> None:
+def record_attempt(state: RunState, shot: int, receipt_id: str, status: str, error: str = "",
+                   generated: bool | None = None) -> None:
+    if generated is None:
+        generated = str(status or "").upper() in ATTEMPT_CONSUMING_STATUSES
     state.attempts.append({"run_id": state.run_id, "shot": shot, "receipt_id": receipt_id,
-                           "status": status, "error": error})
+                           "status": status, "error": error, "generated": bool(generated)})
 
 
 def accept_shot(state: RunState, shot: int, image_path, receipt_id: str) -> None:

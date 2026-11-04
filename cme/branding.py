@@ -68,6 +68,29 @@ def brain_branding_rule(policy, approved_brand_marks=()):
                 "Never copy source-ad/competitor branding. Do not add text overlays, captions, subtitles, UI, "
                 "watermarks or promotional wording.")
     raise ValueError(f"unsupported branding_policy {policy!r}")
+def qa_no_added_text_rule() -> str:
+    """Pixel-only policy check for added text; product-native marks are checked separately."""
+    return (
+        "NO-ADDED-TEXT PIXEL CHECK: inspect the generated frame itself. FAIL if there are added captions, "
+        "subtitles, text overlays, title cards, speech bubbles, UI, watermarks, promotional wording, or "
+        "invented pseudo-text anywhere. Do not require the absence of legitimate target-product markings here; "
+        "their consistency is checked separately against the original target-product reference."
+    )
+
+
+def qa_target_branding_reference_rule(approved_brand_marks=()) -> str:
+    """Compare any generated product-native mark with the original target reference."""
+    marks = _marks(approved_brand_marks)
+    approved = ", ".join(marks) if marks else "the marks visible on the original target reference"
+    return (
+        "TARGET BRAND REFERENCE CHECK: compare every legible product-native brand/model mark in the generated "
+        "frame with the original target-product reference image. Approved target marks: " + approved + ". "
+        "FAIL if a visible mark is invented, unrelated, competitor-branded, or conflicts with the original "
+        "reference. Do not require a logo to be legible or present when the generated camera angle does not show it; "
+        "PASS when no contradictory or invented product mark is visible. Ignore added captions/UI here; those are "
+        "covered by the separate no-added-text check."
+    )
+
 
 def qa_branding_rule(policy, approved_brand_marks=()):
     marks = _marks(approved_brand_marks)

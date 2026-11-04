@@ -360,16 +360,19 @@ class QASuiteTests(unittest.TestCase):
             return produce_shot(offer=offer, atoms=self.atoms, shot=1, contract_id="c", state=new_run("r"), out_dir=d,
                                 image_provider=lambda p, r: PNG, qa_checks=qa)
 
-    def test_missing_ocr_engine_means_no_pass(self):
+    def test_missing_ocr_engine_uses_the_separate_required_pixel_judge(self):
         def broken_ocr(p):
             raise RuntimeError("tesseract not installed")
         r, _, v = self.verdict(make_qa_checks(self.atoms, 1, judge_fn=self.judge_ok, ocr=broken_ocr))
-        self.assertEqual(v, "UNVERIFIED")
-        self.assertEqual({c["check_id"]: c["status"] for c in r.checks}["no_text"], "NOT_RUN")
+        self.assertEqual(v, "PASS")
+        checks = {c["check_id"]: c for c in r.checks}
+        self.assertEqual(checks["no_text"]["status"], "NOT_RUN")
+        self.assertFalse(checks["no_text"]["required"])
+        self.assertEqual(checks["system_no_text_policy"]["status"], "PASS")
+        self.assertTrue(checks["system_no_text_policy"]["required"])
 
     def test_pass_needs_code_checks_and_every_must(self):
-        # Non-empty OCR output with no disallowed words verifies the no-text check;
-        # an empty OCR result is unverified and is covered by test_ocr_never_silent_pass.
+        # OCR can verify the text rule directly; when OCR cannot, a separate required pixel Judge check can.
         _, _, v = self.verdict(make_qa_checks(self.atoms, 1, judge_fn=self.judge_ok, ocr=lambda p: "ok"))
         self.assertEqual(v, "PASS")
         _, _, v2 = self.verdict(make_qa_checks(self.atoms, 1, judge_fn=None, ocr=lambda p: ""))

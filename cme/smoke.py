@@ -188,7 +188,10 @@ def validate_atoms_manifest(atoms_path, manifest_path, atoms_json, offer, shot=N
     lost_links = missing_mechanism_links(atoms_json, links)
     if lost_links:
         errors["#mechanism"] = [f"mechanism link '{n}' is no longer carried by a MUST atom" for n in lost_links]
-    errors.update(reserved_system_atom_errors(atoms_json))
+    errors.update(reserved_system_atom_errors(
+        atoms_json, resolved_brand_marks(offer.branding_policy, offer.approved_brand_marks,
+                                         offer.name, offer.product_type)
+    ))
     if type(requested) is int and requested >= 1:
         errors.update(visual_structure_errors(atoms_json, requested, links))
         errors.update(atom_budget_errors(atoms_json, requested))

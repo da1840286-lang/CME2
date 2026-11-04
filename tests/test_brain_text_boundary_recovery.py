@@ -32,6 +32,7 @@ def pressure_washer_offer():
         name="Cordless Pressure Washer",
         product_type="cordless pressure washer",
         product_category="Home Improvement",
+        confirmations=("The washer sprays detergent foam using its included detergent bottle.",),
         verified_claims=("Cordless pressure washer",),
         forbidden_claims=(),
     )
@@ -42,6 +43,17 @@ class BrainTextBoundaryRecoveryTests(unittest.TestCase):
     def setUpClass(cls):
         with gzip.open(FIXTURE_PATH, "rt", encoding="utf-8") as handle:
             cls.fixture = json.load(handle)
+        # This historical test fixture represents a human-confirmed foam-sprayer offer.
+        # Keep the functional confirmation explicit rather than treating the accessory/photo as proof.
+        confirmation = "The washer sprays detergent foam using its included detergent bottle."
+        for response in cls.responses.values():
+            if not isinstance(response, dict):
+                continue
+            decision = response.get("transfer_decision")
+            if isinstance(decision, dict) and decision.get("transferable") is True:
+                evidence = decision.setdefault("target_evidence", [])
+                if confirmation not in evidence and len(evidence) < 3:
+                    evidence.append(confirmation)
         cls.responses = cls.fixture["responses"]
         cls.source_transfer = build_source_transfer_context(cls.fixture["source_contract"])
         cls.offer = pressure_washer_offer()

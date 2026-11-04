@@ -183,7 +183,7 @@ class BrainToFrameChainTests(unittest.TestCase):
             atom("keep_hook_1", "Open on the distinctive attention hook before the product action appears"),
             atom("keep_mechanism_1", "Show the problem, target intervention, and resulting improvement as one visible sequence", kind="action"),
             atom("mech_problem_1", "Loose food pieces are scattered on the counter"),
-            atom("mech_intervention_1", "The bag is held open beside the loose pieces", kind="action"),
+            atom("mech_intervention_1", "The bag opening contacts loose food pieces as they are placed inside", kind="action"),
             atom("mech_result_1", "The pieces are inside the sealed bag", kind="action"),
             atom("comp_1", "One uninterrupted demonstration shows food pieces being placed into the reusable bag during closure"),
             atom("prod_1", "Silicone bag in the foreground", kind="product"),

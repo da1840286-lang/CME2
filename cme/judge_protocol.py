@@ -26,14 +26,33 @@ VISUAL_SCOPE_CUES = re.compile(
     re.IGNORECASE,
 )
 ROLE_ASPECTS = {
-    "mech_result_": {"problem_state", "changed_state"},
-    "mech_intervention_": {"problem_state", "contact_action"},
+    # Intervention needs the product present and a visible action/contact point,
+    # not a separate baseline state.
+    "mech_intervention_": {"object_presence", "contact_action"},
+    # A result proves its visible result state; contrast is conditional on the atom text.
+    "mech_result_": {"changed_state"},
+RESULT_CONTRAST_CUES = re.compile(
+    r"\b(?:before\s*(?:and|[-/])\s*after|compared\s+(?:with|to)|versus|vs\.?|"
+    r"side[- ]by[- ]side|untreated|untouched|dirty\s+(?:vs\.?|versus)\s+clean|"
+    r"clean\s+(?:vs\.?|versus)\s+dirty|left[- ](?:vs\.?|versus)[- ]right)\b",
+    re.IGNORECASE,
+)
+
+
+def required_aspects(atom) -> set[str]:
+    """Visual proof aspects required by the atom's role and the claim it makes."""
+    atom_id = str(getattr(atom, "id", "") or "")
+    base = next((set(value) for prefix, value in ROLE_ASPECTS.items() if atom_id.startswith(prefix)), set())
+    if atom_id.startswith("mech_result_") and RESULT_CONTRAST_CUES.search(str(getattr(atom, "text", "") or "")):
+        base.add("problem_state")
+    return base
 }
 
 OBSERVE_SYSTEM = """You are a careful visual inspector. You will see ONE image. You are NOT told what the image is supposed to show. Do not guess purposes, brands, or intentions.
 List only concrete, visible facts as short observations. Cover, when visible:
 - every distinct object: what it is, where it is in the frame (left/center/right, top/middle/bottom), and its state;
 - every region whose surface condition differs from its neighbours, including its location, relative size, and borders;
+- for spray/cleaning scenes, distinguish visible foam/suds/bubbles or thick residue from a fine mist, water droplets, and wet streaks; record coverage and drips when visible, but do not guess the liquid's composition;
 - adjacent objects or regions: clearly touching/overlapping, clearly separate, or unclear;
 - any visible text or logo, copied as seen.
 Rules: one fact per observation, at most 25 words each, no reasoning, no requirements, no 'probably'. If something is unclear, say 'unclear'. Never state a fact you cannot see.
@@ -46,10 +65,10 @@ For each requirement, split it into the smallest independent conditions (1 to 6)
 - "observation_ids": inventory ids that directly show it ([] if none);
 - "quote": up to 12 words copied EXACTLY from one cited observation ("" if none);
 - "holds": true only if the cited observations plainly show it; false if they contradict it, are ambiguous, or do not mention it.
-For ids starting mech_result_, you MUST include both problem_state and changed_state conditions. For ids starting mech_intervention_, you MUST include both problem_state and contact_action conditions. For all other ids use the applicable aspect(s), including object_presence when relevant.
+For ids starting mech_result_, you MUST include a changed_state condition. Add a problem_state condition ONLY when the requirement explicitly claims a comparison/contrast (before-and-after, untreated-versus-treated, dirty-versus-clean, side-by-side, etc.). For ids starting mech_intervention_, you MUST include both object_presence and contact_action conditions; do NOT require a separate problem_state. For all other ids use the applicable aspect(s), including object_presence when relevant.
 Use non_visual ONLY for a claim no still image can establish, and set non_visual_reason to one of: brand_or_model (brand/model identity, checked separately against the target reference), power_or_internal (power source or internal workings), purpose_or_benefit (purpose/marketing benefit), time_or_motion (motion, speed or elapsed time). Never mark object presence, positions, contact, quantities, surface state or composition as non_visual. Every requirement still needs at least one visually checkable condition.
 Absence of evidence is false. Do not infer an after-state, contact, or effect that the inventory does not state. Nearness is not contact. Do not omit any part of a requirement.
-For requirements that claim a change or result, include one condition for the starting/problem state and one for the visibly changed state. For requirements that claim an action on something, include a condition for visible contact or action between the two things.
+For a non-contrast result requirement, prove the visible result state with a changed_state condition; do not invent or demand a baseline the atom does not claim. If the requirement explicitly claims a contrast, prove both problem_state and changed_state. For intervention requirements, prove object_presence and visible contact/action between the product and the exact problem material.
 Reply ONLY with JSON: {"results": [{"id": "<requirement id>", "conditions": [{"aspect": "...", "non_visual_reason": "<only for non_visual>", "claim": "...", "observation_ids": ["o1"], "quote": "...", "holds": true}]}]}"""
 
 
@@ -152,7 +171,8 @@ def decide(data, atoms, observations: list[dict]) -> dict:
                             "conditions": 0}
             continue
         aspects = {c.get("aspect") for c in conditions}
-        required = next((value for prefix, value in ROLE_ASPECTS.items() if atom_id.startswith(prefix)), set())
+        atom = next((item for item in atoms if item.id == atom_id), None)
+        required = required_aspects(atom) if atom is not None else set()
         if not required.issubset(aspects):
             missing = sorted(required - aspects)
             out[atom_id] = {"pass": False, "evidence": ("no visual confirmation - missing proof aspect: " + ", ".join(missing))[:120],
